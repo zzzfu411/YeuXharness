@@ -1,0 +1,78 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TurnResult",
+  "type": "object",
+  "required": [
+    "turn"
+  ],
+  "properties": {
+    "turn": {
+      "$ref": "#/definitions/Turn"
+    }
+  },
+  "definitions": {
+    "Turn": {
+      "type": "object",
+      "required": [
+        "agent_id",
+        "id",
+        "started_at",
+        "state",
+        "thread_id"
+      ],
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "ended_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "failure": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "state": {
+          "$ref": "#/definitions/TurnState"
+        },
+        "thread_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "TurnState": {
+      "type": "string",
+      "enum": [
+        "accepted",
+        "building_context",
+        "requesting_model",
+        "streaming",
+        "proposed_tools",
+        "waiting_for_approval",
+        "authorizing",
+        "scheduling",
+        "executing",
+        "integrating_results",
+        "waiting_for_input",
+        "cancelling",
+        "completed",
+        "cancelled",
+        "failed"
+      ]
+    }
+  }
+}

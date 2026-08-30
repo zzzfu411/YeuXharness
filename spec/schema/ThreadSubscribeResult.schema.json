@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ThreadSubscribeResult",
+  "type": "object",
+  "required": [
+    "replayedThroughSeq",
+    "subscriptionId"
+  ],
+  "properties": {
+    "replayedThroughSeq": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "subscriptionId": {
+      "type": "string"
+    }
+  }
+}

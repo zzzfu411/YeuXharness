@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ThreadForkParams",
+  "type": "object",
+  "required": [
+    "atSeq",
+    "threadId"
+  ],
+  "properties": {
+    "atSeq": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "threadId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "title": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

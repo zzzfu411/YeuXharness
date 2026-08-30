@@ -1,0 +1,161 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AgentSpawnSpec",
+  "type": "object",
+  "required": [
+    "budget",
+    "child_agent_id",
+    "depth",
+    "grant",
+    "isolation",
+    "parent_agent_id",
+    "parent_thread_id",
+    "run_id",
+    "task",
+    "workspace_id"
+  ],
+  "properties": {
+    "budget": {
+      "$ref": "#/definitions/RunBudget"
+    },
+    "child_agent_id": {
+      "type": "string"
+    },
+    "depth": {
+      "description": "v1 permits only `1`; kept explicit so the kernel can reject escalation.",
+      "type": "integer",
+      "format": "uint8",
+      "minimum": 0.0
+    },
+    "grant": {
+      "$ref": "#/definitions/CapabilityGrant"
+    },
+    "isolation": {
+      "$ref": "#/definitions/WorkspaceIsolation"
+    },
+    "parent_agent_id": {
+      "type": "string"
+    },
+    "parent_thread_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "run_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "task": {
+      "type": "string"
+    },
+    "workspace_id": {
+      "type": "string",
+      "format": "uuid"
+    }
+  },
+  "definitions": {
+    "CapabilityGrant": {
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "external_write": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "filesystem_delete": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "filesystem_read": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "filesystem_write": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mode": {
+          "$ref": "#/definitions/CapabilityMode"
+        },
+        "network": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "process": {
+          "default": false,
+          "type": "boolean"
+        },
+        "secrets": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "CapabilityMode": {
+      "type": "string",
+      "enum": [
+        "observe",
+        "build",
+        "operate"
+      ]
+    },
+    "RunBudget": {
+      "type": "object",
+      "required": [
+        "max_cost_micros",
+        "max_duration_seconds",
+        "max_tokens"
+      ],
+      "properties": {
+        "max_cost_micros": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_duration_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "WorkspaceIsolation": {
+      "type": "string",
+      "enum": [
+        "shared_read_only",
+        "git_worktree"
+      ]
+    }
+  }
+}

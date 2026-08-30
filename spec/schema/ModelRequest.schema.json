@@ -1,0 +1,493 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ModelRequest",
+  "type": "object",
+  "required": [
+    "budget",
+    "messages",
+    "model",
+    "provider",
+    "request_id",
+    "turn_id"
+  ],
+  "properties": {
+    "budget": {
+      "$ref": "#/definitions/TokenBudget"
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ModelMessage"
+      }
+    },
+    "metadata": {
+      "default": null
+    },
+    "model": {
+      "type": "string"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "request_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "tools": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ToolSpec"
+      }
+    },
+    "turn_id": {
+      "type": "string",
+      "format": "uuid"
+    }
+  },
+  "definitions": {
+    "ConcurrencyClass": {
+      "type": "string",
+      "enum": [
+        "structured_read_only",
+        "serial_process",
+        "serial_mutation"
+      ]
+    },
+    "ContentBlock": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "text",
+            "type"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "text"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "text",
+            "type"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "reasoning"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "source_type",
+                "url"
+              ],
+              "properties": {
+                "source_type": {
+                  "type": "string",
+                  "enum": [
+                    "url"
+                  ]
+                },
+                "url": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "data",
+                "source_type"
+              ],
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "source_type": {
+                  "type": "string",
+                  "enum": [
+                    "base64"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "source_type",
+                "uri"
+              ],
+              "properties": {
+                "source_type": {
+                  "type": "string",
+                  "enum": [
+                    "artifact"
+                  ]
+                },
+                "uri": {
+                  "type": "string"
+                }
+              }
+            }
+          ],
+          "required": [
+            "media_type",
+            "type"
+          ],
+          "properties": {
+            "media_type": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "image"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "arguments",
+            "call_id",
+            "name",
+            "type"
+          ],
+          "properties": {
+            "arguments": true,
+            "call_id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "tool_call"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "call_id",
+            "content",
+            "type"
+          ],
+          "properties": {
+            "call_id": {
+              "type": "string"
+            },
+            "content": true,
+            "is_error": {
+              "default": false,
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "tool_result"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "EffectSet": {
+      "type": "object",
+      "required": [
+        "idempotency",
+        "reversibility"
+      ],
+      "properties": {
+        "external_writes": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ExternalEffect"
+          }
+        },
+        "filesystem_delete": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PathScope"
+          }
+        },
+        "filesystem_read": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PathScope"
+          }
+        },
+        "filesystem_write": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PathScope"
+          }
+        },
+        "idempotency": {
+          "$ref": "#/definitions/Idempotency"
+        },
+        "network": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NetworkEffect"
+          }
+        },
+        "processes": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ProcessEffect"
+          }
+        },
+        "reversibility": {
+          "$ref": "#/definitions/Reversibility"
+        },
+        "secrets": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SecretHandle"
+          }
+        }
+      }
+    },
+    "ExternalEffect": {
+      "type": "object",
+      "required": [
+        "operation",
+        "system"
+      ],
+      "properties": {
+        "operation": {
+          "type": "string"
+        },
+        "resource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "system": {
+          "type": "string"
+        }
+      }
+    },
+    "Idempotency": {
+      "type": "string",
+      "enum": [
+        "idempotent",
+        "idempotent_with_key",
+        "non_idempotent",
+        "unknown"
+      ]
+    },
+    "MessageRole": {
+      "type": "string",
+      "enum": [
+        "system",
+        "user",
+        "assistant",
+        "tool"
+      ]
+    },
+    "ModelMessage": {
+      "type": "object",
+      "required": [
+        "content",
+        "role"
+      ],
+      "properties": {
+        "content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ContentBlock"
+          }
+        },
+        "role": {
+          "$ref": "#/definitions/MessageRole"
+        }
+      }
+    },
+    "NetworkEffect": {
+      "type": "object",
+      "required": [
+        "host",
+        "scheme"
+      ],
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "scheme": {
+          "type": "string"
+        }
+      }
+    },
+    "PathScope": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "recursive": {
+          "default": false,
+          "type": "boolean"
+        },
+        "resolved": {
+          "description": "Set after canonical path resolution. An unresolved scope must never be approved.",
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "ProcessEffect": {
+      "type": "object",
+      "required": [
+        "executable"
+      ],
+      "properties": {
+        "argument_digest": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "executable": {
+          "type": "string"
+        },
+        "may_spawn_children": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "Reversibility": {
+      "type": "string",
+      "enum": [
+        "reversible",
+        "compensatable",
+        "irreversible",
+        "unknown"
+      ]
+    },
+    "SecretHandle": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "TokenBudget": {
+      "type": "object",
+      "required": [
+        "max_input_tokens",
+        "max_output_tokens"
+      ],
+      "properties": {
+        "max_input_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ToolSpec": {
+      "type": "object",
+      "required": [
+        "concurrency",
+        "description",
+        "effect_template",
+        "id",
+        "inline_output_budget_bytes",
+        "input_schema",
+        "output_schema",
+        "timeout_ms",
+        "version"
+      ],
+      "properties": {
+        "concurrency": {
+          "$ref": "#/definitions/ConcurrencyClass"
+        },
+        "description": {
+          "type": "string"
+        },
+        "effect_template": {
+          "description": "Registration-time upper bound; prepare may only narrow this set.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/EffectSet"
+            }
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "inline_output_budget_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "input_schema": true,
+        "output_schema": true,
+        "timeout_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

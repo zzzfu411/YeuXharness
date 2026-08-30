@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WorkspaceTrustParams",
+  "type": "object",
+  "required": [
+    "identityDigest",
+    "trust",
+    "workspaceId"
+  ],
+  "properties": {
+    "identityDigest": {
+      "type": "string"
+    },
+    "trust": {
+      "$ref": "#/definitions/WorkspaceTrust"
+    },
+    "workspaceId": {
+      "type": "string",
+      "format": "uuid"
+    }
+  },
+  "definitions": {
+    "WorkspaceTrust": {
+      "type": "string",
+      "enum": [
+        "untrusted",
+        "trusted"
+      ]
+    }
+  }
+}

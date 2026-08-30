@@ -1,0 +1,90 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InitializeResult",
+  "type": "object",
+  "required": [
+    "capabilities",
+    "hostCeiling",
+    "protocolVersion",
+    "serverInfo"
+  ],
+  "properties": {
+    "capabilities": {
+      "$ref": "#/definitions/ServerCapabilities"
+    },
+    "hostCeiling": {
+      "$ref": "#/definitions/CapabilityMode"
+    },
+    "protocolVersion": {
+      "$ref": "#/definitions/ProtocolVersion"
+    },
+    "serverInfo": {
+      "$ref": "#/definitions/ClientInfo"
+    }
+  },
+  "definitions": {
+    "CapabilityMode": {
+      "type": "string",
+      "enum": [
+        "observe",
+        "build",
+        "operate"
+      ]
+    },
+    "ClientInfo": {
+      "type": "object",
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    },
+    "ProtocolVersion": {
+      "type": "object",
+      "required": [
+        "major",
+        "minor"
+      ],
+      "properties": {
+        "major": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "minor": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ServerCapabilities": {
+      "type": "object",
+      "properties": {
+        "jobs": {
+          "default": false,
+          "type": "boolean"
+        },
+        "plugins": {
+          "default": false,
+          "type": "boolean"
+        },
+        "subagents": {
+          "default": false,
+          "type": "boolean"
+        },
+        "unix_socket": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

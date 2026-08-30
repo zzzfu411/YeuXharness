@@ -1,0 +1,274 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TurnStartParams",
+  "type": "object",
+  "required": [
+    "content",
+    "threadId"
+  ],
+  "properties": {
+    "agentId": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "capabilityOverride": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/CapabilityGrant"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "content": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ContentBlock"
+      }
+    },
+    "threadId": {
+      "type": "string",
+      "format": "uuid"
+    }
+  },
+  "definitions": {
+    "CapabilityGrant": {
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "external_write": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "filesystem_delete": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "filesystem_read": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "filesystem_write": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mode": {
+          "$ref": "#/definitions/CapabilityMode"
+        },
+        "network": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "process": {
+          "default": false,
+          "type": "boolean"
+        },
+        "secrets": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "CapabilityMode": {
+      "type": "string",
+      "enum": [
+        "observe",
+        "build",
+        "operate"
+      ]
+    },
+    "ContentBlock": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "text",
+            "type"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "text"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "text",
+            "type"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "reasoning"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "source_type",
+                "url"
+              ],
+              "properties": {
+                "source_type": {
+                  "type": "string",
+                  "enum": [
+                    "url"
+                  ]
+                },
+                "url": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "data",
+                "source_type"
+              ],
+              "properties": {
+                "data": {
+                  "type": "string"
+                },
+                "source_type": {
+                  "type": "string",
+                  "enum": [
+                    "base64"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "source_type",
+                "uri"
+              ],
+              "properties": {
+                "source_type": {
+                  "type": "string",
+                  "enum": [
+                    "artifact"
+                  ]
+                },
+                "uri": {
+                  "type": "string"
+                }
+              }
+            }
+          ],
+          "required": [
+            "media_type",
+            "type"
+          ],
+          "properties": {
+            "media_type": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "image"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "arguments",
+            "call_id",
+            "name",
+            "type"
+          ],
+          "properties": {
+            "arguments": true,
+            "call_id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "tool_call"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "call_id",
+            "content",
+            "type"
+          ],
+          "properties": {
+            "call_id": {
+              "type": "string"
+            },
+            "content": true,
+            "is_error": {
+              "default": false,
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "tool_result"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

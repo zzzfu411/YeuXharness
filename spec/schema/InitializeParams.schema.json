@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InitializeParams",
+  "type": "object",
+  "required": [
+    "clientInfo",
+    "protocolVersion"
+  ],
+  "properties": {
+    "capabilities": {
+      "default": {
+        "event_replay": false,
+        "rich_content": false,
+        "server_requests": false
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ClientCapabilities"
+        }
+      ]
+    },
+    "clientInfo": {
+      "$ref": "#/definitions/ClientInfo"
+    },
+    "protocolVersion": {
+      "$ref": "#/definitions/ProtocolVersion"
+    }
+  },
+  "definitions": {
+    "ClientCapabilities": {
+      "type": "object",
+      "properties": {
+        "event_replay": {
+          "default": false,
+          "type": "boolean"
+        },
+        "rich_content": {
+          "default": false,
+          "type": "boolean"
+        },
+        "server_requests": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "ClientInfo": {
+      "type": "object",
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    },
+    "ProtocolVersion": {
+      "type": "object",
+      "required": [
+        "major",
+        "minor"
+      ],
+      "properties": {
+        "major": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "minor": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

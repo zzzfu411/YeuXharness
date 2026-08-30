@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ModelListResult",
+  "type": "object",
+  "required": [
+    "models"
+  ],
+  "properties": {
+    "models": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ModelDescriptor"
+      }
+    }
+  },
+  "definitions": {
+    "ModelDescriptor": {
+      "type": "object",
+      "required": [
+        "capabilities",
+        "display_name",
+        "model",
+        "provider"
+      ],
+      "properties": {
+        "capabilities": {
+          "$ref": "#/definitions/ProviderCapabilities"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        }
+      }
+    },
+    "ProviderCapabilities": {
+      "type": "object",
+      "required": [
+        "max_context_tokens",
+        "parallel_tool_calls",
+        "prompt_cache",
+        "reasoning",
+        "tool_calls",
+        "vision"
+      ],
+      "properties": {
+        "max_context_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "parallel_tool_calls": {
+          "type": "boolean"
+        },
+        "prompt_cache": {
+          "type": "boolean"
+        },
+        "reasoning": {
+          "$ref": "#/definitions/ReasoningSupport"
+        },
+        "tool_calls": {
+          "type": "boolean"
+        },
+        "vision": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ReasoningSupport": {
+      "type": "string",
+      "enum": [
+        "none",
+        "summary",
+        "full"
+      ]
+    }
+  }
+}

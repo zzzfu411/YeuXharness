@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SkillListResult",
+  "type": "object",
+  "required": [
+    "skills"
+  ],
+  "properties": {
+    "skills": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/SkillDescriptor"
+      }
+    }
+  },
+  "definitions": {
+    "SkillDescriptor": {
+      "type": "object",
+      "required": [
+        "contentDigest",
+        "description",
+        "id",
+        "name",
+        "source",
+        "trusted"
+      ],
+      "properties": {
+        "contentDigest": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "trusted": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ThreadStartParams",
+  "type": "object",
+  "required": [
+    "workspaceId"
+  ],
+  "properties": {
+    "agentId": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "title": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "workspaceId": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}

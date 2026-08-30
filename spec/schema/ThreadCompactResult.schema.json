@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ThreadCompactResult",
+  "type": "object",
+  "required": [
+    "checkpointItem",
+    "sourceEndSeq",
+    "sourceStartSeq"
+  ],
+  "properties": {
+    "checkpointItem": {
+      "$ref": "#/definitions/Item"
+    },
+    "sourceEndSeq": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "sourceStartSeq": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "Item": {
+      "type": "object",
+      "required": [
+        "agent_id",
+        "content",
+        "created_at",
+        "id",
+        "kind",
+        "thread_id",
+        "turn_id"
+      ],
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "content": true,
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "$ref": "#/definitions/ItemKind"
+        },
+        "thread_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "turn_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "ItemKind": {
+      "type": "string",
+      "enum": [
+        "user_message",
+        "assistant_message",
+        "reasoning",
+        "tool_call",
+        "tool_result",
+        "checkpoint",
+        "diagnostic"
+      ]
+    }
+  }
+}

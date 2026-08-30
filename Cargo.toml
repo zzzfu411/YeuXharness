@@ -1,0 +1,23 @@
+[workspace]
+members = [
+  "crates/yeux-protocol",
+  "crates/yeux-core",
+  "crates/yeux-runtime",
+  "crates/yeuxd",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+license = "Apache-2.0"
+repository = "https://github.com/yeux-harness/yeux"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev.package.blake3]
+opt-level = 2

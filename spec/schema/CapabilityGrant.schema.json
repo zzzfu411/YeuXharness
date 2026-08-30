@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CapabilityGrant",
+  "type": "object",
+  "required": [
+    "mode"
+  ],
+  "properties": {
+    "expires_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "external_write": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "filesystem_delete": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "filesystem_read": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "filesystem_write": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "mode": {
+      "$ref": "#/definitions/CapabilityMode"
+    },
+    "network": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "process": {
+      "default": false,
+      "type": "boolean"
+    },
+    "secrets": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "definitions": {
+    "CapabilityMode": {
+      "type": "string",
+      "enum": [
+        "observe",
+        "build",
+        "operate"
+      ]
+    }
+  }
+}

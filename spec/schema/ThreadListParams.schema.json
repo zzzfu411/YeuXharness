@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ThreadListParams",
+  "type": "object",
+  "properties": {
+    "cursor": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "includeArchived": {
+      "default": false,
+      "type": "boolean"
+    },
+    "limit": {
+      "default": 100,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "workspaceId": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    }
+  }
+}

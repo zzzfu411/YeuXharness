@@ -1,0 +1,239 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ToolSpec",
+  "type": "object",
+  "required": [
+    "concurrency",
+    "description",
+    "effect_template",
+    "id",
+    "inline_output_budget_bytes",
+    "input_schema",
+    "output_schema",
+    "timeout_ms",
+    "version"
+  ],
+  "properties": {
+    "concurrency": {
+      "$ref": "#/definitions/ConcurrencyClass"
+    },
+    "description": {
+      "type": "string"
+    },
+    "effect_template": {
+      "description": "Registration-time upper bound; prepare may only narrow this set.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/EffectSet"
+        }
+      ]
+    },
+    "id": {
+      "type": "string"
+    },
+    "inline_output_budget_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "input_schema": true,
+    "output_schema": true,
+    "timeout_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "ConcurrencyClass": {
+      "type": "string",
+      "enum": [
+        "structured_read_only",
+        "serial_process",
+        "serial_mutation"
+      ]
+    },
+    "EffectSet": {
+      "type": "object",
+      "required": [
+        "idempotency",
+        "reversibility"
+      ],
+      "properties": {
+        "external_writes": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ExternalEffect"
+          }
+        },
+        "filesystem_delete": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PathScope"
+          }
+        },
+        "filesystem_read": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PathScope"
+          }
+        },
+        "filesystem_write": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PathScope"
+          }
+        },
+        "idempotency": {
+          "$ref": "#/definitions/Idempotency"
+        },
+        "network": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NetworkEffect"
+          }
+        },
+        "processes": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ProcessEffect"
+          }
+        },
+        "reversibility": {
+          "$ref": "#/definitions/Reversibility"
+        },
+        "secrets": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SecretHandle"
+          }
+        }
+      }
+    },
+    "ExternalEffect": {
+      "type": "object",
+      "required": [
+        "operation",
+        "system"
+      ],
+      "properties": {
+        "operation": {
+          "type": "string"
+        },
+        "resource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "system": {
+          "type": "string"
+        }
+      }
+    },
+    "Idempotency": {
+      "type": "string",
+      "enum": [
+        "idempotent",
+        "idempotent_with_key",
+        "non_idempotent",
+        "unknown"
+      ]
+    },
+    "NetworkEffect": {
+      "type": "object",
+      "required": [
+        "host",
+        "scheme"
+      ],
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "scheme": {
+          "type": "string"
+        }
+      }
+    },
+    "PathScope": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "recursive": {
+          "default": false,
+          "type": "boolean"
+        },
+        "resolved": {
+          "description": "Set after canonical path resolution. An unresolved scope must never be approved.",
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "ProcessEffect": {
+      "type": "object",
+      "required": [
+        "executable"
+      ],
+      "properties": {
+        "argument_digest": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "executable": {
+          "type": "string"
+        },
+        "may_spawn_children": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "Reversibility": {
+      "type": "string",
+      "enum": [
+        "reversible",
+        "compensatable",
+        "irreversible",
+        "unknown"
+      ]
+    },
+    "SecretHandle": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

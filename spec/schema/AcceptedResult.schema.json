@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AcceptedResult",
+  "type": "object",
+  "required": [
+    "accepted"
+  ],
+  "properties": {
+    "accepted": {
+      "type": "boolean"
+    }
+  }
+}

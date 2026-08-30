@@ -1,0 +1,1871 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="paper">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="YeuX Harness Quiet Sequencer terminal interface concept: a safe, replayable local agent session rendered as a quiet technical instrument."
+    />
+    <meta name="color-scheme" content="light dark" />
+    <title>YeuX Harness — Quiet Sequencer</title>
+    <style>
+      :root {
+        --display: "Avenir Next Condensed", "Futura Condensed", "Gill Sans", sans-serif;
+        --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+        --mono: "SFMono-Regular", "Cascadia Code", "Liberation Mono", Menlo, monospace;
+        --hand: "Bradley Hand", "Segoe Print", "Comic Sans MS", cursive;
+
+        --page-max: 1540px;
+        --hairline: 1px;
+        --edge: 2px;
+        --shadow-x: 7px;
+        --shadow-y: 7px;
+        --fast: 140ms;
+        --slow: 900ms;
+      }
+
+      html[data-theme="paper"] {
+        color-scheme: light;
+        --paper: #d8d3cc;
+        --paper-soft: #e5e0d9;
+        --paper-deep: #c8c1b7;
+        --ink: #1b1815;
+        --ink-muted: #655e56;
+        --ink-faint: #8d857a;
+        --accent: #8c3a2c;
+        --accent-strong: #6f2b21;
+        --blue: #173a52;
+        --blue-soft: #315b73;
+        --signal: #326b6d;
+        --success: #35634c;
+        --warning: #8b5f19;
+        --danger: #8c302b;
+        --panel: rgba(229, 224, 217, 0.83);
+        --panel-solid: #e1dcd5;
+        --panel-dark: #c9c2b8;
+        --line: rgba(27, 24, 21, 0.28);
+        --line-strong: rgba(27, 24, 21, 0.74);
+        --shadow: #1b1815;
+        --selection: rgba(140, 58, 44, 0.18);
+        --focus: #173a52;
+        --grid: rgba(27, 24, 21, 0.055);
+        --noise: rgba(50, 43, 36, 0.12);
+        --overlay: rgba(216, 211, 204, 0.92);
+      }
+
+      html[data-theme="nocturne"] {
+        color-scheme: dark;
+        --paper: #000000;
+        --paper-soft: #061016;
+        --paper-deep: #0a1b25;
+        --ink: #d8d3cc;
+        --ink-muted: #9da4a7;
+        --ink-faint: #63717a;
+        --accent: #c75e4b;
+        --accent-strong: #e27b65;
+        --blue: #173a52;
+        --blue-soft: #2f6583;
+        --signal: #70b5bc;
+        --success: #86c69e;
+        --warning: #d1ad62;
+        --danger: #e37e78;
+        --panel: rgba(6, 16, 22, 0.91);
+        --panel-solid: #07141c;
+        --panel-dark: #0d2430;
+        --line: rgba(216, 211, 204, 0.2);
+        --line-strong: rgba(216, 211, 204, 0.68);
+        --shadow: #173a52;
+        --selection: rgba(112, 181, 188, 0.17);
+        --focus: #d8d3cc;
+        --grid: rgba(77, 139, 170, 0.12);
+        --noise: rgba(216, 211, 204, 0.09);
+        --overlay: rgba(0, 0, 0, 0.92);
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      html {
+        min-width: 320px;
+        background: var(--paper);
+        scroll-behavior: smooth;
+      }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        overflow-x: hidden;
+        color: var(--ink);
+        background:
+          linear-gradient(90deg, transparent 0 49.8%, var(--grid) 49.8% 50.2%, transparent 50.2%),
+          linear-gradient(0deg, transparent 0 49.8%, var(--grid) 49.8% 50.2%, transparent 50.2%),
+          var(--paper);
+        background-size: 44px 44px;
+        font-family: var(--serif);
+        transition:
+          color 240ms ease,
+          background-color 240ms ease;
+      }
+
+      body::before,
+      body::after {
+        position: fixed;
+        inset: 0;
+        z-index: -1;
+        pointer-events: none;
+        content: "";
+      }
+
+      body::before {
+        opacity: 0.7;
+        background:
+          radial-gradient(circle at 9% 13%, var(--noise) 0 0.6px, transparent 0.8px),
+          radial-gradient(circle at 74% 62%, var(--noise) 0 0.5px, transparent 0.8px),
+          radial-gradient(circle at 38% 91%, var(--noise) 0 0.45px, transparent 0.75px);
+        background-size: 9px 11px, 13px 17px, 7px 19px;
+      }
+
+      body::after {
+        opacity: 0.24;
+        background:
+          linear-gradient(102deg, transparent 0 41%, var(--noise) 41.1% 41.22%, transparent 41.3%),
+          linear-gradient(83deg, transparent 0 69%, var(--noise) 69.1% 69.18%, transparent 69.26%);
+        background-size: 137px 61px, 191px 83px;
+      }
+
+      ::selection {
+        color: var(--ink);
+        background: var(--selection);
+      }
+
+      button,
+      textarea {
+        font: inherit;
+      }
+
+      button {
+        color: inherit;
+      }
+
+      button:focus-visible,
+      textarea:focus-visible,
+      summary:focus-visible,
+      [role="tab"]:focus-visible,
+      a:focus-visible {
+        outline: 3px solid var(--focus);
+        outline-offset: 3px;
+      }
+
+      .skip-link {
+        position: fixed;
+        top: 10px;
+        left: 10px;
+        z-index: 100;
+        padding: 8px 12px;
+        border: var(--edge) solid var(--ink);
+        color: var(--paper);
+        background: var(--ink);
+        font: 700 12px/1 var(--mono);
+        transform: translateY(-150%);
+      }
+
+      .skip-link:focus {
+        transform: translateY(0);
+      }
+
+      .page-shell {
+        width: min(calc(100% - 40px), var(--page-max));
+        margin: 0 auto;
+        padding: 34px 0 52px;
+      }
+
+      .masthead {
+        position: relative;
+        display: grid;
+        grid-template-columns: minmax(260px, 1fr) auto;
+        gap: 28px;
+        align-items: end;
+        margin: 0 1.2vw 24px 0;
+      }
+
+      .brand-lockup {
+        position: relative;
+        min-height: 112px;
+      }
+
+      .eyebrow,
+      .micro-label,
+      .section-label,
+      .instrument-title,
+      .status-label,
+      .key-hint,
+      .theme-button,
+      .tab-button,
+      .action-button,
+      .session-cell dt,
+      .metric-label {
+        font-family: var(--mono);
+        font-size: 10px;
+        font-weight: 760;
+        line-height: 1.25;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      .eyebrow {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 4px;
+        color: var(--ink-muted);
+      }
+
+      .eyebrow::before {
+        width: 30px;
+        height: 2px;
+        background: var(--accent);
+        content: "";
+      }
+
+      h1 {
+        margin: 0;
+        font-family: var(--display);
+        font-size: clamp(64px, 8vw, 118px);
+        font-weight: 800;
+        font-stretch: condensed;
+        line-height: 0.78;
+        letter-spacing: -0.065em;
+        text-transform: lowercase;
+      }
+
+      .harness-word {
+        position: absolute;
+        top: 17px;
+        left: clamp(182px, 24vw, 344px);
+        padding: 5px 8px 4px;
+        border: var(--edge) solid var(--ink);
+        color: var(--paper);
+        background: var(--ink);
+        font: 800 clamp(11px, 1.2vw, 16px)/1 var(--mono);
+        letter-spacing: 0.2em;
+        text-transform: uppercase;
+        transform: rotate(-1.5deg);
+      }
+
+      .hand-note {
+        position: absolute;
+        left: clamp(222px, 32vw, 450px);
+        bottom: 0;
+        margin: 0;
+        color: var(--accent);
+        font: 17px/1.1 var(--hand);
+        transform: rotate(-3deg);
+      }
+
+      .fish-mark {
+        position: absolute;
+        right: clamp(8px, 4vw, 70px);
+        bottom: -4px;
+        width: 84px;
+        height: 44px;
+        color: var(--blue);
+        overflow: visible;
+        transform: rotate(2deg);
+      }
+
+      html[data-theme="nocturne"] .fish-mark {
+        color: var(--signal);
+      }
+
+      .theme-station {
+        display: grid;
+        gap: 9px;
+        justify-items: end;
+      }
+
+      .theme-readout {
+        color: var(--ink-muted);
+        font: 700 10px/1 var(--mono);
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .theme-switch {
+        display: flex;
+        border: var(--edge) solid var(--ink);
+        box-shadow: 5px 5px 0 var(--shadow);
+      }
+
+      .theme-button {
+        min-width: 98px;
+        padding: 11px 14px 10px;
+        border: 0;
+        border-right: var(--hairline) solid var(--ink);
+        cursor: pointer;
+        color: var(--ink);
+        background: var(--panel-solid);
+        transition:
+          color var(--fast) ease,
+          background var(--fast) ease;
+      }
+
+      .theme-button:last-child {
+        border-right: 0;
+      }
+
+      .theme-button[aria-pressed="true"] {
+        color: var(--paper);
+        background: var(--ink);
+      }
+
+      .theme-button:hover:not([aria-pressed="true"]) {
+        background: var(--paper-deep);
+      }
+
+      .harness-frame {
+        position: relative;
+        border: var(--edge) solid var(--ink);
+        background: var(--panel);
+        box-shadow: var(--shadow-x) var(--shadow-y) 0 var(--shadow);
+        backdrop-filter: blur(8px);
+      }
+
+      .harness-frame::before {
+        position: absolute;
+        top: -10px;
+        right: 9%;
+        width: 74px;
+        height: 18px;
+        border-right: 1px solid color-mix(in srgb, var(--ink) 38%, transparent);
+        border-left: 1px solid color-mix(in srgb, var(--ink) 38%, transparent);
+        background: color-mix(in srgb, var(--paper-soft) 82%, transparent);
+        box-shadow: 0 1px 0 color-mix(in srgb, var(--ink) 20%, transparent);
+        content: "";
+        transform: rotate(1.6deg);
+      }
+
+      .session-bar {
+        display: grid;
+        grid-template-columns: 1.35fr 0.62fr 0.72fr 1fr 0.9fr;
+        min-height: 76px;
+        border-bottom: var(--edge) solid var(--ink);
+        background: var(--panel-solid);
+      }
+
+      .session-cell {
+        display: grid;
+        align-content: center;
+        min-width: 0;
+        margin: 0;
+        padding: 13px 16px 12px;
+        border-right: var(--hairline) solid var(--line-strong);
+      }
+
+      .session-cell:last-child {
+        border-right: 0;
+      }
+
+      .session-cell dt {
+        margin-bottom: 7px;
+        color: var(--ink-faint);
+      }
+
+      .session-cell dd {
+        min-width: 0;
+        margin: 0;
+        overflow: hidden;
+        font: 650 12px/1.35 var(--mono);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .session-cell.workspace dd {
+        font-size: 11px;
+      }
+
+      .status-inline {
+        display: inline-flex;
+        gap: 7px;
+        align-items: center;
+      }
+
+      .status-symbol {
+        display: inline-grid;
+        width: 17px;
+        height: 17px;
+        place-items: center;
+        border: 1px solid currentColor;
+        font: 800 11px/1 var(--mono);
+      }
+
+      .is-safe {
+        color: var(--success);
+      }
+
+      .is-warning {
+        color: var(--warning);
+      }
+
+      .is-danger {
+        color: var(--danger);
+      }
+
+      .is-signal {
+        color: var(--signal);
+      }
+
+      .workspace-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.5fr) minmax(340px, 0.82fr);
+      }
+
+      .timeline-panel,
+      .instrument-column {
+        min-width: 0;
+      }
+
+      .timeline-panel {
+        border-right: var(--edge) solid var(--ink);
+      }
+
+      .instrument-head {
+        display: flex;
+        min-height: 49px;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 16px;
+        border-bottom: var(--hairline) solid var(--line-strong);
+        background:
+          linear-gradient(90deg, var(--blue) 0 9px, transparent 9px),
+          var(--panel-dark);
+      }
+
+      .instrument-title {
+        display: flex;
+        gap: 9px;
+        align-items: center;
+        color: var(--ink);
+      }
+
+      .instrument-index {
+        color: var(--accent);
+      }
+
+      .instrument-meta {
+        color: var(--ink-muted);
+        font: 650 10px/1 var(--mono);
+        letter-spacing: 0.04em;
+      }
+
+      .timeline {
+        position: relative;
+        padding: 28px clamp(20px, 3vw, 42px) 34px;
+      }
+
+      .timeline::before {
+        position: absolute;
+        top: 30px;
+        bottom: 35px;
+        left: clamp(33px, 4.2vw, 57px);
+        width: 1px;
+        background: var(--line-strong);
+        content: "";
+      }
+
+      .turn-intro {
+        display: grid;
+        grid-template-columns: 30px minmax(0, 1fr);
+        gap: 18px;
+        margin-bottom: 30px;
+      }
+
+      .track-number {
+        position: relative;
+        z-index: 1;
+        display: grid;
+        width: 30px;
+        height: 30px;
+        place-items: center;
+        border: var(--edge) solid var(--ink);
+        color: var(--paper);
+        background: var(--ink);
+        font: 800 10px/1 var(--mono);
+        box-shadow: 3px 3px 0 var(--accent);
+      }
+
+      .speaker-label {
+        margin: 0 0 9px;
+        color: var(--accent);
+        font: 800 10px/1 var(--mono);
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+
+      .prompt-copy {
+        max-width: 760px;
+        margin: 0;
+        font-size: clamp(18px, 1.7vw, 25px);
+        font-weight: 560;
+        line-height: 1.45;
+      }
+
+      .event-line {
+        position: relative;
+        display: grid;
+        grid-template-columns: 30px minmax(0, 1fr) auto;
+        gap: 18px;
+        align-items: start;
+        margin: 0 0 22px;
+      }
+
+      .event-node {
+        position: relative;
+        z-index: 1;
+        display: grid;
+        width: 24px;
+        height: 24px;
+        margin: 1px 0 0 3px;
+        place-items: center;
+        border: 1px solid currentColor;
+        color: var(--ink-muted);
+        background: var(--panel-solid);
+        font: 800 12px/1 var(--mono);
+      }
+
+      .event-node.active {
+        color: var(--signal);
+      }
+
+      .event-copy {
+        min-width: 0;
+      }
+
+      .event-title {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: baseline;
+        margin: 0 0 5px;
+        font: 750 12px/1.35 var(--mono);
+      }
+
+      .event-code {
+        color: var(--ink-faint);
+        font-size: 9px;
+        letter-spacing: 0.08em;
+      }
+
+      .event-description {
+        max-width: 730px;
+        margin: 0;
+        color: var(--ink-muted);
+        font-size: 14px;
+        line-height: 1.55;
+      }
+
+      .event-time {
+        padding-top: 4px;
+        color: var(--ink-faint);
+        font: 650 9px/1 var(--mono);
+        white-space: nowrap;
+      }
+
+      .assistant-copy {
+        max-width: 760px;
+        margin: 7px 0 0;
+        padding: 18px 20px 18px 23px;
+        border-left: 5px solid var(--accent);
+        background: color-mix(in srgb, var(--panel-dark) 62%, transparent);
+        font-size: 17px;
+        line-height: 1.66;
+      }
+
+      .assistant-copy p {
+        margin: 0 0 12px;
+      }
+
+      .assistant-copy p:last-child {
+        margin-bottom: 0;
+      }
+
+      .technical-term {
+        padding: 0.05em 0.28em;
+        border-bottom: 1px solid var(--accent);
+        font-family: var(--mono);
+        font-size: 0.85em;
+      }
+
+      .tool-card {
+        margin: 5px 0 25px 48px;
+        border: var(--edge) solid var(--ink);
+        background: var(--panel-solid);
+        box-shadow: 5px 5px 0 var(--blue);
+      }
+
+      .tool-card summary {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        gap: 12px;
+        align-items: center;
+        min-height: 46px;
+        padding: 10px 13px;
+        cursor: pointer;
+        list-style: none;
+      }
+
+      .tool-card summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .tool-icon {
+        display: grid;
+        width: 23px;
+        height: 23px;
+        place-items: center;
+        border: 1px solid var(--signal);
+        color: var(--signal);
+        font: 800 12px/1 var(--mono);
+      }
+
+      .tool-name {
+        min-width: 0;
+        font: 760 11px/1.35 var(--mono);
+      }
+
+      .tool-name small {
+        display: block;
+        margin-top: 3px;
+        color: var(--ink-faint);
+        font-size: 9px;
+        font-weight: 650;
+      }
+
+      .tool-status {
+        display: inline-flex;
+        gap: 6px;
+        align-items: center;
+        color: var(--success);
+        font: 760 9px/1 var(--mono);
+        letter-spacing: 0.08em;
+      }
+
+      .tool-body {
+        display: grid;
+        grid-template-columns: 0.78fr 1.22fr;
+        border-top: var(--hairline) solid var(--line-strong);
+      }
+
+      .tool-facts,
+      .tool-result {
+        min-width: 0;
+        padding: 15px;
+      }
+
+      .tool-facts {
+        border-right: var(--hairline) solid var(--line-strong);
+        background: color-mix(in srgb, var(--panel-dark) 50%, transparent);
+      }
+
+      .fact-list,
+      .effect-grid,
+      .event-fields {
+        margin: 0;
+      }
+
+      .fact-row,
+      .effect-row,
+      .field-row {
+        display: grid;
+        grid-template-columns: minmax(72px, 0.6fr) minmax(0, 1.4fr);
+        gap: 10px;
+        padding: 5px 0;
+        border-bottom: 1px dotted var(--line);
+      }
+
+      .fact-row:last-child,
+      .effect-row:last-child,
+      .field-row:last-child {
+        border-bottom: 0;
+      }
+
+      .fact-row dt,
+      .effect-row dt,
+      .field-row dt {
+        color: var(--ink-faint);
+        font: 650 9px/1.4 var(--mono);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .fact-row dd,
+      .effect-row dd,
+      .field-row dd {
+        min-width: 0;
+        margin: 0;
+        overflow-wrap: anywhere;
+        font: 650 10px/1.45 var(--mono);
+      }
+
+      .tool-result pre {
+        margin: 8px 0 0;
+        overflow: auto;
+        color: var(--ink-muted);
+        font: 600 10px/1.55 var(--mono);
+        white-space: pre-wrap;
+      }
+
+      .instrument-column {
+        display: grid;
+        align-content: start;
+        background: color-mix(in srgb, var(--paper-deep) 35%, transparent);
+      }
+
+      .approval-panel,
+      .inspector-panel,
+      .signal-panel {
+        min-width: 0;
+        border-bottom: var(--edge) solid var(--ink);
+      }
+
+      .approval-panel {
+        position: relative;
+        background: var(--panel-solid);
+      }
+
+      .approval-panel::after {
+        position: absolute;
+        top: 44px;
+        right: 11px;
+        padding: 3px 5px;
+        border: 1px solid var(--warning);
+        color: var(--warning);
+        font: 750 8px/1 var(--mono);
+        letter-spacing: 0.12em;
+        content: "DEMO / FAIL-CLOSED";
+        transform: rotate(1.2deg);
+      }
+
+      .approval-content {
+        padding: 20px 18px 18px;
+      }
+
+      .approval-state {
+        display: flex;
+        gap: 9px;
+        align-items: center;
+        margin: 0 0 15px;
+        color: var(--warning);
+        font: 800 11px/1.35 var(--mono);
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+
+      .approval-state::before {
+        display: grid;
+        width: 25px;
+        height: 25px;
+        place-items: center;
+        border: 2px solid currentColor;
+        content: "?";
+      }
+
+      .approval-panel[data-outcome="allowed"] .approval-state {
+        color: var(--success);
+      }
+
+      .approval-panel[data-outcome="allowed"] .approval-state::before {
+        content: "✓";
+      }
+
+      .approval-panel[data-outcome="denied"] .approval-state {
+        color: var(--danger);
+      }
+
+      .approval-panel[data-outcome="denied"] .approval-state::before {
+        content: "×";
+      }
+
+      .approval-tool {
+        margin: 0 0 4px;
+        font: 800 14px/1.35 var(--mono);
+      }
+
+      .approval-reason {
+        margin: 0 0 14px;
+        color: var(--ink-muted);
+        font-size: 14px;
+        line-height: 1.5;
+      }
+
+      .effect-grid {
+        padding: 10px 12px;
+        border: 1px solid var(--line-strong);
+        background: color-mix(in srgb, var(--panel-dark) 50%, transparent);
+      }
+
+      .effect-row dd strong {
+        color: var(--warning);
+      }
+
+      .approval-actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 9px;
+        margin-top: 15px;
+      }
+
+      .action-button {
+        min-height: 40px;
+        padding: 10px 12px;
+        border: var(--edge) solid var(--ink);
+        cursor: pointer;
+        background: transparent;
+        transition:
+          transform var(--fast) ease,
+          box-shadow var(--fast) ease,
+          background var(--fast) ease;
+      }
+
+      .action-button:hover {
+        transform: translate(-2px, -2px);
+        box-shadow: 3px 3px 0 var(--shadow);
+      }
+
+      .action-button.allow {
+        color: var(--paper);
+        background: var(--ink);
+      }
+
+      .action-button.deny {
+        color: var(--danger);
+        border-color: var(--danger);
+      }
+
+      .approval-footnote {
+        margin: 11px 0 0;
+        color: var(--ink-faint);
+        font: 600 9px/1.45 var(--mono);
+      }
+
+      .inspector-panel {
+        background: var(--panel);
+      }
+
+      .tabs {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        border-bottom: var(--hairline) solid var(--line-strong);
+      }
+
+      .tab-button {
+        min-height: 38px;
+        padding: 8px 6px;
+        border: 0;
+        border-right: var(--hairline) solid var(--line-strong);
+        cursor: pointer;
+        color: var(--ink-muted);
+        background: transparent;
+      }
+
+      .tab-button:last-child {
+        border-right: 0;
+      }
+
+      .tab-button[aria-selected="true"] {
+        color: var(--paper);
+        background: var(--blue);
+      }
+
+      .tab-panel {
+        min-height: 238px;
+        padding: 16px 18px 18px;
+      }
+
+      .tab-panel[hidden] {
+        display: none;
+      }
+
+      .inspector-callout {
+        margin: 0 0 13px;
+        padding: 8px 10px;
+        border-left: 4px solid var(--signal);
+        color: var(--ink-muted);
+        background: color-mix(in srgb, var(--blue) 11%, transparent);
+        font: 650 10px/1.5 var(--mono);
+      }
+
+      .policy-equation {
+        margin: 8px 0 15px;
+        padding: 13px 12px;
+        border: var(--edge) solid var(--ink);
+        color: var(--paper);
+        background: var(--ink);
+        font: 700 10px/1.7 var(--mono);
+        box-shadow: 4px 4px 0 var(--accent);
+      }
+
+      .policy-equation .operator {
+        color: var(--accent-strong);
+      }
+
+      html[data-theme="paper"] .policy-equation .operator {
+        color: #ef8d73;
+      }
+
+      .replay-stamp {
+        display: inline-block;
+        margin: 4px 0 15px;
+        padding: 8px 10px 7px;
+        border: 2px solid var(--success);
+        color: var(--success);
+        font: 800 10px/1 var(--mono);
+        letter-spacing: 0.1em;
+        transform: rotate(-1deg);
+      }
+
+      .signal-panel {
+        border-bottom: 0;
+        background: var(--panel-solid);
+      }
+
+      .signal-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+      }
+
+      .signal-metric {
+        min-width: 0;
+        padding: 14px 12px 13px;
+        border-right: var(--hairline) solid var(--line-strong);
+      }
+
+      .signal-metric:last-child {
+        border-right: 0;
+      }
+
+      .metric-label {
+        display: block;
+        margin-bottom: 6px;
+        color: var(--ink-faint);
+      }
+
+      .metric-value {
+        display: block;
+        overflow: hidden;
+        font: 800 15px/1 var(--mono);
+        text-overflow: ellipsis;
+      }
+
+      .composer {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        gap: 13px;
+        align-items: end;
+        padding: 14px 16px;
+        border-top: var(--edge) solid var(--ink);
+        background: var(--panel-solid);
+      }
+
+      .composer-mark {
+        display: grid;
+        width: 35px;
+        height: 35px;
+        margin-bottom: 2px;
+        place-items: center;
+        border: var(--edge) solid var(--ink);
+        color: var(--paper);
+        background: var(--ink);
+        font: 800 18px/1 var(--mono);
+      }
+
+      .composer-field {
+        min-width: 0;
+      }
+
+      .composer-field label {
+        display: block;
+        margin: 0 0 6px;
+        color: var(--ink-faint);
+        font: 700 9px/1 var(--mono);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .composer textarea {
+        display: block;
+        width: 100%;
+        min-height: 53px;
+        max-height: 160px;
+        resize: vertical;
+        padding: 9px 0 4px;
+        border: 0;
+        border-bottom: 1px solid var(--line-strong);
+        border-radius: 0;
+        color: var(--ink);
+        background: transparent;
+        font: 560 15px/1.5 var(--serif);
+      }
+
+      .composer textarea::placeholder {
+        color: var(--ink-faint);
+        opacity: 1;
+      }
+
+      .composer textarea:focus-visible {
+        outline: 0;
+        border-bottom: 3px solid var(--focus);
+      }
+
+      .send-button {
+        display: grid;
+        width: 52px;
+        height: 52px;
+        place-items: center;
+        border: var(--edge) solid var(--ink);
+        cursor: pointer;
+        color: var(--paper);
+        background: var(--accent);
+        box-shadow: 4px 4px 0 var(--shadow);
+        font: 800 17px/1 var(--mono);
+        transition:
+          transform var(--fast) ease,
+          box-shadow var(--fast) ease;
+      }
+
+      .send-button:hover {
+        transform: translate(2px, 2px);
+        box-shadow: 2px 2px 0 var(--shadow);
+      }
+
+      .composer-footer {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 16px;
+        justify-content: space-between;
+        padding: 9px 16px 10px 64px;
+        border-top: var(--hairline) solid var(--line);
+        color: var(--ink-faint);
+        background: var(--panel-dark);
+        font: 650 9px/1.4 var(--mono);
+      }
+
+      .key-hint {
+        color: var(--ink-muted);
+      }
+
+      .key-hint kbd {
+        padding: 2px 4px;
+        border: 1px solid var(--line-strong);
+        color: var(--ink);
+        background: var(--panel-solid);
+        font: inherit;
+      }
+
+      .page-footer {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 24px;
+        align-items: start;
+        margin-top: 24px;
+        color: var(--ink-muted);
+      }
+
+      .design-note {
+        max-width: 760px;
+        margin: 0;
+        font-size: 13px;
+        line-height: 1.55;
+      }
+
+      .design-note strong {
+        color: var(--ink);
+      }
+
+      .version-mark {
+        padding-top: 3px;
+        color: var(--ink-faint);
+        font: 700 9px/1.5 var(--mono);
+        letter-spacing: 0.12em;
+        text-align: right;
+        text-transform: uppercase;
+      }
+
+      .pulse {
+        animation: quiet-pulse var(--slow) steps(2, end) infinite;
+      }
+
+      @keyframes quiet-pulse {
+        0%,
+        100% {
+          opacity: 0.45;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
+
+      @media (max-width: 1120px) {
+        .session-bar {
+          grid-template-columns: 1.4fr repeat(2, 0.7fr) 1fr;
+        }
+
+        .session-cell.transport {
+          display: none;
+        }
+
+        .workspace-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .timeline-panel {
+          border-right: 0;
+          border-bottom: var(--edge) solid var(--ink);
+        }
+
+        .instrument-column {
+          grid-template-columns: minmax(340px, 0.9fr) minmax(0, 1.1fr);
+        }
+
+        .approval-panel {
+          border-right: var(--edge) solid var(--ink);
+        }
+
+        .signal-panel {
+          grid-column: 1 / -1;
+          border-top: var(--edge) solid var(--ink);
+        }
+      }
+
+      @media (max-width: 780px) {
+        .page-shell {
+          width: min(calc(100% - 22px), var(--page-max));
+          padding-top: 22px;
+        }
+
+        .masthead {
+          grid-template-columns: 1fr;
+          gap: 15px;
+        }
+
+        .brand-lockup {
+          min-height: 100px;
+        }
+
+        .harness-word {
+          left: 152px;
+        }
+
+        .hand-note {
+          left: 170px;
+          font-size: 14px;
+        }
+
+        .fish-mark {
+          right: 0;
+          width: 65px;
+        }
+
+        .theme-station {
+          justify-items: start;
+        }
+
+        .theme-switch {
+          width: 100%;
+        }
+
+        .theme-button {
+          flex: 1;
+        }
+
+        .session-bar {
+          grid-template-columns: 1.4fr 0.8fr;
+        }
+
+        .session-cell {
+          min-height: 64px;
+          border-bottom: var(--hairline) solid var(--line-strong);
+        }
+
+        .session-cell:nth-child(2n) {
+          border-right: 0;
+        }
+
+        .session-cell:nth-last-child(-n + 2) {
+          border-bottom: 0;
+        }
+
+        .timeline {
+          padding-right: 16px;
+          padding-left: 16px;
+        }
+
+        .timeline::before {
+          left: 29px;
+        }
+
+        .turn-intro,
+        .event-line {
+          grid-template-columns: 28px minmax(0, 1fr);
+          gap: 12px;
+        }
+
+        .event-time {
+          display: none;
+        }
+
+        .tool-card {
+          margin-left: 40px;
+        }
+
+        .tool-body {
+          grid-template-columns: 1fr;
+        }
+
+        .tool-facts {
+          border-right: 0;
+          border-bottom: var(--hairline) solid var(--line-strong);
+        }
+
+        .instrument-column {
+          grid-template-columns: 1fr;
+        }
+
+        .approval-panel {
+          border-right: 0;
+        }
+
+        .approval-actions {
+          grid-template-columns: 1fr;
+        }
+
+        .composer {
+          grid-template-columns: auto minmax(0, 1fr);
+        }
+
+        .send-button {
+          grid-column: 2;
+          width: 100%;
+          height: 40px;
+        }
+
+        .composer-footer {
+          padding-left: 16px;
+        }
+
+        .page-footer {
+          grid-template-columns: 1fr;
+        }
+
+        .version-mark {
+          text-align: left;
+        }
+      }
+
+      @media (max-width: 500px) {
+        .fish-mark,
+        .hand-note {
+          display: none;
+        }
+
+        .brand-lockup {
+          min-height: 142px;
+        }
+
+        .harness-word {
+          top: 88px;
+          left: 3px;
+        }
+
+        .session-bar {
+          grid-template-columns: 1fr;
+        }
+
+        .session-cell,
+        .session-cell:nth-child(2n),
+        .session-cell:nth-last-child(-n + 2) {
+          border-right: 0;
+          border-bottom: var(--hairline) solid var(--line-strong);
+        }
+
+        .session-cell:last-child {
+          border-bottom: 0;
+        }
+
+        .tool-card {
+          margin-left: 0;
+        }
+
+        .tool-card summary {
+          grid-template-columns: auto minmax(0, 1fr);
+        }
+
+        .tool-status {
+          grid-column: 2;
+        }
+
+        .signal-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .signal-metric {
+          border-right: 0;
+          border-bottom: var(--hairline) solid var(--line-strong);
+        }
+
+        .signal-metric:last-child {
+          border-bottom: 0;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          animation-duration: 0.001ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.001ms !important;
+        }
+      }
+
+      @media print {
+        body {
+          background: #fff;
+        }
+
+        body::before,
+        body::after,
+        .theme-station,
+        .composer,
+        .composer-footer,
+        .approval-actions {
+          display: none;
+        }
+
+        .page-shell {
+          width: 100%;
+          padding: 0;
+        }
+
+        .harness-frame,
+        .theme-switch,
+        .tool-card {
+          box-shadow: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#composer-input">跳到输入区</a>
+
+    <div class="page-shell">
+      <header class="masthead">
+        <div class="brand-lockup">
+          <div class="eyebrow">local agent instrument / concept 01</div>
+          <h1>yeux</h1>
+          <span class="harness-word">harness</span>
+          <p class="hand-note">listen to the ledger, not the noise.</p>
+          <svg class="fish-mark" viewBox="0 0 108 56" aria-hidden="true">
+            <path
+              d="M18 29C31 12 57 8 79 24C88 18 97 15 104 16C101 24 101 32 104 40C96 40 87 37 79 32C57 48 31 45 18 29Z"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path d="M24 29C39 25 54 25 72 29" fill="none" stroke="currentColor" stroke-width="1.5" />
+            <circle cx="36" cy="23" r="2.3" fill="currentColor" />
+            <path d="M48 13C52 18 55 20 63 21" fill="none" stroke="currentColor" stroke-width="1.4" />
+            <path d="M48 44C53 38 57 36 64 35" fill="none" stroke="currentColor" stroke-width="1.4" />
+          </svg>
+        </div>
+
+        <div class="theme-station">
+          <div class="theme-readout" id="theme-readout" aria-live="polite">Theme / Paper</div>
+          <div class="theme-switch" role="group" aria-label="选择界面主题">
+            <button class="theme-button" type="button" data-theme-choice="paper" aria-pressed="true">
+              Paper
+            </button>
+            <button class="theme-button" type="button" data-theme-choice="nocturne" aria-pressed="false">
+              Nocturne
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main class="harness-frame" aria-label="YeuX Harness Quiet Sequencer 会话概念">
+        <section class="session-bar" aria-label="会话状态栏">
+          <dl class="session-cell workspace">
+            <dt>Workspace / 8f3a</dt>
+            <dd title="/Users/zfu/Documents/develop/YeuX/Harness">
+              /Users/zfu/Documents/develop/YeuX/Harness
+            </dd>
+          </dl>
+          <dl class="session-cell">
+            <dt>Trust</dt>
+            <dd class="status-inline is-safe"><span class="status-symbol">✓</span> trusted</dd>
+          </dl>
+          <dl class="session-cell">
+            <dt>Mode</dt>
+            <dd class="status-inline"><span class="status-symbol">B</span> build</dd>
+          </dl>
+          <dl class="session-cell">
+            <dt>Provider / Model</dt>
+            <dd title="openai-compatible / local-qwen">openai-compatible / local-qwen</dd>
+          </dl>
+          <dl class="session-cell transport">
+            <dt>Transport</dt>
+            <dd class="status-inline is-safe"><span class="status-symbol">✓</span> unix socket</dd>
+          </dl>
+        </section>
+
+        <div class="workspace-grid">
+          <section class="timeline-panel" aria-labelledby="timeline-title">
+            <header class="instrument-head">
+              <h2 class="instrument-title" id="timeline-title">
+                <span class="instrument-index">01</span> Session timeline
+              </h2>
+              <span class="instrument-meta">thread 0195…a7d1 / seq 01—14</span>
+            </header>
+
+            <div class="timeline">
+              <article class="turn-intro">
+                <span class="track-number" aria-hidden="true">01</span>
+                <div>
+                  <p class="speaker-label">You / 00:31:12</p>
+                  <p class="prompt-copy">检查 replay 边界，确认只读任务不会重调模型或工具，并给出一份可核验的说明。</p>
+                </div>
+              </article>
+
+              <article class="event-line">
+                <span class="event-node" aria-hidden="true">◌</span>
+                <div class="event-copy">
+                  <h3 class="event-title">
+                    building context <span class="event-code">turn/state_changed · seq 04</span>
+                  </h3>
+                  <p class="event-description">
+                    从 root 到 leaf 按每层 parent_seq 截断谱系；只读取 ledger 中已持久化的消息投影。
+                  </p>
+                </div>
+                <time class="event-time" datetime="2026-08-30T00:31:12+08:00">+0.18s</time>
+              </article>
+
+              <article class="event-line">
+                <span class="event-node active pulse" aria-hidden="true">↗</span>
+                <div class="event-copy">
+                  <h3 class="event-title">
+                    requesting model <span class="event-code">model/requested · seq 06</span>
+                  </h3>
+                  <p class="event-description">
+                    provider-neutral request / no cross-provider fallback / max output 4,096 tokens
+                  </p>
+                </div>
+                <time class="event-time" datetime="2026-08-30T00:31:13+08:00">+0.63s</time>
+              </article>
+
+              <article class="event-line">
+                <span class="event-node active" aria-hidden="true">≈</span>
+                <div class="event-copy">
+                  <h3 class="event-title">
+                    assistant stream <span class="event-code">model/event · seq 07—09</span>
+                  </h3>
+                  <div class="assistant-copy">
+                    <p>
+                      YeuX 的 replay 是一条单向读取路径：
+                      <span class="technical-term">persisted events → validate → projection</span>。
+                    </p>
+                    <p>
+                      它不实例化 provider、工具执行器或网络客户端；任何未知的非幂等调用只能进入 reconciliation，不能自动重试。
+                    </p>
+                  </div>
+                </div>
+                <time class="event-time" datetime="2026-08-30T00:31:15+08:00">+2.41s</time>
+              </article>
+
+              <details class="tool-card" open>
+                <summary>
+                  <span class="tool-icon" aria-hidden="true">◇</span>
+                  <span class="tool-name">
+                    workspace.search@1
+                    <small>structured read-only · ordered result 01/01</small>
+                  </span>
+                  <span class="tool-status"><span aria-hidden="true">✓</span> completed</span>
+                </summary>
+                <div class="tool-body">
+                  <div class="tool-facts">
+                    <dl class="fact-list">
+                      <div class="fact-row">
+                        <dt>scope</dt>
+                        <dd>docs/**, crates/**</dd>
+                      </div>
+                      <div class="fact-row">
+                        <dt>effects</dt>
+                        <dd>filesystem_read only</dd>
+                      </div>
+                      <div class="fact-row">
+                        <dt>network</dt>
+                        <dd>none</dd>
+                      </div>
+                      <div class="fact-row">
+                        <dt>causation</dt>
+                        <dd>cmd_0195…d2a4</dd>
+                      </div>
+                    </dl>
+                  </div>
+                  <div class="tool-result">
+                    <span class="micro-label">Result / 3 matches</span>
+                    <pre>docs/ARCHITECTURE.md:104  Replay
+crates/yeux-core/src/projection.rs:418  replay(...)
+crates/yeux-runtime/src/ledger.rs:554  EventLedger::replay</pre>
+                  </div>
+                </div>
+              </details>
+
+              <article class="event-line">
+                <span class="event-node is-safe" aria-hidden="true">✓</span>
+                <div class="event-copy">
+                  <h3 class="event-title">
+                    read-only finding settled <span class="event-code">turn/state_changed · seq 14</span>
+                  </h3>
+                  <p class="event-description">
+                    Projection rebuilt with zero provider, network and tool calls. Evidence remains addressable by event seq.
+                  </p>
+                </div>
+                <time class="event-time" datetime="2026-08-30T00:31:19+08:00">+6.84s</time>
+              </article>
+            </div>
+          </section>
+
+          <aside class="instrument-column" aria-label="审批、事件检查器和会话信号">
+            <section class="approval-panel" id="approval-panel" data-outcome="pending" aria-labelledby="approval-title">
+              <header class="instrument-head">
+                <h2 class="instrument-title" id="approval-title">
+                  <span class="instrument-index">02</span> Approval gate
+                </h2>
+                <span class="instrument-meta">expires 00:45</span>
+              </header>
+              <div class="approval-content">
+                <p class="approval-state" id="approval-state" role="status">waiting for explicit approval</p>
+                <p class="approval-tool">workspace.apply_patch@1</p>
+                <p class="approval-reason">更新审计路线图中的 M1 验收条目；内容变化时必须拒绝覆盖。</p>
+                <dl class="effect-grid">
+                  <div class="effect-row">
+                    <dt>target</dt>
+                    <dd>docs/ROADMAP.md</dd>
+                  </div>
+                  <div class="effect-row">
+                    <dt>effect</dt>
+                    <dd><strong>filesystem_write / 1 file</strong></dd>
+                  </div>
+                  <div class="effect-row">
+                    <dt>base hash</dt>
+                    <dd>b3:72e9…f18c</dd>
+                  </div>
+                  <div class="effect-row">
+                    <dt>network</dt>
+                    <dd>none</dd>
+                  </div>
+                  <div class="effect-row">
+                    <dt>process</dt>
+                    <dd>none</dd>
+                  </div>
+                  <div class="effect-row">
+                    <dt>binding</dt>
+                    <dd>sha256:d42f…91c8</dd>
+                  </div>
+                </dl>
+                <div class="approval-actions" aria-label="概念审批操作">
+                  <button class="action-button allow" type="button" data-approval="allowed">A · Allow once</button>
+                  <button class="action-button deny" type="button" data-approval="denied">D · Deny / default</button>
+                </div>
+                <p class="approval-footnote">
+                  Concept interaction only. A changed argument, tool version, workspace identity or effect digest invalidates this approval.
+                </p>
+              </div>
+            </section>
+
+            <section class="inspector-panel" aria-labelledby="inspector-title">
+              <header class="instrument-head">
+                <h2 class="instrument-title" id="inspector-title">
+                  <span class="instrument-index">03</span> Inspector
+                </h2>
+                <span class="instrument-meta">read-only client view</span>
+              </header>
+
+              <div class="tabs" role="tablist" aria-label="检查器视图">
+                <button
+                  class="tab-button"
+                  type="button"
+                  id="event-tab"
+                  role="tab"
+                  aria-selected="true"
+                  aria-controls="event-panel"
+                  tabindex="0"
+                  data-tab="event"
+                >
+                  Event
+                </button>
+                <button
+                  class="tab-button"
+                  type="button"
+                  id="policy-tab"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="policy-panel"
+                  tabindex="-1"
+                  data-tab="policy"
+                >
+                  Policy
+                </button>
+                <button
+                  class="tab-button"
+                  type="button"
+                  id="replay-tab"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="replay-panel"
+                  tabindex="-1"
+                  data-tab="replay"
+                >
+                  Replay
+                </button>
+              </div>
+
+              <div class="tab-panel" id="event-panel" role="tabpanel" aria-labelledby="event-tab" data-panel="event">
+                <p class="inspector-callout">Selected: turn/state_changed / terminal projection event</p>
+                <dl class="event-fields">
+                  <div class="field-row">
+                    <dt>seq</dt>
+                    <dd>14 / thread-local monotonic</dd>
+                  </div>
+                  <div class="field-row">
+                    <dt>event id</dt>
+                    <dd>0195f6cd…89ab</dd>
+                  </div>
+                  <div class="field-row">
+                    <dt>causation</dt>
+                    <dd>cmd_0195…d2a4</dd>
+                  </div>
+                  <div class="field-row">
+                    <dt>transition</dt>
+                    <dd>integrating_results → completed</dd>
+                  </div>
+                  <div class="field-row">
+                    <dt>schema</dt>
+                    <dd>1.0 / validated</dd>
+                  </div>
+                </dl>
+              </div>
+
+              <div
+                class="tab-panel"
+                id="policy-panel"
+                role="tabpanel"
+                aria-labelledby="policy-tab"
+                data-panel="policy"
+                hidden
+              >
+                <div class="policy-equation">
+                  host ceiling <span class="operator">∩</span> user profile<br />
+                  <span class="operator">∩</span> project trust <span class="operator">∩</span> turn override<br />
+                  = effective capability
+                </div>
+                <dl class="event-fields">
+                  <div class="field-row">
+                    <dt>mode</dt>
+                    <dd>build</dd>
+                  </div>
+                  <div class="field-row">
+                    <dt>decision</dt>
+                    <dd>ask / filesystem_write</dd>
+                  </div>
+                  <div class="field-row">
+                    <dt>escalation</dt>
+                    <dd>not permitted</dd>
+                  </div>
+                </dl>
+              </div>
+
+              <div
+                class="tab-panel"
+                id="replay-panel"
+                role="tabpanel"
+                aria-labelledby="replay-tab"
+                data-panel="replay"
+                hidden
+              >
+                <div class="replay-stamp">✓ ZERO EXTERNAL CALLS</div>
+                <dl class="event-fields">
+                  <div class="field-row">
+                    <dt>provider</dt>
+                    <dd>0 calls</dd>
+                  </div>
+                  <div class="field-row">
+                    <dt>network</dt>
+                    <dd>0 calls</dd>
+                  </div>
+                  <div class="field-row">
+                    <dt>tools</dt>
+                    <dd>0 executions</dd>
+                  </div>
+                  <div class="field-row">
+                    <dt>projection</dt>
+                    <dd>14 events applied</dd>
+                  </div>
+                </dl>
+              </div>
+            </section>
+
+            <section class="signal-panel" aria-label="会话指标">
+              <div class="signal-grid">
+                <div class="signal-metric">
+                  <span class="metric-label">Elapsed</span>
+                  <span class="metric-value">06.84s</span>
+                </div>
+                <div class="signal-metric">
+                  <span class="metric-label">Tokens</span>
+                  <span class="metric-value">1,842</span>
+                </div>
+                <div class="signal-metric">
+                  <span class="metric-label">Ledger</span>
+                  <span class="metric-value is-safe">✓ synced</span>
+                </div>
+              </div>
+            </section>
+          </aside>
+        </div>
+
+        <section class="composer" aria-label="会话输入">
+          <span class="composer-mark" aria-hidden="true">›</span>
+          <div class="composer-field">
+            <label for="composer-input">Composer / follow-up</label>
+            <textarea
+              id="composer-input"
+              rows="2"
+              placeholder="继续输入，或使用 /inspect、/fork、/exit…"
+              aria-describedby="composer-help"
+            ></textarea>
+          </div>
+          <button class="send-button" type="button" aria-label="发送消息">↵</button>
+        </section>
+        <div class="composer-footer" id="composer-help">
+          <span class="key-hint"><kbd>esc</kbd> interrupt · <kbd>tab</kbd> inspect · <kbd>?</kbd> keys</span>
+          <span>human terminal: sanitized · JSONL: protocol-exact</span>
+        </div>
+      </main>
+
+      <footer class="page-footer">
+        <p class="design-note">
+          <strong>Quiet Sequencer</strong> 将每个 Turn 视作一条可核验的音轨：事件顺序由 ledger 决定，动效只属于显示时钟；主题可以个性化，危险、审批和未知状态的符号与明文不可被主题覆盖。
+        </p>
+        <div class="version-mark">YeuX Harness / interface concept<br />2026-08-30 · local-first</div>
+      </footer>
+    </div>
+
+    <script>
+      (() => {
+        const root = document.documentElement;
+        const themeButtons = Array.from(document.querySelectorAll("[data-theme-choice]"));
+        const themeReadout = document.querySelector("#theme-readout");
+        const allowedThemes = new Set(["paper", "nocturne"]);
+
+        const setTheme = (theme, persist = true) => {
+          if (!allowedThemes.has(theme)) return;
+          root.dataset.theme = theme;
+          for (const button of themeButtons) {
+            button.setAttribute("aria-pressed", String(button.dataset.themeChoice === theme));
+          }
+          if (themeReadout) {
+            themeReadout.textContent = `Theme / ${theme === "paper" ? "Paper" : "Nocturne"}`;
+          }
+          if (persist) {
+            try {
+              localStorage.setItem("yeux-concept-theme", theme);
+            } catch {
+              // The concept remains fully functional when storage is unavailable.
+            }
+          }
+        };
+
+        let savedTheme = null;
+        try {
+          savedTheme = localStorage.getItem("yeux-concept-theme");
+        } catch {
+          savedTheme = null;
+        }
+        if (savedTheme && allowedThemes.has(savedTheme)) setTheme(savedTheme, false);
+
+        for (const button of themeButtons) {
+          button.addEventListener("click", () => setTheme(button.dataset.themeChoice));
+        }
+
+        const tabs = Array.from(document.querySelectorAll("[role='tab'][data-tab]"));
+        const panels = Array.from(document.querySelectorAll("[role='tabpanel'][data-panel]"));
+
+        const activateTab = (tab) => {
+          for (const candidate of tabs) {
+            const selected = candidate === tab;
+            candidate.setAttribute("aria-selected", String(selected));
+            candidate.tabIndex = selected ? 0 : -1;
+          }
+          for (const panel of panels) panel.hidden = panel.dataset.panel !== tab.dataset.tab;
+        };
+
+        tabs.forEach((tab, index) => {
+          tab.addEventListener("click", () => activateTab(tab));
+          tab.addEventListener("keydown", (event) => {
+            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+            event.preventDefault();
+            let nextIndex = index;
+            if (event.key === "ArrowRight") nextIndex = (index + 1) % tabs.length;
+            if (event.key === "ArrowLeft") nextIndex = (index - 1 + tabs.length) % tabs.length;
+            if (event.key === "Home") nextIndex = 0;
+            if (event.key === "End") nextIndex = tabs.length - 1;
+            const next = tabs[nextIndex];
+            activateTab(next);
+            next.focus();
+          });
+        });
+
+        const approvalPanel = document.querySelector("#approval-panel");
+        const approvalState = document.querySelector("#approval-state");
+        const approvalButtons = Array.from(document.querySelectorAll("[data-approval]"));
+        for (const button of approvalButtons) {
+          button.addEventListener("click", () => {
+            const outcome = button.dataset.approval;
+            approvalPanel.dataset.outcome = outcome;
+            approvalState.textContent =
+              outcome === "allowed"
+                ? "allowed once / exact binding only"
+                : "denied / no side effect executed";
+          });
+        }
+
+        const composer = document.querySelector("#composer-input");
+        const sendButton = document.querySelector(".send-button");
+        sendButton.addEventListener("click", () => {
+          if (!composer.value.trim()) {
+            composer.focus();
+            return;
+          }
+          const original = sendButton.textContent;
+          sendButton.textContent = "✓";
+          sendButton.setAttribute("aria-label", "概念消息已排入本地会话");
+          window.setTimeout(() => {
+            sendButton.textContent = original;
+            sendButton.setAttribute("aria-label", "发送消息");
+          }, 900);
+        });
+      })();
+    </script>
+  </body>
+</html>

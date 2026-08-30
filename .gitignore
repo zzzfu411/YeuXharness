@@ -1,0 +1,15 @@
+/target/
+node_modules/
+/.pnpm-store/
+/dist/
+/packages/*/dist/
+/coverage/
+/.yeux/
+*.db
+*.db-shm
+*.db-wal
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example

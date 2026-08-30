@@ -1,0 +1,271 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ApprovalRequestResult",
+  "type": "object",
+  "required": [
+    "approved"
+  ],
+  "properties": {
+    "approval": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ApprovalBinding"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "approved": {
+      "type": "boolean"
+    }
+  },
+  "definitions": {
+    "ApprovalBinding": {
+      "type": "object",
+      "required": [
+        "agent_id",
+        "approval_id",
+        "effect_digest",
+        "expires_at",
+        "granted_effects",
+        "mode",
+        "normalized_arguments_digest",
+        "thread_id",
+        "tool_id",
+        "tool_version",
+        "workspace_id",
+        "workspace_identity_digest"
+      ],
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "approval_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "effect_digest": {
+          "type": "string"
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "granted_effects": {
+          "$ref": "#/definitions/EffectSet"
+        },
+        "mode": {
+          "$ref": "#/definitions/CapabilityMode"
+        },
+        "normalized_arguments_digest": {
+          "type": "string"
+        },
+        "thread_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "tool_id": {
+          "type": "string"
+        },
+        "tool_version": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "workspace_identity_digest": {
+          "type": "string"
+        }
+      }
+    },
+    "CapabilityMode": {
+      "type": "string",
+      "enum": [
+        "observe",
+        "build",
+        "operate"
+      ]
+    },
+    "EffectSet": {
+      "type": "object",
+      "required": [
+        "idempotency",
+        "reversibility"
+      ],
+      "properties": {
+        "external_writes": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ExternalEffect"
+          }
+        },
+        "filesystem_delete": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PathScope"
+          }
+        },
+        "filesystem_read": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PathScope"
+          }
+        },
+        "filesystem_write": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PathScope"
+          }
+        },
+        "idempotency": {
+          "$ref": "#/definitions/Idempotency"
+        },
+        "network": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NetworkEffect"
+          }
+        },
+        "processes": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ProcessEffect"
+          }
+        },
+        "reversibility": {
+          "$ref": "#/definitions/Reversibility"
+        },
+        "secrets": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SecretHandle"
+          }
+        }
+      }
+    },
+    "ExternalEffect": {
+      "type": "object",
+      "required": [
+        "operation",
+        "system"
+      ],
+      "properties": {
+        "operation": {
+          "type": "string"
+        },
+        "resource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "system": {
+          "type": "string"
+        }
+      }
+    },
+    "Idempotency": {
+      "type": "string",
+      "enum": [
+        "idempotent",
+        "idempotent_with_key",
+        "non_idempotent",
+        "unknown"
+      ]
+    },
+    "NetworkEffect": {
+      "type": "object",
+      "required": [
+        "host",
+        "scheme"
+      ],
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "scheme": {
+          "type": "string"
+        }
+      }
+    },
+    "PathScope": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "recursive": {
+          "default": false,
+          "type": "boolean"
+        },
+        "resolved": {
+          "description": "Set after canonical path resolution. An unresolved scope must never be approved.",
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "ProcessEffect": {
+      "type": "object",
+      "required": [
+        "executable"
+      ],
+      "properties": {
+        "argument_digest": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "executable": {
+          "type": "string"
+        },
+        "may_spawn_children": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "Reversibility": {
+      "type": "string",
+      "enum": [
+        "reversible",
+        "compensatable",
+        "irreversible",
+        "unknown"
+      ]
+    },
+    "SecretHandle": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "McpStatusResult",
+  "type": "object",
+  "required": [
+    "servers"
+  ],
+  "properties": {
+    "servers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/McpServerStatus"
+      }
+    }
+  },
+  "definitions": {
+    "McpServerStatus": {
+      "type": "object",
+      "required": [
+        "discoveredToolCount",
+        "id",
+        "state",
+        "transport"
+      ],
+      "properties": {
+        "discoveredToolCount": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "id": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "transport": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

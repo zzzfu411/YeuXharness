@@ -1,0 +1,266 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "JobResult",
+  "type": "object",
+  "required": [
+    "job",
+    "state"
+  ],
+  "properties": {
+    "job": {
+      "$ref": "#/definitions/JobSpec"
+    },
+    "state": {
+      "$ref": "#/definitions/JobState"
+    }
+  },
+  "definitions": {
+    "CapabilityGrant": {
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "external_write": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "filesystem_delete": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "filesystem_read": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "filesystem_write": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mode": {
+          "$ref": "#/definitions/CapabilityMode"
+        },
+        "network": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "process": {
+          "default": false,
+          "type": "boolean"
+        },
+        "secrets": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "CapabilityMode": {
+      "type": "string",
+      "enum": [
+        "observe",
+        "build",
+        "operate"
+      ]
+    },
+    "JobSchedule": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "at",
+            "type"
+          ],
+          "properties": {
+            "at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "at"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "every_seconds",
+            "type"
+          ],
+          "properties": {
+            "every_seconds": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "interval"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "rrule",
+            "timezone",
+            "type"
+          ],
+          "properties": {
+            "rrule": {
+              "type": "string"
+            },
+            "timezone": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "rrule"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "manual"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "JobSpec": {
+      "type": "object",
+      "required": [
+        "budget",
+        "grant",
+        "id",
+        "model",
+        "name",
+        "prompt",
+        "provider",
+        "schedule",
+        "workspace_id"
+      ],
+      "properties": {
+        "allow_reentry": {
+          "default": false,
+          "type": "boolean"
+        },
+        "budget": {
+          "$ref": "#/definitions/RunBudget"
+        },
+        "grant": {
+          "$ref": "#/definitions/CapabilityGrant"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "metadata": {
+          "default": null
+        },
+        "model": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "schedule": {
+          "$ref": "#/definitions/JobSchedule"
+        },
+        "tool_ids": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "workspace_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "JobState": {
+      "type": "string",
+      "enum": [
+        "active",
+        "paused",
+        "running",
+        "waiting_for_approval",
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "RunBudget": {
+      "type": "object",
+      "required": [
+        "max_cost_micros",
+        "max_duration_seconds",
+        "max_tokens"
+      ],
+      "properties": {
+        "max_cost_micros": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_duration_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

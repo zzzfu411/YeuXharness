@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ThreadReadParams",
+  "type": "object",
+  "required": [
+    "threadId"
+  ],
+  "properties": {
+    "afterSeq": {
+      "default": 0,
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "limit": {
+      "default": 100,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "threadId": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}

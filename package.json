@@ -1,0 +1,22 @@
+{
+  "name": "yeux-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm --filter @yeux/protocol build && pnpm -r typecheck",
+    "test": "pnpm --filter @yeux/protocol build && pnpm -r test",
+    "tui": "pnpm --filter @yeux/tui start",
+    "plugin-host": "pnpm --filter @yeux/plugin-host start"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "typescript": "5.9.3",
+    "vitest": "3.2.7"
+  }
+}

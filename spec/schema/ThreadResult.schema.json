@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ThreadResult",
+  "type": "object",
+  "required": [
+    "thread"
+  ],
+  "properties": {
+    "thread": {
+      "$ref": "#/definitions/Thread"
+    }
+  },
+  "definitions": {
+    "Thread": {
+      "type": "object",
+      "required": [
+        "created_at",
+        "id",
+        "status",
+        "updated_at",
+        "workspace_id"
+      ],
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "last_seq": {
+          "default": 0,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "parent_seq": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "parent_thread_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "status": {
+          "$ref": "#/definitions/ThreadStatus"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "workspace_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "ThreadStatus": {
+      "type": "string",
+      "enum": [
+        "active",
+        "idle",
+        "archived",
+        "failed"
+      ]
+    }
+  }
+}

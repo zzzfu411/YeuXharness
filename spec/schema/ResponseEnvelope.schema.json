@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ResponseEnvelope_for_AnyValue",
+  "type": "object",
+  "anyOf": [
+    {
+      "type": "object",
+      "required": [
+        "result"
+      ],
+      "properties": {
+        "result": true
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "error"
+      ],
+      "properties": {
+        "error": {
+          "$ref": "#/definitions/RpcError"
+        }
+      }
+    }
+  ],
+  "required": [
+    "id",
+    "jsonrpc"
+  ],
+  "properties": {
+    "id": {
+      "$ref": "#/definitions/RpcId"
+    },
+    "jsonrpc": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "RpcError": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "data": true,
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "RpcId": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer",
+          "format": "int64"
+        }
+      ]
+    }
+  }
+}

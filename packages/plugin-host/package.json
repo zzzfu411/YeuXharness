@@ -1,0 +1,28 @@
+{
+  "name": "@yeux/plugin-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "yeux-plugin-host": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node ./dist/cli.js",
+    "typecheck": "pnpm --filter @yeux/protocol build && tsc -p tsconfig.json --noEmit",
+    "test": "pnpm --filter @yeux/protocol build && vitest run"
+  },
+  "dependencies": {
+    "@yeux/protocol": "workspace:*",
+    "smol-toml": "1.8.0"
+  }
+}

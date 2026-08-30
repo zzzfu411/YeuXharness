@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CommandEnvelope_for_AnyValue",
+  "description": "A client command. `command_id` is independent from the JSON-RPC `id` and provides idempotency across reconnects and at-least-once delivery.",
+  "type": "object",
+  "required": [
+    "command_id",
+    "id",
+    "jsonrpc",
+    "method"
+  ],
+  "properties": {
+    "command_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "id": {
+      "$ref": "#/definitions/RpcId"
+    },
+    "jsonrpc": {
+      "type": "string"
+    },
+    "method": {
+      "type": "string"
+    },
+    "params": true
+  },
+  "definitions": {
+    "RpcId": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer",
+          "format": "int64"
+        }
+      ]
+    }
+  }
+}

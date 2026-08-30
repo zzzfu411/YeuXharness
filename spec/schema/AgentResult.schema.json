@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AgentResult",
+  "type": "object",
+  "required": [
+    "child_thread_id",
+    "run_id",
+    "state",
+    "summary"
+  ],
+  "properties": {
+    "child_thread_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "diff_artifact_uri": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "metadata": {
+      "default": null
+    },
+    "run_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "state": {
+      "$ref": "#/definitions/AgentResultState"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "worktree_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "AgentResultState": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "failed",
+        "cancelled",
+        "budget_exhausted"
+      ]
+    }
+  }
+}

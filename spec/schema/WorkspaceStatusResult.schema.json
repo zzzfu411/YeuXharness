@@ -1,0 +1,97 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WorkspaceStatusResult",
+  "type": "object",
+  "required": [
+    "workspace"
+  ],
+  "properties": {
+    "activeThreadId": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "workspace": {
+      "$ref": "#/definitions/Workspace"
+    }
+  },
+  "definitions": {
+    "Workspace": {
+      "type": "object",
+      "required": [
+        "id",
+        "identity",
+        "opened_at",
+        "root",
+        "trust"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "identity": {
+          "$ref": "#/definitions/WorkspaceIdentity"
+        },
+        "opened_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "root": {
+          "type": "string"
+        },
+        "trust": {
+          "$ref": "#/definitions/WorkspaceTrust"
+        }
+      }
+    },
+    "WorkspaceIdentity": {
+      "type": "object",
+      "required": [
+        "canonical_root",
+        "digest"
+      ],
+      "properties": {
+        "canonical_root": {
+          "description": "Canonical path at the moment the workspace was opened.",
+          "type": "string"
+        },
+        "device": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "digest": {
+          "description": "Stable digest over the canonical path and available platform identity fields.",
+          "type": "string"
+        },
+        "git_common_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inode": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "WorkspaceTrust": {
+      "type": "string",
+      "enum": [
+        "untrusted",
+        "trusted"
+      ]
+    }
+  }
+}

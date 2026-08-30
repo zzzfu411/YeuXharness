@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ThreadCompactParams",
+  "type": "object",
+  "required": [
+    "threadId"
+  ],
+  "properties": {
+    "threadId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "throughSeq": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}

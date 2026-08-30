@@ -1,0 +1,1650 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ThreadReadResult",
+  "type": "object",
+  "required": [
+    "events",
+    "thread"
+  ],
+  "properties": {
+    "events": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/EventEnvelope"
+      }
+    },
+    "nextAfterSeq": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "thread": {
+      "$ref": "#/definitions/Thread"
+    }
+  },
+  "definitions": {
+    "AgentResult": {
+      "type": "object",
+      "required": [
+        "child_thread_id",
+        "run_id",
+        "state",
+        "summary"
+      ],
+      "properties": {
+        "child_thread_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "diff_artifact_uri": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "default": null
+        },
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "state": {
+          "$ref": "#/definitions/AgentResultState"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "worktree_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "AgentResultState": {
+      "type": "string",
+      "enum": [
+        "completed",
+        "failed",
+        "cancelled",
+        "budget_exhausted"
+      ]
+    },
+    "AgentSpawnSpec": {
+      "type": "object",
+      "required": [
+        "budget",
+        "child_agent_id",
+        "depth",
+        "grant",
+        "isolation",
+        "parent_agent_id",
+        "parent_thread_id",
+        "run_id",
+        "task",
+        "workspace_id"
+      ],
+      "properties": {
+        "budget": {
+          "$ref": "#/definitions/RunBudget"
+        },
+        "child_agent_id": {
+          "type": "string"
+        },
+        "depth": {
+          "description": "v1 permits only `1`; kept explicit so the kernel can reject escalation.",
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "grant": {
+          "$ref": "#/definitions/CapabilityGrant"
+        },
+        "isolation": {
+          "$ref": "#/definitions/WorkspaceIsolation"
+        },
+        "parent_agent_id": {
+          "type": "string"
+        },
+        "parent_thread_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "task": {
+          "type": "string"
+        },
+        "workspace_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "CapabilityGrant": {
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "external_write": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "filesystem_delete": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "filesystem_read": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "filesystem_write": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mode": {
+          "$ref": "#/definitions/CapabilityMode"
+        },
+        "network": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "process": {
+          "default": false,
+          "type": "boolean"
+        },
+        "secrets": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "CapabilityMode": {
+      "type": "string",
+      "enum": [
+        "observe",
+        "build",
+        "operate"
+      ]
+    },
+    "EffectSet": {
+      "type": "object",
+      "required": [
+        "idempotency",
+        "reversibility"
+      ],
+      "properties": {
+        "external_writes": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ExternalEffect"
+          }
+        },
+        "filesystem_delete": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PathScope"
+          }
+        },
+        "filesystem_read": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PathScope"
+          }
+        },
+        "filesystem_write": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PathScope"
+          }
+        },
+        "idempotency": {
+          "$ref": "#/definitions/Idempotency"
+        },
+        "network": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NetworkEffect"
+          }
+        },
+        "processes": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ProcessEffect"
+          }
+        },
+        "reversibility": {
+          "$ref": "#/definitions/Reversibility"
+        },
+        "secrets": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SecretHandle"
+          }
+        }
+      }
+    },
+    "EventEnvelope": {
+      "type": "object",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "workspace/opened"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "workspace"
+              ],
+              "properties": {
+                "workspace": {
+                  "$ref": "#/definitions/Workspace"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "workspace/trust_changed"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "trust",
+                "workspace_id"
+              ],
+              "properties": {
+                "trust": {
+                  "$ref": "#/definitions/WorkspaceTrust"
+                },
+                "workspace_id": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "thread/started"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "thread"
+              ],
+              "properties": {
+                "thread": {
+                  "$ref": "#/definitions/Thread"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "thread/forked"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "thread"
+              ],
+              "properties": {
+                "thread": {
+                  "$ref": "#/definitions/Thread"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "thread/archived"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "thread_id"
+              ],
+              "properties": {
+                "thread_id": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "turn/started"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "turn"
+              ],
+              "properties": {
+                "turn": {
+                  "$ref": "#/definitions/Turn"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "turn/state_changed"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "from",
+                "to",
+                "turn_id"
+              ],
+              "properties": {
+                "from": {
+                  "$ref": "#/definitions/TurnState"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "to": {
+                  "$ref": "#/definitions/TurnState"
+                },
+                "turn_id": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "turn/steered"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "message",
+                "turn_id"
+              ],
+              "properties": {
+                "message": {
+                  "type": "string"
+                },
+                "turn_id": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "item/added"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "item"
+              ],
+              "properties": {
+                "item": {
+                  "$ref": "#/definitions/Item"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "model/requested"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "request_id"
+              ],
+              "properties": {
+                "request_id": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "model/event"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "model_event",
+                "request_id"
+              ],
+              "properties": {
+                "model_event": {
+                  "$ref": "#/definitions/ModelEvent"
+                },
+                "request_id": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "tool/proposed"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "effects",
+                "invocation_id",
+                "tool_id"
+              ],
+              "properties": {
+                "effects": {
+                  "$ref": "#/definitions/EffectSet"
+                },
+                "invocation_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "tool_id": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "tool/state_changed"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "from",
+                "invocation_id",
+                "to"
+              ],
+              "properties": {
+                "from": {
+                  "$ref": "#/definitions/InvocationState"
+                },
+                "invocation_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "to": {
+                  "$ref": "#/definitions/InvocationState"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "job/created"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "job"
+              ],
+              "properties": {
+                "job": {
+                  "$ref": "#/definitions/JobSpec"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "job/state_changed"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "from",
+                "job_id",
+                "to"
+              ],
+              "properties": {
+                "from": {
+                  "$ref": "#/definitions/JobState"
+                },
+                "job_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "to": {
+                  "$ref": "#/definitions/JobState"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "agent/spawned"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "spec"
+              ],
+              "properties": {
+                "spec": {
+                  "$ref": "#/definitions/AgentSpawnSpec"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "agent/completed"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "result"
+              ],
+              "properties": {
+                "result": {
+                  "$ref": "#/definitions/AgentResult"
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "runtime/diagnostic"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "code",
+                "message"
+              ],
+              "properties": {
+                "code": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                },
+                "recoverable": {
+                  "default": false,
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "required": [
+        "agent_id",
+        "event_id",
+        "schema_version",
+        "seq",
+        "thread_id",
+        "time"
+      ],
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "causation_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "event_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "schema_version": {
+          "$ref": "#/definitions/ProtocolVersion"
+        },
+        "seq": {
+          "description": "Strictly monotonic within one thread. The first event has sequence 1.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "thread_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "time": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        }
+      }
+    },
+    "ExternalEffect": {
+      "type": "object",
+      "required": [
+        "operation",
+        "system"
+      ],
+      "properties": {
+        "operation": {
+          "type": "string"
+        },
+        "resource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "system": {
+          "type": "string"
+        }
+      }
+    },
+    "Idempotency": {
+      "type": "string",
+      "enum": [
+        "idempotent",
+        "idempotent_with_key",
+        "non_idempotent",
+        "unknown"
+      ]
+    },
+    "InvocationState": {
+      "type": "string",
+      "enum": [
+        "proposed",
+        "approved",
+        "prepared",
+        "started",
+        "completed",
+        "failed",
+        "cancelled",
+        "unknown"
+      ]
+    },
+    "Item": {
+      "type": "object",
+      "required": [
+        "agent_id",
+        "content",
+        "created_at",
+        "id",
+        "kind",
+        "thread_id",
+        "turn_id"
+      ],
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "content": true,
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "$ref": "#/definitions/ItemKind"
+        },
+        "thread_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "turn_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "ItemKind": {
+      "type": "string",
+      "enum": [
+        "user_message",
+        "assistant_message",
+        "reasoning",
+        "tool_call",
+        "tool_result",
+        "checkpoint",
+        "diagnostic"
+      ]
+    },
+    "JobSchedule": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "at",
+            "type"
+          ],
+          "properties": {
+            "at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "at"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "every_seconds",
+            "type"
+          ],
+          "properties": {
+            "every_seconds": {
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 0.0
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "interval"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "rrule",
+            "timezone",
+            "type"
+          ],
+          "properties": {
+            "rrule": {
+              "type": "string"
+            },
+            "timezone": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "rrule"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "manual"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "JobSpec": {
+      "type": "object",
+      "required": [
+        "budget",
+        "grant",
+        "id",
+        "model",
+        "name",
+        "prompt",
+        "provider",
+        "schedule",
+        "workspace_id"
+      ],
+      "properties": {
+        "allow_reentry": {
+          "default": false,
+          "type": "boolean"
+        },
+        "budget": {
+          "$ref": "#/definitions/RunBudget"
+        },
+        "grant": {
+          "$ref": "#/definitions/CapabilityGrant"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "metadata": {
+          "default": null
+        },
+        "model": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "schedule": {
+          "$ref": "#/definitions/JobSchedule"
+        },
+        "tool_ids": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "workspace_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "JobState": {
+      "type": "string",
+      "enum": [
+        "active",
+        "paused",
+        "running",
+        "waiting_for_approval",
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "ModelEvent": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "text",
+            "type"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "text_delta"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "text",
+            "type"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "reasoning_delta"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "call_id",
+            "json_delta",
+            "name",
+            "type"
+          ],
+          "properties": {
+            "call_id": {
+              "type": "string"
+            },
+            "json_delta": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "tool_call_delta"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "usage"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "usage"
+              ]
+            },
+            "usage": {
+              "$ref": "#/definitions/Usage"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "stop_reason",
+            "type"
+          ],
+          "properties": {
+            "stop_reason": {
+              "$ref": "#/definitions/StopReason"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "completed"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "code",
+            "message",
+            "type"
+          ],
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "retryable": {
+              "default": false,
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "failed"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "Money": {
+      "type": "object",
+      "required": [
+        "currency",
+        "micros"
+      ],
+      "properties": {
+        "currency": {
+          "type": "string"
+        },
+        "micros": {
+          "description": "Millionths of the currency unit; avoids floating-point accounting.",
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
+    "NetworkEffect": {
+      "type": "object",
+      "required": [
+        "host",
+        "scheme"
+      ],
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "scheme": {
+          "type": "string"
+        }
+      }
+    },
+    "PathScope": {
+      "type": "object",
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "recursive": {
+          "default": false,
+          "type": "boolean"
+        },
+        "resolved": {
+          "description": "Set after canonical path resolution. An unresolved scope must never be approved.",
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "ProcessEffect": {
+      "type": "object",
+      "required": [
+        "executable"
+      ],
+      "properties": {
+        "argument_digest": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "executable": {
+          "type": "string"
+        },
+        "may_spawn_children": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "ProtocolVersion": {
+      "type": "object",
+      "required": [
+        "major",
+        "minor"
+      ],
+      "properties": {
+        "major": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "minor": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        }
+      }
+    },
+    "Reversibility": {
+      "type": "string",
+      "enum": [
+        "reversible",
+        "compensatable",
+        "irreversible",
+        "unknown"
+      ]
+    },
+    "RunBudget": {
+      "type": "object",
+      "required": [
+        "max_cost_micros",
+        "max_duration_seconds",
+        "max_tokens"
+      ],
+      "properties": {
+        "max_cost_micros": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_duration_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "SecretHandle": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      }
+    },
+    "StopReason": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "end_turn",
+            "max_tokens",
+            "tool_use",
+            "cancelled",
+            "content_filter"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "other"
+          ],
+          "properties": {
+            "other": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "Thread": {
+      "type": "object",
+      "required": [
+        "created_at",
+        "id",
+        "status",
+        "updated_at",
+        "workspace_id"
+      ],
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "last_seq": {
+          "default": 0,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "parent_seq": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "parent_thread_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "status": {
+          "$ref": "#/definitions/ThreadStatus"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "workspace_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "ThreadStatus": {
+      "type": "string",
+      "enum": [
+        "active",
+        "idle",
+        "archived",
+        "failed"
+      ]
+    },
+    "Turn": {
+      "type": "object",
+      "required": [
+        "agent_id",
+        "id",
+        "started_at",
+        "state",
+        "thread_id"
+      ],
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "ended_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "failure": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "state": {
+          "$ref": "#/definitions/TurnState"
+        },
+        "thread_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "TurnState": {
+      "type": "string",
+      "enum": [
+        "accepted",
+        "building_context",
+        "requesting_model",
+        "streaming",
+        "proposed_tools",
+        "waiting_for_approval",
+        "authorizing",
+        "scheduling",
+        "executing",
+        "integrating_results",
+        "waiting_for_input",
+        "cancelling",
+        "completed",
+        "cancelled",
+        "failed"
+      ]
+    },
+    "Usage": {
+      "type": "object",
+      "required": [
+        "cached_tokens",
+        "input_tokens",
+        "output_tokens"
+      ],
+      "properties": {
+        "cached_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "cost": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Money"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "Workspace": {
+      "type": "object",
+      "required": [
+        "id",
+        "identity",
+        "opened_at",
+        "root",
+        "trust"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "identity": {
+          "$ref": "#/definitions/WorkspaceIdentity"
+        },
+        "opened_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "root": {
+          "type": "string"
+        },
+        "trust": {
+          "$ref": "#/definitions/WorkspaceTrust"
+        }
+      }
+    },
+    "WorkspaceIdentity": {
+      "type": "object",
+      "required": [
+        "canonical_root",
+        "digest"
+      ],
+      "properties": {
+        "canonical_root": {
+          "description": "Canonical path at the moment the workspace was opened.",
+          "type": "string"
+        },
+        "device": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "digest": {
+          "description": "Stable digest over the canonical path and available platform identity fields.",
+          "type": "string"
+        },
+        "git_common_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inode": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "WorkspaceIsolation": {
+      "type": "string",
+      "enum": [
+        "shared_read_only",
+        "git_worktree"
+      ]
+    },
+    "WorkspaceTrust": {
+      "type": "string",
+      "enum": [
+        "untrusted",
+        "trusted"
+      ]
+    }
+  }
+}

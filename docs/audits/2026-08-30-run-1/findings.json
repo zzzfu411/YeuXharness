@@ -1,0 +1,220 @@
+[
+  {
+    "verdict": "confirmed",
+    "title": "Terminal control-sequence injection in the interactive TUI",
+    "description": "The audited baseline wrote provider- and daemon-controlled text directly to a human terminal. A crafted OpenAI-compatible SSE delta or diagnostic containing ANSI/CSI/OSC, C0/C1, or bidirectional controls was persisted and delivered as a normal event, then interpreted by the user's terminal. A concrete payload such as ESC [ 2 J followed by an OSC title sequence could clear or visually rewrite the trusted YeuX interface. The demonstrated impact is terminal-state manipulation and UI spoofing, not arbitrary code execution. The current working tree fixes the issue at every audited TUI human-terminal sink while preserving the original payload in JSONL mode.",
+    "root_cause": "EventRenderer.render in docs/audits/2026-08-30-run-1/evidence/renderer.pre-fix.ts does not neutralize terminal control sequences before writing model text, allowing untrusted provider output to alter terminal state and spoof trusted UI.",
+    "intended_behavior": "Provider and daemon payload values should remain semantically unchanged after JSON parsing in the ledger and JSONL protocol projection, but their human-terminal projection should display them only as inert text.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "docs/audits/2026-08-30-run-1/evidence/provider.pre-fix.rs",
+        "line": 427,
+        "scope": "parse_chunk",
+        "description": "Reads the provider-controlled choices[0].delta.content string and creates a ModelEvent::TextDelta without changing its control characters."
+      },
+      {
+        "kind": "propagation",
+        "file": "crates/yeuxd/src/runner.rs",
+        "line": 706,
+        "scope": "emit",
+        "description": "Wraps the ModelEvent in Event::ModelStreamEvent and persists it; persist_locked broadcasts the resulting event envelope."
+      },
+      {
+        "kind": "propagation",
+        "file": "crates/yeuxd/src/server.rs",
+        "line": 431,
+        "scope": "serve_connection",
+        "description": "Writes each matching subscribed event envelope to the connected JSON-RPC client."
+      },
+      {
+        "kind": "propagation",
+        "file": "packages/tui/src/app.ts",
+        "line": 116,
+        "scope": "constructor",
+        "description": "Registers the runtime event callback and passes every received event to EventRenderer.render."
+      },
+      {
+        "kind": "sink",
+        "file": "docs/audits/2026-08-30-run-1/evidence/renderer.pre-fix.ts",
+        "line": 36,
+        "scope": "render",
+        "description": "Writes the extracted model delta directly to the terminal writer with no escape- or control-sequence neutralization."
+      }
+    ],
+    "conditions": [
+      {
+        "kind": "third_party_dependency",
+        "description": "An attacker can influence the configured provider response, for example through compromise or on-path modification of a remotely configured plaintext HTTP endpoint."
+      },
+      {
+        "kind": "user_interaction",
+        "description": "The victim runs YeuX in human-interactive terminal mode rather than consuming only JSONL."
+      },
+      {
+        "kind": "environmental_dependency",
+        "description": "The victim's terminal interprets the injected ANSI/ECMA-48 or OSC control sequence."
+      }
+    ],
+    "execution": {
+      "attacker_perspective": "A party able to modify the text returned by the victim's configured OpenAI-compatible endpoint.",
+      "payloads": [
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\\u001b[2J\\u001b]0;trusted-looking title\\u0007fake approval: allow?\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+      ],
+      "instructions": [
+        "Start from a victim configuration whose provider response can be influenced, such as a remotely configured plaintext HTTP endpoint exposed to an on-path attacker.",
+        "Wait for the victim to start a turn in interactive terminal mode.",
+        "Return the crafted SSE text delta followed by a valid completion marker.",
+        "Observe the daemon persist and forward the ordinary model event and the baseline TUI write the contained bytes directly to the terminal."
+      ],
+      "expected_result": "The victim terminal clears or changes state and displays attacker-controlled text as if it were trusted YeuX UI; the same payload remains ordinary data in JSONL mode."
+    },
+    "remediation": {
+      "strategy": "Neutralize control sequences at TUI human-terminal sinks, including model events, diagnostics, approval and input prompts, and stderr presented through the TUI. Keep ledger and JSONL payloads unchanged for replay and automation.",
+      "code_changes": [
+        {
+          "file_name": "packages/tui/src/terminal.ts",
+          "fixed_code": "export function sanitizeTerminalText(text: string): string { /* remove ANSI/OSC, C0/C1 and bidi controls; retain readable LF/TAB */ }"
+        },
+        {
+          "file_name": "packages/tui/src/renderer.ts",
+          "fixed_code": "this.#write(sanitizeTerminalText(text));"
+        },
+        {
+          "file_name": "packages/tui/src/prompter.ts",
+          "fixed_code": "await this.#readline.question(sanitizeTerminalText(prompt));"
+        }
+      ]
+    },
+    "severity": {
+      "likelihood": {
+        "score": "medium",
+        "reason": "The attacker must influence provider or daemon text and the victim must use an interactive terminal, but model and transport text are normal untrusted inputs for this product."
+      },
+      "impact": {
+        "score": "medium",
+        "reason": "The attack can hide output and impersonate trusted prompts or status, affecting security decisions, but this audit did not establish direct code execution."
+      },
+      "overall_severity": "medium"
+    },
+    "confidence": {
+      "score": "high",
+      "reason": "The complete provider-to-terminal flow is present in source and preserved baseline evidence, and regression tests exercise CSI, OSC, C0/C1, bidi controls, interactive rendering, and raw JSONL preservation."
+    }
+  },
+  {
+    "verdict": "confirmed",
+    "title": "Cross-UID Unix socket endpoint spoofing through a predictable fallback path",
+    "description": "When no private XDG_RUNTIME_DIR was available, the audited TypeScript client used the predictable shared path /tmp/yeux-<uid>.sock, attempted any existing entry there, and accepted any reachable Unix-socket listener without checking the socket or parent directory owner, mode, type, symlink status, identity, or peer credentials. On a shared Unix host, another non-root account could bind a victim-connectable socket at that path before the victim launched YeuX, implement the minimal JSON-RPC handshake, receive a newly opened workspace cwd and submitted prompt, and send forged approval/request or user/input messages. The approval UI did not directly authorize work in a separate legitimate daemon; its impact was endpoint impersonation, information disclosure, UI spoofing, and capture of user responses. The current working tree moves the fallback below a private per-UID directory and validates parent/socket identity before and after connect.",
+    "root_cause": "connectSocket in docs/audits/2026-08-30-run-1/evidence/transport.pre-fix.ts does not authenticate or validate the predictable Unix socket endpoint before creating the JSON-RPC client, allowing a different local account to impersonate the daemon.",
+    "intended_behavior": "The TUI should connect only to the current user's daemon through an owner-only runtime endpoint; if that identity cannot be established, it should fail closed and use a private stdio runtime rather than disclose commands to an arbitrary local listener.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "docs/audits/2026-08-30-run-1/evidence/transport.pre-fix.ts",
+        "line": 30,
+        "scope": "defaultSocketPath",
+        "description": "Selects the predictable shared fallback /tmp/yeux-<uid>.sock when no explicit socket or XDG_RUNTIME_DIR is present."
+      },
+      {
+        "kind": "propagation",
+        "file": "docs/audits/2026-08-30-run-1/evidence/transport.pre-fix.ts",
+        "line": 37,
+        "scope": "connectRuntime",
+        "description": "Treats any existing entry at the configured path as a daemon candidate and attempts a socket connection before spawning the private runtime."
+      },
+      {
+        "kind": "propagation",
+        "file": "docs/audits/2026-08-30-run-1/evidence/transport.pre-fix.ts",
+        "line": 52,
+        "scope": "connectSocket",
+        "description": "Calls createConnection on the attacker-occupiable path and constructs JsonRpcClient without owner, mode, file type, symlink, inode, or peer verification."
+      },
+      {
+        "kind": "propagation",
+        "file": "packages/tui/src/app.ts",
+        "line": 186,
+        "scope": "openThread",
+        "description": "Sends workspace/open with the victim's resolved cwd to the currently connected endpoint."
+      },
+      {
+        "kind": "sink",
+        "file": "packages/tui/src/app.ts",
+        "line": 229,
+        "scope": "runTurn",
+        "description": "Sends turn/start with the user's prompt content to the same unauthenticated peer, where the rogue listener can record it."
+      }
+    ],
+    "conditions": [
+      {
+        "kind": "authentication_level",
+        "description": "The attacker has a different ordinary local account on the same Unix host; root and same-UID attackers are not required."
+      },
+      {
+        "kind": "system_configuration",
+        "description": "For the default /tmp fallback, YEUX_SOCKET and XDG_RUNTIME_DIR are unset or empty and os.tmpdir() is a shared attacker-writable directory; an explicitly selected socket in a shared directory creates the equivalent condition."
+      },
+      {
+        "kind": "timing_dependency",
+        "description": "The attacker binds the predictable path before the legitimate daemon or TUI establishes its endpoint."
+      },
+      {
+        "kind": "environmental_dependency",
+        "description": "The victim runs on a Unix-like system, and the attacker-created socket grants the victim permission to connect, for example by using a permissive socket mode after bind."
+      },
+      {
+        "kind": "user_interaction",
+        "description": "Capturing both cwd and prompt requires the victim to open a new Thread and submit a prompt; a resumed --thread path does not send cwd. Capturing an answer to a forged server request additionally requires non-JSONL mode and an actual user response."
+      }
+    ],
+    "execution": {
+      "attacker_perspective": "A non-root user on the same shared Unix host as the victim, starting before the victim's YeuX client.",
+      "payloads": [
+        "/tmp/yeux-<victim-uid>.sock",
+        "A victim-connectable listener at /tmp/yeux-<victim-uid>.sock plus shape-valid JSON-RPC success responses for initialize, workspace/open, thread/start, and thread/subscribe.",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"evil-input\",\"method\":\"user/input\",\"params\":{\"threadId\":\"00000000-0000-4000-8000-000000000001\",\"turnId\":\"00000000-0000-4000-8000-000000000002\",\"prompt\":\"Re-enter a secret\",\"metadata\":{}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":\"evil-approval\",\"method\":\"approval/request\",\"params\":{\"invocation\":{\"invocation_id\":\"00000000-0000-4000-8000-000000000003\",\"tool_id\":\"shell\",\"tool_version\":\"1\",\"workspace_id\":\"00000000-0000-4000-8000-000000000004\",\"workspace_identity_digest\":\"attacker-workspace-digest\",\"thread_id\":\"00000000-0000-4000-8000-000000000001\",\"turn_id\":\"00000000-0000-4000-8000-000000000002\",\"agent_id\":\"agent-root\",\"normalized_arguments\":{},\"normalized_arguments_digest\":\"attacker-args-digest\",\"effects\":{\"filesystem_read\":[],\"filesystem_write\":[],\"filesystem_delete\":[],\"processes\":[],\"network\":[],\"secrets\":[],\"external_writes\":[],\"idempotency\":\"idempotent\",\"reversibility\":\"reversible\"},\"effect_digest\":\"attacker-effect-digest\",\"prepared_token\":\"attacker-prepared-token\",\"prepared_at\":\"2026-08-30T12:00:00Z\",\"expires_at\":\"2026-08-30T12:05:00Z\"},\"explanation\":\"Attacker-controlled explanation\"}}"
+      ],
+      "instructions": [
+        "Determine the victim UID, bind/listen on /tmp/yeux-<victim-uid>.sock before the victim starts YeuX, and set permissions that allow the victim to connect.",
+        "Accept the client and return shape-valid responses keyed to each request id so initialization and thread creation continue.",
+        "When the victim opens a new Thread and submits a prompt, record the cwd from workspace/open and the prompt from turn/start.",
+        "In non-JSONL mode, optionally send one of the fully shaped user/input or approval/request messages and record the response if the victim answers."
+      ],
+      "expected_result": "The rogue endpoint receives the victim's workspace path and prompt and can display forged daemon interactions; the legitimate daemon does not need to be running."
+    },
+    "remediation": {
+      "strategy": "Place the endpoint below a current-UID-owned owner-only directory, require secure parent and socket metadata on both daemon and client, and compare path identity before and after connect so endpoint replacement fails closed.",
+      "code_changes": [
+        {
+          "file_name": "packages/tui/src/transport.ts",
+          "fixed_code": "return join(tmpdir(), `yeux-${currentUid() ?? \"user\"}`, \"yeuxd.sock\");"
+        },
+        {
+          "file_name": "packages/tui/src/transport.ts",
+          "fixed_code": "const before = await inspectSocketPath(path, uid); /* connect */ const after = await inspectSocketPath(path, uid); if (!sameSocketPath(before, after)) throw new Error(...);"
+        },
+        {
+          "file_name": "crates/yeuxd/src/server.rs",
+          "fixed_code": "ensure_socket_parent(parent)?; /* require current euid, real directory, and mode with no group/other bits before bind */"
+        }
+      ]
+    },
+    "severity": {
+      "likelihood": {
+        "score": "medium",
+        "reason": "Exploitation requires a shared Unix host, a non-private runtime path, and winning a pre-bind race, but no victim credentials or elevated privileges are needed."
+      },
+      "impact": {
+        "score": "medium",
+        "reason": "The attacker receives cwd and prompt content and can impersonate interactive daemon requests; the path does not by itself execute an approved action in the legitimate daemon."
+      },
+      "overall_severity": "medium"
+    },
+    "confidence": {
+      "score": "high",
+      "reason": "Independent review confirmed the predictable-path and unauthenticated-connect flow, the cwd/prompt sends, and the current owner/mode/type/device-inode remediation after adding the socket-permission, new-thread/prompt, and non-JSONL interaction prerequisites."
+    }
+  }
+]
