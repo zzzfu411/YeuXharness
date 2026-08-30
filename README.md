@@ -2,9 +2,51 @@
 
 > 安全、可重放、可解释的本地混合智能体平台。
 
+<p align="center">
+  <img src="assets/brand/yeux-signal-fish-v1.png" alt="YeuX 双鱼信号" width="240">
+</p>
+
 YeuX Harness 面向个人高级用户，采用 Rust 权威运行时和 TypeScript 终端界面。它将模型输出、仓库内容、工具、MCP 与插件都视为不可信输入，并用事件账本、能力交集、精确审批和操作系统沙箱约束副作用。
 
 项目采用 Apache-2.0 许可证，首发目标平台为 macOS 和 Linux。
+
+**这是 v0.1 工程基线，还不是可用于真实编码任务的发布版。** 当前产品面是 TypeScript 终端客户端 `yeux` 通过 Unix socket / stdio 连接 Rust daemon `yeuxd`。下面的截图来自 Linux 上真实运行的客户端，不是效果图。未配置 provider 时，Turn 会以 `provider_unconfigured` 失败——这是基线的真实行为，不是演示对话。
+
+## 产品界面
+
+### 会话启动
+
+`yeux` 连上 `yeuxd` 后给出 Session Bar：workspace identity、trust、mode、provider 与传输。
+
+![交互会话启动](docs/screenshots/yeux-session.png)
+
+### 未配置 provider 的 Turn
+
+发送一句真实提示后，事件时间轨写入 ledger。没有模型回复，因为 daemon 没有 `--provider-base-url` 和 `--model`。
+
+![未配置 provider 的真实 Turn](docs/screenshots/yeux-unconfigured-turn.png)
+
+`yeux run` 走同一条人类终端时间轨，而不是 `--jsonl`：
+
+![yeux run 单次 Turn](docs/screenshots/yeux-run-turn.png)
+
+### 会话状态与帮助
+
+`/status` 列出当前 workspace、thread、daemon、socket 和 provider 事实。`/help` 只解释 slash 命令；普通输入会启动一次 Turn。
+
+![会话 /status](docs/screenshots/yeux-status.png)
+
+![交互 /help](docs/screenshots/yeux-interactive-help.png)
+
+![yeux --help](docs/screenshots/yeux-help.png)
+
+### daemon
+
+`yeuxd` 在 Unix socket 上监听，并把 state 目录与 provider 配置写到 stderr：
+
+![yeuxd 监听 Unix socket](docs/screenshots/yeuxd-listen.png)
+
+![yeuxd --help](docs/screenshots/yeuxd-help.png)
 
 ## 当前状态
 
@@ -95,6 +137,7 @@ packages/
   plugin-host/     # 进程外插件宿主基线
 docs/
   adr/             # 已接受架构决策
+  screenshots/     # Linux 上真实运行的终端截图
 spec/traces/       # 黄金事件轨迹规范与后续 fixtures
 spec/schema/       # 从 Rust 公共类型生成的稳定 JSON Schema
 ```
@@ -118,6 +161,21 @@ pnpm build
 
 ```bash
 cargo run -p yeuxd -- --stdio --state-dir /tmp/yeux-dev
+```
+
+Unix socket 模式。客户端默认探测 `$XDG_RUNTIME_DIR/yeux/yeuxd.sock`，否则使用 `/tmp/yeux-<uid>/yeuxd.sock`：
+
+```bash
+SOCKET="/tmp/yeux-$(id -u)/yeuxd.sock"
+mkdir -p "$(dirname "$SOCKET")"
+chmod 700 "$(dirname "$SOCKET")"
+cargo run -p yeuxd -- --socket "$SOCKET" --state-dir /tmp/yeux-dev
+```
+
+随后在另一个终端启动客户端（需先 `pnpm build`）：
+
+```bash
+pnpm --filter @yeux/tui start -- --socket "/tmp/yeux-$(id -u)/yeuxd.sock" --daemon target/debug/yeuxd
 ```
 
 stdio 与 Unix socket 都使用一行一个 JSON-RPC 消息的 UTF-8 JSON。当前终端客户端源码包名为 `@yeux/tui`，可执行命令名为 `yeux`；最终发行包会将它与匹配版本的 daemon 和 plugin host 一起打包，不依赖用户预装 Node/Bun。

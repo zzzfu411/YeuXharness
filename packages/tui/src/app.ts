@@ -3,14 +3,26 @@ import {
   isRuntimeDiagnosticNotification,
   type ApprovalRequestResult,
   type EventEnvelope,
+  type InitializeResult,
   type JsonRpcClient,
+  type ModelDescriptor,
   type RuntimeMode,
+  type Thread,
   type UserInputRequestResult,
+  type Workspace,
 } from "@yeux/protocol";
 
 import type { TuiOptions } from "./args.js";
 import { TerminalPrompter } from "./prompter.js";
 import { EventRenderer } from "./renderer.js";
+import {
+  formatHint,
+  formatInteractiveHelp,
+  formatSessionBar,
+  formatStatus,
+  formatWelcome,
+  snapshotFromSession,
+} from "./session.js";
 import { sanitizeTerminalText } from "./terminal.js";
 import { connectRuntime, type RuntimeConnection } from "./transport.js";
 
@@ -29,7 +41,7 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
     daemonCommand: options.daemonCommand,
     onDaemonStderr: (text) => process.stderr.write(sanitizeTerminalText(text)),
   });
-  const renderer = new EventRenderer({ jsonl: options.jsonl });
+  const renderer = new EventRenderer({ jsonl: options.jsonl, ascii: options.ascii });
   const prompter = options.jsonl ? undefined : new TerminalPrompter();
 
   try {
@@ -39,6 +51,30 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
       cwd: options.cwd,
       ...(options.threadId === undefined ? {} : { threadId: options.threadId }),
     });
+    const snapshot = options.jsonl
+      ? undefined
+      : snapshotFromSession({
+          clientVersion: CLIENT_VERSION,
+          initialize: session.initializeResult,
+          workspace: session.workspace,
+          thread: session.thread,
+          transportKind: connection.kind,
+          transportDescription: connection.description,
+          mode: options.mode,
+          models: await session.listModels(),
+        });
+    if (snapshot !== undefined && options.command === "interactive") {
+      writeSessionView(formatWelcome(snapshot, sessionViewOptions(renderer)));
+      writeSessionView(`${formatSessionBar(snapshot, sessionViewOptions(renderer))}\n`);
+      writeSessionView(
+        `${formatHint("v0.1 engineering baseline — not a coding agent yet.", sessionViewOptions(renderer))}\n`,
+      );
+      writeSessionView(
+        `${formatHint("Type a prompt to start a turn, or /help.", sessionViewOptions(renderer))}\n`,
+      );
+    } else if (snapshot !== undefined) {
+      writeSessionView(`${formatSessionBar(snapshot, sessionViewOptions(renderer))}\n`);
+    }
 
     let signalCount = 0;
     let forcedClose = false;
@@ -77,6 +113,14 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
         const prompt = (await prompter?.question("\nyeux> "))?.trim() ?? "";
         if (prompt === "/exit" || prompt === "/quit") break;
         if (prompt.length === 0) continue;
+        if (snapshot !== undefined && (prompt === "/help" || prompt === "/?")) {
+          writeSessionView(formatInteractiveHelp(sessionViewOptions(renderer)));
+          continue;
+        }
+        if (snapshot !== undefined && prompt === "/status") {
+          writeSessionView(formatStatus(snapshot, sessionViewOptions(renderer)));
+          continue;
+        }
         const result = await session.runTurn(threadId, prompt, options.mode);
         exitCode = exitCodeFor(result);
       }
@@ -102,6 +146,9 @@ class RuntimeSession {
     string,
     { readonly resolve: (event: EventEnvelope) => void; readonly reject: (error: Error) => void }
   >();
+  #initializeResult: InitializeResult | undefined;
+  #workspace: Workspace | undefined;
+  #thread: Thread | undefined;
   #workspaceRoot: string | undefined;
   #activeTurn: { readonly threadId: string; readonly turnId: string } | undefined;
   #interruptPromise: Promise<boolean> | undefined;
@@ -162,6 +209,33 @@ class RuntimeSession {
         `Protocol mismatch: server ${result.protocolVersion.major}.${result.protocolVersion.minor}, client ${PROTOCOL_VERSION.major}.${PROTOCOL_VERSION.minor}`,
       );
     }
+    this.#initializeResult = result;
+  }
+
+  public get initializeResult(): InitializeResult {
+    if (this.#initializeResult === undefined) {
+      throw new Error("Runtime session is not initialized");
+    }
+    return this.#initializeResult;
+  }
+
+  public get workspace(): Workspace {
+    if (this.#workspace === undefined) {
+      throw new Error("Runtime session has no open workspace");
+    }
+    return this.#workspace;
+  }
+
+  public get thread(): Thread {
+    if (this.#thread === undefined) {
+      throw new Error("Runtime session has no open thread");
+    }
+    return this.#thread;
+  }
+
+  public async listModels(): Promise<readonly ModelDescriptor[]> {
+    const result = await this.#client.command("model/list", {});
+    return result.models;
   }
 
   public async openThread(options: {
@@ -175,6 +249,8 @@ class RuntimeSession {
       const workspace = await this.#client.command("workspace/status", {
         workspaceId: resumed.thread.workspace_id,
       });
+      this.#workspace = workspace.workspace;
+      this.#thread = resumed.thread;
       this.#workspaceRoot = workspace.workspace.root;
       await this.#client.command("thread/subscribe", {
         threadId: resumed.thread.id,
@@ -184,10 +260,12 @@ class RuntimeSession {
     }
 
     const workspace = await this.#client.command("workspace/open", { path: options.cwd });
+    this.#workspace = workspace.workspace;
     this.#workspaceRoot = workspace.workspace.root;
     const created = await this.#client.command("thread/start", {
       workspaceId: workspace.workspace.id,
     });
+    this.#thread = created.thread;
     await this.#client.command("thread/subscribe", {
       threadId: created.thread.id,
       afterSeq: created.thread.last_seq,
@@ -277,4 +355,12 @@ function isTerminalTurnEvent(event: EventEnvelope): boolean {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function sessionViewOptions(renderer: EventRenderer) {
+  return { capabilities: renderer.capabilities, theme: renderer.theme };
+}
+
+function writeSessionView(text: string): void {
+  process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
 }
