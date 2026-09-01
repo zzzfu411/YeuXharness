@@ -306,6 +306,17 @@ impl Daemon {
 
         let listener = UnixListener::bind(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        let provider = match &self.inner.configured_model {
+            Some(model) => format!("{}/{}", model.provider, model.model),
+            None => "unconfigured".to_string(),
+        };
+        eprintln!(
+            "yeuxd {} listening unix {}\nstate {}\nprovider {}",
+            env!("CARGO_PKG_VERSION"),
+            path.display(),
+            self.inner.config.state_dir.display(),
+            provider
+        );
         let cleanup = SocketCleanup(path);
         let shutdown = tokio::signal::ctrl_c();
         tokio::pin!(shutdown);
