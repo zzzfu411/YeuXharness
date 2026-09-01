@@ -13,7 +13,10 @@ describe("TerminalPrompter", () => {
     output.on("data", (chunk: string) => {
       rendered += chunk;
     });
-    const prompter = new TerminalPrompter(input, output);
+    // Keep the sanitizer assertion independent of the host/CI locale and
+    // terminal capabilities; the ASCII rail makes the expected framing
+    // deterministic while the rich glyphs have dedicated aesthetic tests.
+    const prompter = new TerminalPrompter(input, output, { ascii: true });
 
     const resultPromise = prompter.approval({
       invocation: {

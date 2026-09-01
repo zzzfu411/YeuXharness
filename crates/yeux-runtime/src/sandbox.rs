@@ -114,9 +114,9 @@ impl SandboxBackend {
                     seccomp: false,
                 };
             }
-            return Self::Unavailable {
+            Self::Unavailable {
                 reason: "bubblewrap was not found in a trusted system path".into(),
-            };
+            }
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         Self::Unavailable {
