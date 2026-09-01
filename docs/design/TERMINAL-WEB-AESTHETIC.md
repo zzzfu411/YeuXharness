@@ -1,7 +1,7 @@
 # YeuX Harness 深色优先终端与网页美学需求
 
-**版本：v1.0 · 2026-08-30**  
-**方向：Paper Signal / Nocturne default**  
+**版本：v1.1 · 2026-08-31**
+**方向：Paper Signal / Nocturne default**
 **适用：`yeux` CLI、OpenTUI/TUI、网页运行台、欢迎页和发行物**
 
 > 黑墨是底，纸白是信号；每一次副作用都必须看起来像一个需要确认的事实。
@@ -19,7 +19,7 @@ ledger、replay 或 JSON-RPC 的语义。
 
 1. **黑墨仪器**：接近黑色的底、暖白的字、少量藏青和朱红；不是紫色渐变的 AI 控制台。
 2. **事件时间轨**：Thread/Turn/Item 像一条有序的乐谱，`seq` 与 causation 关系始终可追溯。
-3. **双鱼信号**：YeuX 的人格只在品牌锁定、欢迎页和空状态出现；运行中不把鱼图标重复到每一行。
+3. **鱼仔手稿**：两只鱼人背对背、头朝外、尾巴朝内；它只在品牌锁定、欢迎页和空状态出现，运行中不把鱼图标重复到每一行。
 
 ### 1.2 深色默认，纸面可切换
 
@@ -37,7 +37,7 @@ ledger、replay 或 JSON-RPC 的语义。
 | 节奏 | `seq`、状态词、时间和 token 对齐 | 时间线、局部刷新、事件抽屉 |
 | 重点 | 当前焦点使用反差/轻错位阴影 | 当前焦点使用深蓝底和 3–5px 错位阴影 |
 | 风险 | glyph + 状态词 + effect 文本 | 朱红边界 + 明文 effect + 默认操作 |
-| 品牌 | `><` 常驻，`⋈` 仅欢迎/空状态 | 双鱼资产可出现，仍不得伪装成安全徽章 |
+| 品牌 | `><` 常驻；完整鱼仔只在欢迎/空状态 | 鱼仔资产可出现，仍不得伪装成安全徽章 |
 | 动效 | 只允许一个活动焦点，最多 4fps | 事件入场可错峰；审批、失败、unknown 静止 |
 
 共享规则：先显示“发生了什么”，再显示“为什么/由谁/影响什么”。模型文本是主阅读层，
@@ -142,6 +142,13 @@ checkpoint 来源、projection match/drift 和 causation 链。
 | moss | `#79A988` | completed、verified |
 | ochre | `#D0AB61` | waiting、预算与非破坏性 warning |
 
+Nocturne 有两层深色，而不是一张蓝黑渐变：
+
+- **运行层 / instrument black**：`#080909`、`#101214`、`#171B1E`，用于 timeline、approval、Inspector 和 TUI；继承 KAZAM 的硬边与高密度控制。
+- **人格层 / dusk paper**：`#2A2733` 配 `#D9D4C9`，只用于 Welcome、About、空状态与鱼仔墨稿；继承个人主页“夜墨纸面”的安静感。
+
+天青 `#5F968F` 只能是 replay/idle 的极弱次级流动色，不能替代 tide 焦点，更不能表示安全；人格层与运行层之间使用硬切面、纸雾或留白，不使用渐变光效。
+
 ### 5.2 排版
 
 - TUI 由用户终端字体决定；所有技术字段使用等宽列，数字启用 tabular alignment。
@@ -202,15 +209,19 @@ reader 都必须保留同一批准结论。
 
 ### 9.1 必需的代码/文本资产
 
-- `packages/tui/src/brand.ts`：glyph、状态词、effect 词、快捷键和 ASCII fallback 的单一来源。
+- `packages/tui/src/aesthetic.ts`：glyph、状态词、effect 词、快捷键、主题和 ASCII fallback 的单一来源。
 - `docs/design/unicode-assets.txt`：可复制的 Session/Timeline/Approval/Replay 示例。
 - `docs/design/tokens.json`：Paper/Nocturne token、终端断点、动效边界。
 
 ### 9.2 可选位图资产
 
-- `assets/brand/yeux-signal-fish-v1.png`：通过内置 `image_gen` 生成的 RGBA 双鱼信号徽记，
-  用于网页 Welcome、About、富终端启动板和发行物；不得用于状态 glyph、approval 或 error 行。
-- `assets/brand/yeux-signal-fish-fallback.svg`：无位图/无图像协议时的确定性线稿回退。
+- `assets/brand/yeux-fish-doodle-paper-v2.png`：从用户自有 `yuzai.png` 母版确定性提取的石墨透明墨稿。
+- `assets/brand/yeux-fish-doodle-nocturne-v2.png`：同一 alpha 墨稿的暖骨白深色版本，用于网页 Welcome 与富终端启动板。
+- `assets/brand/yeux-fish-doodle-fallback.svg`：无位图/无图像协议时的确定性线稿回退。
+- `assets/brand/yeux-signal-fish-v1.png`：已否决的 `image_gen` 纹章探索稿，只保留审计来源，产品不得引用。
+
+鱼仔的生产语义是“私人手稿角色”，不是“信号徽记”：不得添加中心火花、事件 rail、Wi-Fi 波纹、
+无限符号、镜像对称、鳞片或华丽尾鳍。生成模型可用于探索，但批准资产必须服从实物母版。
 
 推荐的富终端启动板：
 
@@ -248,4 +259,3 @@ reader 都必须保留同一批准结论。
 - 无色/ASCII/plain 下安全字段完整；
 - 24 小时运行没有动画、图片、终端状态或未清理输出泄漏；
 - 资产、提示词、许可证和 SHA-256 记录齐全。
-

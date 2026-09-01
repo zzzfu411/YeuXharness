@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -20,6 +18,7 @@ use yeux_protocol::{
 };
 use yeux_runtime::{
     descriptors::DescriptorKind, NewCommandReceipt, NewLedgerEvent, RegisteredDescriptor,
+    WorkspaceIdentitySnapshot,
 };
 
 use crate::runner::TurnRunSpec;
@@ -27,6 +26,15 @@ use crate::server::{
     CommandOutcome, Daemon, ReplayWindow, RpcFault, FEATURE_UNAVAILABLE, INVALID_STATE,
     MAX_PAGE_SIZE, NOT_FOUND,
 };
+
+/// Ingress budgets keep untrusted client content from growing the ledger or
+/// provider context without a corresponding scheduler decision.  These are
+/// hard ceilings; future configuration may only narrow them.
+const MAX_TURN_CONTENT_BLOCKS: usize = 128;
+const MAX_TURN_CONTENT_BYTES: usize = 256 * 1024;
+const MAX_TURN_TEXT_BYTES: usize = 64 * 1024;
+const MAX_TURN_STEER_BYTES: usize = 64 * 1024;
+const MAX_THREAD_TITLE_BYTES: usize = 512;
 
 impl Daemon {
     pub(crate) fn dispatch(
@@ -127,9 +135,16 @@ impl Daemon {
             },
             capabilities: ServerCapabilities {
                 unix_socket: cfg!(unix),
-                jobs: true,
+                // Job persistence (create/list/pause/resume) exists as a
+                // descriptor surface, but the scheduler and `job/run` are
+                // intentionally unavailable until M4.  Advertising the
+                // capability before that authority path is live causes
+                // clients to assume background execution is safe.
+                jobs: false,
                 subagents: false,
-                plugins: true,
+                // plugin-host is an experimental standalone process and is
+                // not connected to the daemon registry/policy/ledger path.
+                plugins: false,
             },
             host_ceiling: self.inner.config.host_ceiling,
         })
@@ -154,10 +169,15 @@ impl Daemon {
 
         let workspace_id = WorkspaceId::from_uuid(self.next_uuid()?);
         let now = self.inner.clock.now();
+        // Keep every persisted identity field tied to the same filesystem
+        // observation used by `Workspace::open`.  Re-statting `root` here
+        // would create a mixed digest/device/inode tuple across a replacement
+        // race and turn a safe conflict into an ambiguous record.
+        let identity_snapshot = runtime.identity_snapshot();
         let workspace = Workspace {
             id: workspace_id,
             root,
-            identity: workspace_identity(runtime.root(), runtime.identity()),
+            identity: workspace_identity(&identity_snapshot),
             trust: WorkspaceTrust::Untrusted,
             opened_at: now,
         };
@@ -256,6 +276,11 @@ impl Daemon {
         params_digest: &str,
         params: ThreadStartParams,
     ) -> Result<Value, RpcFault> {
+        validate_optional_bounded_text(
+            params.title.as_deref(),
+            "thread title",
+            MAX_THREAD_TITLE_BYTES,
+        )?;
         if !self
             .projection()?
             .workspaces
@@ -310,6 +335,11 @@ impl Daemon {
         params_digest: &str,
         params: ThreadForkParams,
     ) -> Result<Value, RpcFault> {
+        validate_optional_bounded_text(
+            params.title.as_deref(),
+            "thread title",
+            MAX_THREAD_TITLE_BYTES,
+        )?;
         let projection = self.projection()?;
         let parent = projection
             .threads
@@ -478,6 +508,18 @@ impl Daemon {
         params_digest: &str,
         params: TurnStartParams,
     ) -> Result<(Value, TurnRunSpec), RpcFault> {
+        validate_turn_content(&params.content)?;
+        if let Some(override_grant) = &params.capability_override {
+            if override_grant.mode > self.inner.config.host_ceiling {
+                return Err(RpcFault::new(
+                    RpcError::INVALID_PARAMS,
+                    "capability override exceeds the daemon host ceiling",
+                ));
+            }
+            // A client-provided override is a narrowing hint only.  It is
+            // persisted as input evidence and is never treated as an
+            // authority grant by the runner.
+        }
         let projection = self.projection()?;
         let thread = projection
             .threads
@@ -556,6 +598,12 @@ impl Daemon {
         params_digest: &str,
         params: TurnSteerParams,
     ) -> Result<Value, RpcFault> {
+        if params.message.len() > MAX_TURN_STEER_BYTES {
+            return Err(RpcFault::new(
+                RpcError::INVALID_PARAMS,
+                format!("steer message exceeds {MAX_TURN_STEER_BYTES}-byte limit"),
+            ));
+        }
         let projection = self.projection()?;
         let turn = projection
             .turns
@@ -627,20 +675,47 @@ impl Daemon {
                 },
             )?);
         }
-        events.push(self.new_event(
-            params.thread_id,
-            Some(params.turn_id),
-            agent_id,
-            command_id,
-            now,
-            Event::TurnStateChanged {
-                turn_id: params.turn_id,
-                from: TurnState::Cancelling,
-                to: TurnState::Cancelled,
-                reason: params.reason,
-            },
-        )?);
+        if !self.inner.config.executes_turns() {
+            // With no background runner there is no execution boundary that
+            // could still be active, so the control-plane command can close
+            // Cancelling -> Cancelled in the same receipt transaction.  In
+            // normal daemon mode the runner must observe the durable
+            // Cancelling state first; it will choose Cancelled only after
+            // proving that no tool outcome is unknown.
+            events.push(self.new_event(
+                params.thread_id,
+                Some(params.turn_id),
+                agent_id,
+                command_id,
+                now,
+                Event::TurnStateChanged {
+                    turn_id: params.turn_id,
+                    from: TurnState::Cancelling,
+                    to: TurnState::Cancelled,
+                    reason: params.reason,
+                },
+            )?);
+        }
         let response = encode(AcceptedResult { accepted: true })?;
+        if events.is_empty() {
+            // A repeated interrupt while the runner is already observing
+            // `Cancelling` has no new state event to append.  Keep the
+            // command idempotent by recording a receipt-only response rather
+            // than sending an empty event batch to the ledger.
+            let receipt = self
+                .inner
+                .ledger
+                .record_command_receipt(NewCommandReceipt {
+                    command_id: command_id.to_string(),
+                    method: method::TURN_INTERRUPT.to_owned(),
+                    params_digest: params_digest.to_owned(),
+                    response,
+                    created_at: self.inner.clock.now(),
+                })
+                .map_err(RpcFault::internal)?;
+            self.request_turn_cancel(params.turn_id);
+            return Ok(receipt.response);
+        }
         let result = self.commit_events(
             command_id,
             method::TURN_INTERRUPT,
@@ -1014,6 +1089,75 @@ impl Daemon {
     }
 }
 
+fn validate_turn_content(content: &[yeux_protocol::ContentBlock]) -> Result<(), RpcFault> {
+    if content.is_empty() {
+        return Err(RpcFault::new(
+            RpcError::INVALID_PARAMS,
+            "turn content must contain at least one block",
+        ));
+    }
+    if content.len() > MAX_TURN_CONTENT_BLOCKS {
+        return Err(RpcFault::new(
+            RpcError::INVALID_PARAMS,
+            format!("turn content exceeds {MAX_TURN_CONTENT_BLOCKS}-block limit"),
+        ));
+    }
+    let mut total = 0usize;
+    for block in content {
+        let (kind, bytes) = match block {
+            yeux_protocol::ContentBlock::Text { text } => ("text", text.len()),
+            yeux_protocol::ContentBlock::Image { media_type, source } => {
+                let source_bytes = match source {
+                    yeux_protocol::ImageSource::Url { url }
+                    | yeux_protocol::ImageSource::Artifact { uri: url }
+                    | yeux_protocol::ImageSource::Base64 { data: url } => url.len(),
+                };
+                ("image", media_type.len().saturating_add(source_bytes))
+            }
+            // Tool calls/results and reasoning are daemon-generated events;
+            // accepting them from turn/start would let a client forge model
+            // lineage or tool history.  They may still arrive from a
+            // provider through the runner's validated path.
+            yeux_protocol::ContentBlock::Reasoning { .. }
+            | yeux_protocol::ContentBlock::ToolCall { .. }
+            | yeux_protocol::ContentBlock::ToolResult { .. } => {
+                return Err(RpcFault::new(
+                    RpcError::INVALID_PARAMS,
+                    "turn content may contain only text or image blocks",
+                ));
+            }
+        };
+        if bytes > MAX_TURN_TEXT_BYTES {
+            return Err(RpcFault::new(
+                RpcError::INVALID_PARAMS,
+                format!("{kind} block exceeds {MAX_TURN_TEXT_BYTES}-byte limit"),
+            ));
+        }
+        total = total.saturating_add(bytes);
+        if total > MAX_TURN_CONTENT_BYTES {
+            return Err(RpcFault::new(
+                RpcError::INVALID_PARAMS,
+                format!("turn content exceeds {MAX_TURN_CONTENT_BYTES}-byte limit"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_bounded_text(
+    value: Option<&str>,
+    label: &str,
+    limit: usize,
+) -> Result<(), RpcFault> {
+    if value.is_some_and(|text| text.len() > limit) {
+        return Err(RpcFault::new(
+            RpcError::INVALID_PARAMS,
+            format!("{label} exceeds {limit}-byte limit"),
+        ));
+    }
+    Ok(())
+}
+
 fn decode<T: DeserializeOwned>(params: Value) -> Result<T, RpcFault> {
     let params = if params.is_null() { json!({}) } else { params };
     serde_json::from_value(params).map_err(|error| {
@@ -1040,18 +1184,8 @@ fn not_found(kind: &str, id: impl std::fmt::Display) -> RpcFault {
     RpcFault::new(NOT_FOUND, format!("{kind} not found: {id}"))
 }
 
-fn workspace_identity(root: &Path, digest: &str) -> WorkspaceIdentity {
-    #[cfg(unix)]
-    let (device, inode) = {
-        use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(root) {
-            Ok(metadata) => (Some(metadata.dev()), Some(metadata.ino())),
-            Err(_) => (None, None),
-        }
-    };
-    #[cfg(not(unix))]
-    let (device, inode) = (None, None);
-
+fn workspace_identity(snapshot: &WorkspaceIdentitySnapshot) -> WorkspaceIdentity {
+    let root = snapshot.canonical_root();
     let git_common_dir = root
         .join(".git")
         .canonicalize()
@@ -1060,9 +1194,9 @@ fn workspace_identity(root: &Path, digest: &str) -> WorkspaceIdentity {
         .map(|path| path.to_string_lossy().into_owned());
     WorkspaceIdentity {
         canonical_root: root.to_string_lossy().into_owned(),
-        digest: digest.to_owned(),
-        device,
-        inode,
+        digest: snapshot.digest().to_owned(),
+        device: snapshot.device(),
+        inode: snapshot.inode(),
         git_common_dir,
     }
 }
@@ -1124,7 +1258,10 @@ mod tests {
         .unwrap();
         let (response, _) =
             daemon.handle_line(&command(method::INITIALIZE, initialize), &mut connection);
-        assert_eq!(result(&response)["protocolVersion"]["major"], 1);
+        assert_eq!(
+            result(&response)["protocolVersion"]["major"],
+            PROTOCOL_VERSION.major
+        );
 
         let (response, _) = daemon.handle_line(
             &command(method::WORKSPACE_OPEN, json!({ "path": workspace.path() })),
@@ -1167,6 +1304,50 @@ mod tests {
         let recovered_thread = rebuilt.threads.values().next().unwrap();
         assert_eq!(recovered_thread.status, ThreadStatus::Failed);
         assert_eq!(recovered_thread.last_seq, 5);
+    }
+
+    #[test]
+    fn workspace_open_persists_identity_fields_from_one_runtime_snapshot() {
+        let state = tempfile::tempdir().unwrap();
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let runtime = yeux_runtime::Workspace::open(workspace_dir.path()).unwrap();
+        let snapshot = runtime.identity_snapshot();
+        let daemon = Daemon::open(DaemonConfig::in_directory(state.path())).unwrap();
+        let mut connection = ConnectionState {
+            initialized: true,
+            ..ConnectionState::default()
+        };
+
+        let (response, _) = daemon.handle_line(
+            &command(
+                method::WORKSPACE_OPEN,
+                json!({ "path": workspace_dir.path() }),
+            ),
+            &mut connection,
+        );
+        let persisted: Workspace = serde_json::from_value(
+            result(&response)
+                .get("workspace")
+                .cloned()
+                .expect("workspace/open result must include workspace"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            persisted.identity.canonical_root,
+            snapshot.canonical_root().to_string_lossy()
+        );
+        assert_eq!(persisted.identity.digest, snapshot.digest());
+        assert_eq!(persisted.identity.device, snapshot.device());
+        assert_eq!(persisted.identity.inode, snapshot.inode());
+
+        let projected = daemon
+            .projection()
+            .unwrap()
+            .workspaces
+            .remove(&persisted.id)
+            .expect("workspace/open must persist the workspace");
+        assert_eq!(projected.identity, persisted.identity);
     }
 
     #[test]
@@ -1337,6 +1518,71 @@ mod tests {
         let projection = daemon.projection().unwrap();
         assert_eq!(projection.turns.len(), 1);
         assert_eq!(projection.items.len(), 1);
+    }
+
+    #[test]
+    fn repeated_interrupt_while_cancelling_records_a_receipt_only() {
+        let state = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let daemon = Daemon::open(DaemonConfig::in_directory(state.path())).unwrap();
+        let mut connection = ConnectionState {
+            initialized: true,
+            ..ConnectionState::default()
+        };
+        let (opened, _) = daemon.handle_line(
+            &command(method::WORKSPACE_OPEN, json!({ "path": workspace.path() })),
+            &mut connection,
+        );
+        let workspace_id = opened["result"]["workspace"]["id"].clone();
+        let (started, _) = daemon.handle_line(
+            &command(method::THREAD_START, json!({ "workspaceId": workspace_id })),
+            &mut connection,
+        );
+        let thread_id = started["result"]["thread"]["id"].clone();
+        let (turn_started, _) = daemon.handle_line(
+            &command(
+                method::TURN_START,
+                json!({
+                    "threadId": thread_id,
+                    "content": [{"type": "text", "text": "interrupt me"}]
+                }),
+            ),
+            &mut connection,
+        );
+        let turn_id = turn_started["result"]["turn"]["id"].clone();
+        let first = command(
+            method::TURN_INTERRUPT,
+            json!({"threadId": thread_id, "turnId": turn_id, "reason": "stop"}),
+        );
+        let (first_response, _) = daemon.handle_line(&first, &mut connection);
+        assert_eq!(result(&first_response)["accepted"], true);
+        assert_eq!(
+            daemon
+                .projection()
+                .unwrap()
+                .turns
+                .values()
+                .next()
+                .unwrap()
+                .state,
+            TurnState::Cancelling
+        );
+
+        let second_id = uuid::Uuid::now_v7();
+        let second = command_with_id(
+            method::TURN_INTERRUPT,
+            json!({"threadId": thread_id, "turnId": turn_id, "reason": "still stop"}),
+            second_id,
+        );
+        let (second_response, _) = daemon.handle_line(&second, &mut connection);
+        assert_eq!(result(&second_response)["accepted"], true);
+        assert!(daemon
+            .inner
+            .ledger
+            .command_receipt(&second_id.to_string())
+            .unwrap()
+            .is_some());
+        assert_eq!(daemon.inner.ledger.all_events().unwrap().len(), 5);
     }
 
     #[test]

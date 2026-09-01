@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, path::Path};
 use yeux_protocol::{CapabilityGrant, CapabilityMode, EffectSet};
 
 #[derive(Clone, Debug)]
@@ -55,7 +55,7 @@ impl PolicyEngine for StrictPolicy {
     }
 }
 
-fn intersect_scopes(left: &[String], right: &[String]) -> Vec<String> {
+fn intersect_exact_scopes(left: &[String], right: &[String]) -> Vec<String> {
     let left: BTreeSet<_> = left.iter().cloned().collect();
     let right: BTreeSet<_> = right.iter().cloned().collect();
     if left.contains("*") {
@@ -67,16 +67,34 @@ fn intersect_scopes(left: &[String], right: &[String]) -> Vec<String> {
     left.intersection(&right).cloned().collect()
 }
 
+fn path_contains(parent: &str, child: &str) -> bool {
+    parent == "*" || Path::new(child).starts_with(Path::new(parent))
+}
+
+fn intersect_path_scopes(left: &[String], right: &[String]) -> Vec<String> {
+    let mut intersection = BTreeSet::new();
+    for left_scope in left {
+        for right_scope in right {
+            if path_contains(left_scope, right_scope) {
+                intersection.insert(right_scope.clone());
+            } else if path_contains(right_scope, left_scope) {
+                intersection.insert(left_scope.clone());
+            }
+        }
+    }
+    intersection.into_iter().collect()
+}
+
 fn intersect_two(left: &CapabilityGrant, right: &CapabilityGrant) -> CapabilityGrant {
     CapabilityGrant {
         mode: left.mode.minimum(right.mode),
-        filesystem_read: intersect_scopes(&left.filesystem_read, &right.filesystem_read),
-        filesystem_write: intersect_scopes(&left.filesystem_write, &right.filesystem_write),
-        filesystem_delete: intersect_scopes(&left.filesystem_delete, &right.filesystem_delete),
+        filesystem_read: intersect_path_scopes(&left.filesystem_read, &right.filesystem_read),
+        filesystem_write: intersect_path_scopes(&left.filesystem_write, &right.filesystem_write),
+        filesystem_delete: intersect_path_scopes(&left.filesystem_delete, &right.filesystem_delete),
         process: left.process && right.process,
-        network: intersect_scopes(&left.network, &right.network),
-        secrets: intersect_scopes(&left.secrets, &right.secrets),
-        external_write: intersect_scopes(&left.external_write, &right.external_write),
+        network: intersect_exact_scopes(&left.network, &right.network),
+        secrets: intersect_exact_scopes(&left.secrets, &right.secrets),
+        external_write: intersect_exact_scopes(&left.external_write, &right.external_write),
         expires_at: match (left.expires_at, right.expires_at) {
             (Some(left), Some(right)) => Some(left.min(right)),
             (Some(value), None) | (None, Some(value)) => Some(value),
@@ -94,10 +112,14 @@ pub fn intersect_grants(grants: &[CapabilityGrant]) -> CapabilityGrant {
         .unwrap_or_else(CapabilityGrant::observe)
 }
 
-fn scope_allows(grants: &[String], requested: &str) -> bool {
+fn exact_scope_allows(grants: &[String], requested: &str) -> bool {
     grants
         .iter()
         .any(|grant| grant == "*" || grant == requested)
+}
+
+fn path_scope_allows(grants: &[String], requested: &str) -> bool {
+    grants.iter().any(|grant| path_contains(grant, requested))
 }
 
 fn network_scope(scheme: &str, host: &str, port: Option<u16>) -> String {
@@ -136,7 +158,7 @@ pub fn evaluate_policy(input: PolicyInput) -> PolicyDecision {
     }
 
     for scope in &input.effects.filesystem_read {
-        if !scope_allows(&effective.filesystem_read, &scope.path) {
+        if !path_scope_allows(&effective.filesystem_read, &scope.path) {
             denied.push(format!(
                 "filesystem read is outside the grant: {}",
                 scope.path
@@ -145,7 +167,7 @@ pub fn evaluate_policy(input: PolicyInput) -> PolicyDecision {
     }
     for scope in &input.effects.filesystem_write {
         if effective.mode < CapabilityMode::Build
-            || !scope_allows(&effective.filesystem_write, &scope.path)
+            || !path_scope_allows(&effective.filesystem_write, &scope.path)
         {
             denied.push(format!(
                 "filesystem write is outside the grant: {}",
@@ -155,7 +177,7 @@ pub fn evaluate_policy(input: PolicyInput) -> PolicyDecision {
     }
     for scope in &input.effects.filesystem_delete {
         if effective.mode < CapabilityMode::Build
-            || !scope_allows(&effective.filesystem_delete, &scope.path)
+            || !path_scope_allows(&effective.filesystem_delete, &scope.path)
         {
             denied.push(format!(
                 "filesystem delete is outside the grant: {}",
@@ -170,12 +192,12 @@ pub fn evaluate_policy(input: PolicyInput) -> PolicyDecision {
     }
     for network in &input.effects.network {
         let requested = network_scope(&network.scheme, &network.host, network.port);
-        if !scope_allows(&effective.network, &requested) {
+        if !exact_scope_allows(&effective.network, &requested) {
             denied.push(format!("network access is outside the grant: {requested}"));
         }
     }
     for secret in &input.effects.secrets {
-        if !scope_allows(&effective.secrets, &secret.name) {
+        if !exact_scope_allows(&effective.secrets, &secret.name) {
             denied.push(format!(
                 "secret access is outside the grant: {}",
                 secret.name
@@ -190,7 +212,7 @@ pub fn evaluate_policy(input: PolicyInput) -> PolicyDecision {
             external.resource.as_deref().unwrap_or("*")
         );
         if effective.mode < CapabilityMode::Operate
-            || !scope_allows(&effective.external_write, &requested)
+            || !exact_scope_allows(&effective.external_write, &requested)
         {
             denied.push(format!("external write is outside the grant: {requested}"));
         }
@@ -219,5 +241,33 @@ pub fn evaluate_policy(input: PolicyInput) -> PolicyDecision {
         effective_grant: effective,
         approval_required,
         reasons,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filesystem_scope_allows_descendants_but_not_lexical_siblings() {
+        let grants = vec!["/workspace".to_owned()];
+
+        assert!(path_scope_allows(&grants, "/workspace/src/lib.rs"));
+        assert!(!path_scope_allows(&grants, "/workspace-other/secret"));
+    }
+
+    #[test]
+    fn filesystem_intersection_keeps_the_narrower_path_scope() {
+        let broad = vec!["/workspace".to_owned()];
+        let narrow = vec!["/workspace/src".to_owned()];
+
+        assert_eq!(
+            intersect_path_scopes(&broad, &narrow),
+            vec!["/workspace/src".to_owned()]
+        );
+        assert_eq!(
+            intersect_path_scopes(&narrow, &broad),
+            vec!["/workspace/src".to_owned()]
+        );
     }
 }

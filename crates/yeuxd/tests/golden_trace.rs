@@ -11,7 +11,7 @@ use std::{
 use serde::Deserialize;
 use serde_json::Value;
 
-const TRACE: &str = include_str!("../../../spec/traces/thread-lifecycle-v1.jsonl");
+const TRACE: &str = include_str!("../../../spec/traces/thread-lifecycle-v2.jsonl");
 const IO_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Deserialize)]

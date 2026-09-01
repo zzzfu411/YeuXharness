@@ -1,0 +1,123 @@
+[
+  {
+    "verdict": "confirmed",
+    "title": "workspace.search 朴素逐偏移匹配可被恶意仓库/模型输出触发 CPU 拒绝服务",
+    "description": "workspace.search 将每个候选文件读入有界缓冲后，在每个可能的 offset 执行完整 needle 切片相等比较。query 上限为 4096 字节、单文件上限为 1 MiB、累计扫描上限为 32 MiB，但这些限制没有限制每个 offset 的比较成本。对 32 个 1 MiB、内容全为 a 的普通文件，query=a 重复 4095 次后接 b（合法且无匹配）会产生约 4.28×10^9 次字节比较；独立 aarch64 release harness 观测单个 32 MiB 扫描约 2.66 秒，32 个等价并发扫描约 14.36 秒。runner 每个 turn 累计允许最多 32 个调用（同一模型响应可并发启动，后续 model round 不重置）并以 spawn_blocking 启动 worker；ToolSpec 的 5 秒 timeout 只是注册元数据，未被 runner 执行，取消也不能终止已经运行的同步 worker。攻击者不需要控制 provider：恶意仓库内容可通过 prompt injection 诱导正常 tool-capable provider 返回该调用。结果是当前用户 daemon 的 CPU 饱和、交互/订阅延迟和取消止血失败。",
+    "root_cause": "collect_literal_matches in crates/yeux-runtime/src/workspace_tools.rs does not use a linear-time or otherwise bounded-cost matching algorithm and does not enforce an execution budget, allowing long-prefix queries to consume disproportionate CPU.",
+    "intended_behavior": "workspace.search 应在既定文件、深度、字节、匹配和输出上限内，以可预测且可取消的成本完成字面搜索；模型或仓库内容即使不可信，也不应令 daemon 的 blocking worker 池长时间饥饿。",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "crates/yeuxd/src/runner.rs",
+        "line": 447,
+        "scope": "run",
+        "description": "provider 产生 tool calls 后，runner 在已协商 workspace 工具的路径接受调用并按 turn 的调用预算继续处理。"
+      },
+      {
+        "kind": "propagation",
+        "file": "crates/yeuxd/src/runner.rs",
+        "line": 534,
+        "scope": "run",
+        "description": "每个已准备的 workspace 调用被放入 tokio::task::spawn_blocking，闭包直接调用 tools.execute。"
+      },
+      {
+        "kind": "propagation",
+        "file": "crates/yeux-runtime/src/workspace_tools.rs",
+        "line": 558,
+        "scope": "search",
+        "description": "search 逐文件读取并检查累计扫描字节，随后把文件字节、query 和匹配输出传给字面匹配器。"
+      },
+      {
+        "kind": "sink",
+        "file": "crates/yeux-runtime/src/workspace_tools.rs",
+        "line": 900,
+        "scope": "collect_literal_matches",
+        "description": "循环在每个 offset 比较完整 needle；共同前缀很长且最终不匹配时重复执行近似 query 长度的比较。"
+      }
+    ],
+    "conditions": [
+      {
+        "kind": "third_party_dependency",
+        "description": "provider 必须声明并实际支持 tool calls；不需要 provider 被攻击者控制，正常 provider 也会转发模型输出。"
+      },
+      {
+        "kind": "data_state",
+        "description": "攻击者可影响的 workspace 至少包含一个或多个普通文件，文件内容与 query 形成很长共同前缀。"
+      },
+      {
+        "kind": "user_interaction",
+        "description": "用户启动一次 turn；恶意仓库提示或模型输出诱导 daemon 执行搜索。"
+      },
+      {
+        "kind": "environmental_dependency",
+        "description": "影响大小取决于本机 CPU、Tokio blocking pool 和是否存在并发 turn；默认单用户本地 daemon 的评级按定向可用性计算。"
+      }
+    ],
+    "execution": {
+      "attacker_perspective": "能够提交/影响用户仓库内容或其中的提示文本、但不拥有 daemon 同 UID 特权的攻击者；模型输出和恶意仓库内容属于威胁模型中的不可信输入。",
+      "payloads": [
+        "工作区：32 个普通文件，每个 1048576 字节，内容为 a。",
+        "合法 tool call 参数：{\"path\":\"\",\"query\":\"a 重复 4095 次后接 b\"}；query UTF-8 长度恰为 4096 字节。",
+        "放大输入：同一 turn 累计最多 32 个等价 workspace.search 调用（可在同一模型响应并发启动）；后续模型轮次不会重置该上限。"
+      ],
+      "instructions": [
+        "准备包含重复字符文件和诱导搜索提示的仓库，并让用户用启用 workspace 工具的 provider 启动 turn。",
+        "诱导模型返回上述 workspace.search 调用；无需修改 provider 配置或伪造 daemon 身份。",
+        "让 daemon 执行一轮多个调用，随后观察 CPU、后续 RPC/订阅延迟，并在 worker 运行时发送 turn/interrupt。"
+      ],
+      "expected_result": "搜索不会命中，但 blocking worker 持续做大量重复比较；单个 32 MiB 等价扫描约需数秒，32 个并发扫描可使本机 CPU 饱和十余秒，interrupt 只能阻止结果入账而不能立即回收已运行的 CPU 工作。"
+    },
+    "remediation": {
+      "strategy": "使用线性或子线性字节搜索算法，并将 CPU 操作预算、deadline、取消和并发调度纳入统一 invocation executor。ToolSpec timeout 必须由 scheduler 执行；若需要硬截止，应在可终止的隔离 worker/子进程中运行，而不是只对 JoinHandle 做超时等待。",
+      "code_changes": [
+        {
+          "file_name": "crates/yeux-runtime/src/workspace_tools.rs",
+          "fixed_code": "以 memchr::memmem、Two-Way 或 Aho–Corasick 替换 collect_literal_matches；在扫描循环暴露 cooperative deadline/cancellation 检查，并保持现有 query/file/scan/match/output 上限。"
+        },
+        {
+          "file_name": "crates/yeuxd/src/runner.rs",
+          "fixed_code": "通过统一 executor 读取 ToolSpec.timeout_ms，增加 per-daemon/per-workspace semaphore 与每 turn CPU/search budget；区分 Cancelled、TimedOut、Failed 和 Unknown，不能把仍运行的 blocking worker 当作已停止。"
+        },
+        {
+          "file_name": "crates/yeuxd/tests/tool_loop.rs",
+        "fixed_code": "增加长共同前缀、32-call 并发、预算耗尽和取消回归测试；断言有界完成时间、稳定错误码、取消后以 Unknown 表示无法证明停止（spawn_blocking 不可强杀），且正常结果顺序与 replay 不变。"
+        }
+      ]
+    },
+    "severity": {
+      "likelihood": {
+        "score": "low",
+        "reason": "需要用户运行包含恶意内容的仓库并启动 tool-capable turn；单用户本地场景不是匿名远程攻击，但模型/仓库 prompt injection 可自动触发，且单轮已有 32-call 放大。"
+      },
+      "impact": {
+        "score": "medium",
+        "reason": "可占满当前 daemon 的 CPU、拖慢交互和订阅并削弱取消；没有证据表明可越权读写、执行命令或影响其他用户。共享 daemon/后台多会话部署会扩大影响。"
+      },
+      "overall_severity": "low"
+    },
+    "confidence": {
+      "score": "high",
+      "reason": "静态 trace 与独立 release harness、并发基准一致；工具预算、spawn_blocking 和未执行 timeout 均由当前源代码逐行确认。"
+    }
+  },
+  {
+    "verdict": "rejected",
+    "reason": "候选‘turn interrupt 与 runner 存在可利用竞态’不成立。正常 RPC 路径在 crates/yeuxd/src/server.rs:521-529 获取与 Daemon::open_with 传给 TurnRunner 的同一共享 command_gate；interrupt、runner mutation 和结果持久化被该锁串行化。取消语义仍需完善，但没有被验证的竞态漏洞。"
+  },
+  {
+    "verdict": "rejected",
+    "reason": "候选‘workspace 根 identity 替换导致跨边界读取’的行为可由拥有 workspace 父目录写权限的同 UID/共享可写 actor 复现：commands.rs:144-161 持久化旧 digest，而 runner.rs:282-301、1039-1050 只按 root 字符串重新打开。THREAT_MODEL.md 明确排除 root/equivalent 和互不信任用户共享 daemon，但没有单独定义同 UID 本地进程；当前支持部署也未声明共享可写 workspace。因此本轮不把需要该额外权限的路径计为无条件 v1 security finding，而列为 P1 live-identity 发布阻断。若产品把共享可写 workspace/同 UID 对立进程纳入范围，应升级为条件性 finding。"
+  },
+  {
+    "verdict": "rejected",
+    "reason": "候选‘中间目录 symlink swap 绕过 containment’的代码竞态真实存在：workspace.rs:369-379 先 canonicalize，469-478 只对最终组件使用 O_NOFOLLOW；拥有中间目录写权限的 actor 可在两步之间替换中间目录。THREAT_MODEL.md 将 symlink/path traversal 列为范围内，但没有明确把同 UID/共享可写 actor 纳入或排除；当前支持部署也未承诺共享工作区。因此本轮把它作为 P1 dirfd/openat2 发布阻断和范围待决项，而不是无条件 confirmed finding；若该 actor 被纳入威胁模型，应升级为条件性 finding。"
+  },
+  {
+    "verdict": "rejected",
+    "reason": "候选‘TurnStart 可伪造 ToolCall/ToolResult 或 capability_override 越权’不成立。commands.rs:516-525 确实原样记录合法 ContentBlock 与 override，但 runner.rs:1133-1156 以 ItemKind 固定 role、完全忽略 override；provider 看到的用户消息字段最多造成兼容 API 拒绝或上下文污染，不会触发 runner 的模型工具执行路径。该输入面仍应补总上下文/lineage 预算。"
+  },
+  {
+    "verdict": "rejected",
+    "reason": "候选 provider SSE decoder 的重复 windows 搜索属于可优化的算法硬化项，但需要攻击者控制用户主动配置的 provider；THREAT_MODEL.md 将恶意 configured provider 明确置于 v1 范围外，且 provider 已有 8 MiB buffer、64 MiB stream、事件和累计输出上限，故不计为本轮漏洞。"
+  }
+]

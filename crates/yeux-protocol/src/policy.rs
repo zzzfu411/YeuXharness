@@ -1,4 +1,4 @@
-use crate::{AgentId, ApprovalId, EffectSet, ThreadId, WorkspaceId};
+use crate::{AgentId, ApprovalId, EffectSet, InvocationId, ThreadId, TurnId, WorkspaceId};
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -63,9 +63,13 @@ impl CapabilityGrant {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ApprovalBinding {
     pub approval_id: ApprovalId,
+    /// `allow once` is scoped to one concrete invocation, never merely to an
+    /// equivalent tool call elsewhere in the thread.
+    pub invocation_id: InvocationId,
     pub workspace_id: WorkspaceId,
     pub workspace_identity_digest: String,
     pub thread_id: ThreadId,
+    pub turn_id: TurnId,
     pub agent_id: AgentId,
     pub mode: CapabilityMode,
     pub tool_id: String,

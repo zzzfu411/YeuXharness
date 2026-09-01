@@ -1,5 +1,5 @@
 use thiserror::Error;
-use yeux_protocol::{Idempotency, InvocationId, InvocationState};
+use yeux_protocol::{Idempotency, InvocationId, InvocationReconciliationOutcome, InvocationState};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecoveryDisposition {
@@ -19,10 +19,29 @@ pub enum InvocationError {
 }
 
 pub fn can_transition_invocation(from: InvocationState, to: InvocationState) -> bool {
+    // The state-only helper cannot prove that a retry is safe, so it uses the
+    // fail-closed non-idempotent contract. Callers that possess the persisted
+    // idempotency classification must use the explicit helper below.
+    can_transition_invocation_with_idempotency(from, to, Idempotency::NonIdempotent)
+}
+
+/// Validates an invocation transition with the idempotency contract required
+/// for recovery from an unknown outcome.
+///
+/// `Unknown -> Started` is an explicit retry and is therefore available only
+/// to idempotent invocations. Resolving an unknown outcome is deliberately not
+/// an ordinary transition; callers must use [`can_reconcile_invocation`] and
+/// [`InvocationMachine::reconcile`] so recovery cannot be confused with a
+/// fresh execution result.
+pub fn can_transition_invocation_with_idempotency(
+    from: InvocationState,
+    to: InvocationState,
+    idempotency: Idempotency,
+) -> bool {
     if from == to || from.is_terminal() {
         return false;
     }
-    matches!(
+    let ordinary = matches!(
         (from, to),
         (InvocationState::Proposed, InvocationState::Approved)
             | (InvocationState::Approved, InvocationState::Prepared)
@@ -37,7 +56,27 @@ pub fn can_transition_invocation(from: InvocationState, to: InvocationState) -> 
             | (InvocationState::Approved, InvocationState::Cancelled)
             | (InvocationState::Prepared, InvocationState::Failed)
             | (InvocationState::Prepared, InvocationState::Cancelled)
-    )
+    );
+    ordinary
+        || (from == InvocationState::Unknown
+            && to == InvocationState::Started
+            && matches!(
+                idempotency,
+                Idempotency::Idempotent | Idempotency::IdempotentWithKey
+            ))
+}
+
+/// Returns whether durable reconciliation evidence may resolve the current
+/// invocation without executing it again.
+pub fn can_reconcile_invocation(
+    from: InvocationState,
+    outcome: InvocationReconciliationOutcome,
+) -> bool {
+    from == InvocationState::Unknown
+        && matches!(
+            outcome,
+            InvocationReconciliationOutcome::Completed | InvocationReconciliationOutcome::Failed
+        )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,7 +113,23 @@ impl InvocationMachine {
 
     pub fn transition(&mut self, to: InvocationState) -> Result<(), InvocationError> {
         let from = self.state;
-        if !can_transition_invocation(from, to) {
+        if !can_transition_invocation_with_idempotency(from, to, self.idempotency) {
+            return Err(InvocationError::InvalidTransition { from, to });
+        }
+        self.state = to;
+        Ok(())
+    }
+
+    /// Resolve an unknown outcome from external evidence without retrying the
+    /// invocation. The caller must persist the corresponding reconciliation
+    /// evidence alongside the state change.
+    pub fn reconcile(
+        &mut self,
+        outcome: InvocationReconciliationOutcome,
+    ) -> Result<(), InvocationError> {
+        let from = self.state;
+        let to = outcome.state();
+        if !can_reconcile_invocation(from, outcome) {
             return Err(InvocationError::InvalidTransition { from, to });
         }
         self.state = to;

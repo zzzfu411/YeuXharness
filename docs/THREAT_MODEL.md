@@ -18,6 +18,8 @@ enforced by the operating system rather than by prompts.
   account on the same host.
 - TUI terminal control-sequence injection and unexpectedly large or fragmented
   provider responses.
+- Malformed, duplicated or oversized tool-call fragments, and resource
+  exhaustion through deep, large or link-heavy workspace trees.
 
 ## Out of scope for v1
 
@@ -47,7 +49,15 @@ enforced by the operating system rather than by prompts.
    sinks; JSONL retains the original protocol payload for faithful replay and
    automation. Direct plugin-host/daemon stderr remains a separate integration
    boundary until those processes become supported interactive entry points.
-9. Provider error bodies, SSE bytes/events, emitted output and tracked tool
-   calls have hard resource ceilings.
+9. Provider error bodies, SSE bytes/events, emitted output, tool-call
+   arguments, workspace traversal and tool results have hard resource
+   ceilings.
 10. Process target variables never enter the Seatbelt or bubblewrap launcher
     environment before isolation is active.
+11. The read-only Agent loop advertises and dispatches only the built-in
+    `workspace.list`, `workspace.read` and `workspace.search` tools. Their
+    resolved effects remain inside the opened workspace; unknown or
+    unnegotiated tools never fall through to a shell, plugin or other executor.
+12. Concurrent read-only calls may finish in any order (with one search slot per
+    canonical workspace identity), but their persisted results and the next
+    model request follow the model's original call order.

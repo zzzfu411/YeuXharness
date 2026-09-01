@@ -64,6 +64,16 @@ export function sanitizeTerminalText(text: string): string {
   return sanitized;
 }
 
+/**
+ * Sanitizes an untrusted value for a renderer-owned structural line.
+ *
+ * Model prose may keep line breaks via `sanitizeTerminalText`; identifiers,
+ * diagnostics and prompt labels must not be able to escape their rail/frame.
+ */
+export function sanitizeTerminalLine(text: string): string {
+  return sanitizeTerminalText(text).replace(/[\r\n\t]+/g, " ").trim();
+}
+
 function consumeEscapeSequence(text: string, escapeIndex: number): number {
   const introducer = text.charCodeAt(escapeIndex + 1);
   if (Number.isNaN(introducer)) return escapeIndex;

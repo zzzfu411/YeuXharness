@@ -1,10 +1,12 @@
 # YeuX Harness v1 路线图
 
-状态日期：2026-08-30  
-当前阶段：M0 契约基线已具备主要骨架，M1 只读闭环正在实现  
+状态日期：2026-09-01<br>
+当前阶段：M0 契约基线已具备主要骨架，M1 核心只读 Agent loop 已贯通；Run 3 P0/P1-A/C 执行记录已更新，副作用门槛仍未开放<br>
 当前版本：`0.1.0` 开发基线，不是 v0.1 发布版
 
 路线图采用阶段门槛，而不是以“文件已经存在”判断完成。某项能力只有在 daemon 执行路径中接通、失败路径经过测试、文档与协议同步后才算交付。
+
+本次执行证据与未闭环阻断项见 [`Run 3 执行记录`](audits/2026-09-01-run-3/EXECUTION_LOG.md)。
 
 ## 1. 当前实现快照
 
@@ -14,12 +16,12 @@
 | 协议 | JSON-RPC 类型、UUIDv7 ID、版本协商、54 份稳定 schema 与 drift test | TS 自动生成与跨语言完整漂移门禁 |
 | 状态 | Workspace/Thread/Turn/Item/Job 事件、状态机、纯 projection replay | compaction、FTS、快照校验、reconciliation UI |
 | 存储 | SQLite WAL、追加式 events、Thread 内 seq、内容寻址 artifact | 迁移、备份、配额与 GC |
-| daemon | stdio、每用户私有 Unix socket、单写者锁、订阅/补发、跨重启命令去重、单请求 Turn runner | 工具循环、审批与完整 provider 调度 |
-| runtime | workspace revision、带流/输出资源上限的 OpenAI-compatible adapter、policy、process、sandbox、artifact 原语 | 统一工具管线、审批与凭据代理、网络代理 |
-| TypeScript | JSON-RPC 客户端、socket 身份检查、终端安全渲染与原始 JSONL、stdio fallback、plugin host | OpenTUI、完整协议面、plugin OS 沙箱与 daemon 接入 |
+| daemon | stdio、每用户私有 Unix socket、单写者锁、订阅/补发、跨重启命令去重、有界多轮只读 Agent loop、ToolCall/ToolResult 与 Invocation 入账 | 写入/进程统一管线、审批与完整 provider 调度 |
+| runtime | workspace revision、结构化 `list/read/search`、root/file live identity revalidation、带流/输出资源上限的 OpenAI-compatible adapter、policy、process、sandbox、artifact 原语 | 写入/进程统一工具管线、审批、`CredentialBroker` 与网络代理；dirfd/openat2 CAS 仍待 M2 |
+| TypeScript | JSON-RPC 客户端、socket 身份检查、终端安全渲染与原始 JSONL、stdio fallback、plugin host | OpenTUI、完整协议面、交互/JSONL parity、plugin OS 沙箱与 daemon 接入 |
 | 自动化/多智能体 | 公共类型、事件和 Job 元数据状态 | scheduler、worktree 子智能体、预算与 handoff |
 
-最重要的现状限制：`turn/start` 已能在配置 OpenAI-compatible provider 后完成一次无工具模型请求，但尚不能调用结构化只读工具或进入多轮工具循环。当前代码仍不能完成真实的“读、改、测、修”。
+最重要的现状限制已经从“没有工具循环”转移为“没有受保护的写入与进程闭环”：`turn/start` 在配置 OpenAI-compatible provider 后已能完成 `provider -> workspace.list/read/search -> provider -> answer`，但 `apply_patch`、process、policy/approval/sandbox 仍未接入同一 daemon 执行路径。当前代码可完成有边界的只读仓库任务，仍不能完成真实的“读、改、测、修”。
 
 ## 2. M0：契约与仓库基线
 
@@ -64,20 +66,26 @@
 - [x] turn start/steer/interrupt 的持久化控制面。
 - [x] SQLite ledger 与从事件重建 projection。
 - [x] OpenAI-compatible Chat Completions SSE adapter 和 provider-neutral 流事件；错误体、SSE 缓冲/总量、SSE/模型事件、累计输出和 tool-call 状态均有硬上限。
-- [x] 从 ledger 构建上下文（含按 `parent_seq` 截断的多级 fork 谱系）、调用一次 provider、持久化流事件/assistant Item 并进入 Turn 终态的最小 runner。
+- [x] 从 ledger 构建上下文（含按 `parent_seq` 截断的多级 fork 谱系）、调用 provider、持久化流事件/assistant Item 并进入 Turn 终态的 runner。
 - [x] 通过 daemon 参数注册无凭据 OpenAI-compatible endpoint，并将运行中 interrupt 传递到 runner。
-- [x] 取消后拒绝 provider 残余 delta；重启后将未终结的纯模型 Turn 明确标记失败且不重调 provider。
-- [x] workspace list/read/search 原语。
+- [x] 取消后拒绝 provider 残余 delta；工具若已跨越执行边界且结果未知则记录 Unknown 并以 reconciliation-required 失败收束；重启后将未终结 Turn 明确标记失败且不重调 provider 或工具。
+- [x] 将 `workspace.list`、`workspace.read`、`workspace.search` 注册为 provider 可见的结构化只读工具；严格拒绝未知 JSON 字段并记录实际解析的 read effect。
+- [x] 为只读工具固定路径逃逸、symlink、硬链接、UTF-8 与资源防护；硬上限覆盖遍历项、深度、单文件、累计扫描、匹配数和 JSON 输出。
+- [x] 汇聚碎片化 tool-call JSON，保持首次出现顺序并限制每轮调用数、单调用参数和累计参数字节。
+- [x] 将 runner 扩展为有界多轮 `provider -> tools -> provider` loop；默认限制 8 个模型轮次、32 个工具调用和 4 MiB 累计工具结果。
+- [x] 持久化 ToolCall/ToolResult Item 和 `proposed -> approved -> prepared -> started -> completed/failed/cancelled/unknown` Invocation 生命周期；Unknown 需要后续 reconciliation。
+- [x] 同轮只读工具受 daemon 全局 worker 闸门约束并可并发执行，结果严格按模型调用顺序持久化并进入下一次请求；同一 workspace identity 的 `search` 使用单槽闸门。
+- [x] 每轮模型请求前重新加载 ledger，使已持久化 `turn/steer` 在下一安全点进入当前 loop。
+- [x] 未注册或未协商工具永不分派到 Shell、写入、网络或插件执行器；错误路径有稳定诊断和无副作用测试。
+- [x] 增加真实 JSON-RPC 纵向测试，覆盖 `client -> daemon -> provider -> workspace.read -> provider -> answer`。
 - [x] TypeScript 连接、JSONL 渲染和交互输入基线；人类终端输出会清理 ANSI/OSC、C0/C1 与双向文本控制字符，JSONL 保留原始协议内容。
 
 ### 完成 M1 仍需
 
-- [ ] 将最小 runner 扩展为完整 Agent loop：工具调用、结果回灌和再次 provider 请求。
 - [ ] 将凭据句柄与 `CredentialBroker` 接入 daemon provider 配置。
-- [ ] 只接入结构化只读工具，并验证并行结果按模型调用顺序持久化。
-- [ ] 让 `steer` 在安全点进入当前 loop，而不只是记录事件。
 - [ ] 完成 `--jsonl` 无头模式与交互 TUI 的投影一致性测试。
 - [ ] 增加会话 FTS 搜索所需的最小投影，完整记忆仍属于 M3。
+- [ ] 将只读纵向测试扩展为真实仓库任务套件，并补齐 crash/restart、replay 零外部调用和随机并发顺序门禁。
 
 ### 退出门槛
 
@@ -91,7 +99,7 @@
 
 目标：发布 v0.1，可在真实仓库中安全完成“读、改、测、修”。
 
-已有但尚未集成的原语包括 base-hash patch、原子替换、串行 process executor、Seatbelt/bubblewrap wrapper、policy evaluator 和 artifact store。ProcessExecutor 已清空继承环境、校验目标变量，并确保目标环境不会在隔离建立前影响 sandbox launcher；它仍未接入 daemon。M2 的核心工作是把这些原语接入一条不能绕过的执行路径，且进程工具不得在该安全门槛接通前开放。
+只读调用已经具备持久化 Invocation 状态，但它走的是刻意收窄的 M1 内置路径，不等于通用副作用管线已完成。已有但尚未集成的原语包括 base-hash patch、原子替换、串行 process executor、Seatbelt/bubblewrap wrapper、policy evaluator 和 artifact store。ProcessExecutor 已清空继承环境、校验目标变量，并确保目标环境不会在隔离建立前影响 sandbox launcher；它仍未接入 daemon。M2 的核心工作是把这些原语接入一条不能绕过的执行路径，且进程工具不得在该安全门槛接通前开放。
 
 ### 交付物
 
@@ -101,7 +109,7 @@
 - [ ] macOS Seatbelt、Linux bubblewrap/namespaces，能力不足时失败关闭。
 - [ ] 将已加固 launcher 环境边界的串行 `ProcessExecutor` 接入 daemon 统一管线，并补齐独立 stdout/stderr、超时及覆盖 `setsid`/`setpgid` 逃逸的完整进程树监督；当前 PGID 清理原语只覆盖未主动脱组的后代。
 - [ ] artifact 引用、输出裁剪、敏感数据跨 chunk 删改和配额。
-- [ ] 不可确定非幂等调用的 `unknown` 与 reconciliation 流程。
+- [ ] 将基础 Unknown marker/diagnostic 扩展为副作用工具的完整 reconciliation 流程与交互界面。
 - [ ] 工具网络代理与私网、云 metadata、DNS rebinding 和代理绕过防护。
 
 ### v0.1 发布门槛

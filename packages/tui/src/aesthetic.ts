@@ -45,7 +45,6 @@ export const DEFAULT_THEME: ThemeName = "nocturne";
  */
 export const UNICODE_GLYPHS = Object.freeze({
   brandCompact: "><",
-  seal: "⋈",
   workspace: "⌂",
   connected: "↔",
   provider: "◇",
@@ -55,6 +54,9 @@ export const UNICODE_GLYPHS = Object.freeze({
   branch: "├─",
   end: "└─",
   continuation: "│ ",
+  approvalStart: "┏",
+  approvalRail: "┃",
+  approvalEnd: "┗",
   lightDivider: "┄",
   strongDivider: "━",
   beat: "·",
@@ -95,7 +97,6 @@ export const UNICODE_GLYPHS = Object.freeze({
 
 export const ASCII_GLYPHS = Object.freeze({
   brandCompact: "><",
-  seal: "X",
   workspace: "[local]",
   connected: "<->",
   provider: "o",
@@ -105,6 +106,9 @@ export const ASCII_GLYPHS = Object.freeze({
   branch: "+-",
   end: "`-",
   continuation: "| ",
+  approvalStart: "+-",
+  approvalRail: "|",
+  approvalEnd: "`-",
   lightDivider: "- -",
   strongDivider: "=",
   beat: ".",
@@ -179,6 +183,7 @@ export interface ThemePalette {
   readonly approval: string;
   readonly success: string;
   readonly warning: string;
+  readonly danger: string;
 }
 
 export const NOCTURNE_PALETTE: ThemePalette = Object.freeze({
@@ -194,6 +199,7 @@ export const NOCTURNE_PALETTE: ThemePalette = Object.freeze({
   approval: "#D17968",
   success: "#79A988",
   warning: "#D0AB61",
+  danger: "#D17968",
 });
 
 export const PAPER_PALETTE: ThemePalette = Object.freeze({
@@ -209,6 +215,7 @@ export const PAPER_PALETTE: ThemePalette = Object.freeze({
   approval: "#8C3A2C",
   success: "#355F43",
   warning: "#755719",
+  danger: "#8C3A2C",
 });
 
 export function paletteForTheme(theme: ThemeName = DEFAULT_THEME): ThemePalette {
@@ -232,9 +239,21 @@ export function detectTerminalCapabilities(
   const termDumb = term === "dumb";
   const locale = options.locale ?? env.LC_ALL ?? env.LC_CTYPE ?? env.LANG ?? "";
   const localeLooksUtf8 = locale.length === 0 || /utf-?8/i.test(locale);
-  const ascii = options.ascii === true || env.YEUX_ASCII === "1" || !localeLooksUtf8;
-  const plain = options.plain ?? (!isTTY || termDumb || ci);
-  const reducedMotion = options.reducedMotion ?? (env.YEUX_REDUCED_MOTION === "1" || plain);
+  const ascii =
+    options.ascii === true ||
+    env.YEUX_ASCII === "1" ||
+    !localeLooksUtf8 ||
+    termDumb;
+
+  // These are capability ceilings, not preferences: a caller cannot force an
+  // alternate-screen presentation into a pipe/CI/dumb terminal by passing
+  // `plain: false`.
+  const plain = options.plain === true || !isTTY || termDumb || ci;
+  const reducedMotion =
+    options.reducedMotion === true ||
+    env.YEUX_REDUCED_MOTION === "1" ||
+    noColor ||
+    plain;
 
   let colorDepth: ColorDepth;
   if (noColor || !isTTY || termDumb || ci || options.color === false) {
@@ -251,7 +270,7 @@ export function detectTerminalCapabilities(
     isTTY,
     columns,
     colorDepth,
-    unicode: !ascii && !termDumb,
+    unicode: !ascii,
     plain,
     reducedMotion,
   });
@@ -283,35 +302,39 @@ export type ColorRole =
   | "warning"
   | "danger";
 
-const ANSI_16_CODES: Record<ColorRole, string> = {
-  muted: "2",
-  text: "0",
-  focus: "36",
-  approval: "31",
-  success: "32",
-  warning: "33",
-  danger: "31",
-};
+export interface AnsiRoleToken {
+  readonly ansi16: string;
+  readonly ansi256: number;
+  readonly rgb: readonly [number, number, number];
+}
 
-const ANSI_256_CODES: Record<ColorRole, number> = {
-  muted: 245,
-  text: 253,
-  focus: 74,
-  approval: 174,
-  success: 108,
-  warning: 179,
-  danger: 174,
-};
+export const ANSI_RESET = "\u001b[0m";
 
-const RGB_CODES: Record<ColorRole, readonly [number, number, number]> = {
-  muted: [153, 149, 141],
-  text: [226, 222, 213],
-  focus: [108, 154, 179],
-  approval: [209, 121, 104],
-  success: [121, 169, 136],
-  warning: [208, 171, 97],
-  danger: [209, 121, 104],
-};
+/**
+ * Nocturne is the canonical terminal palette. Keeping its SGR values in one
+ * exported table prevents renderers, prompts and future OpenTUI widgets from
+ * inventing subtly different safety colours.
+ */
+export const NOCTURNE_ANSI_TOKENS: Readonly<Record<ColorRole, AnsiRoleToken>> =
+  Object.freeze({
+    muted: { ansi16: "2", ansi256: 245, rgb: [153, 149, 141] },
+    text: { ansi16: "0", ansi256: 253, rgb: [226, 222, 213] },
+    focus: { ansi16: "36", ansi256: 74, rgb: [108, 154, 179] },
+    approval: { ansi16: "31", ansi256: 174, rgb: [209, 121, 104] },
+    success: { ansi16: "32", ansi256: 108, rgb: [121, 169, 136] },
+    warning: { ansi16: "33", ansi256: 179, rgb: [208, 171, 97] },
+    danger: { ansi16: "31", ansi256: 174, rgb: [209, 121, 104] },
+  });
+
+const PAPER_ANSI_256_CODES: Readonly<Record<ColorRole, number>> = Object.freeze({
+  muted: 59,
+  text: 234,
+  focus: 24,
+  approval: 88,
+  success: 22,
+  warning: 94,
+  danger: 88,
+});
 
 /** Paint only renderer-owned text; callers must sanitize untrusted text first. */
 export function paint(
@@ -321,44 +344,52 @@ export function paint(
   theme: ThemeName = DEFAULT_THEME,
 ): string {
   const prefix = ansiPrefix(role, capabilities.colorDepth, theme);
-  return prefix.length === 0 ? text : `${prefix}${text}\u001b[0m`;
+  return prefix.length === 0 ? text : `${prefix}${text}${ANSI_RESET}`;
 }
 
 function ansiPrefix(role: ColorRole, depth: ColorDepth, theme: ThemeName): string {
+  if (theme === "mono") return "";
+
   switch (depth) {
     case "truecolor": {
       const [r, g, b] = rgbForRole(role, theme);
       return `\u001b[38;2;${r};${g};${b}m`;
     }
     case "ansi256":
-      return `\u001b[38;5;${ANSI_256_CODES[role]}m`;
+      return `\u001b[38;5;${ansi256ForRole(role, theme)}m`;
     case "ansi16":
-      return `\u001b[${ANSI_16_CODES[role]}m`;
+      return `\u001b[${NOCTURNE_ANSI_TOKENS[role].ansi16}m`;
     case "none":
       return "";
   }
 }
 
 function rgbForRole(role: ColorRole, theme: ThemeName): readonly [number, number, number] {
-  if (theme === "paper") {
-    const palette = PAPER_PALETTE;
-    switch (role) {
-      case "muted":
-        return hexToRgb(palette.muted);
-      case "text":
-        return hexToRgb(palette.text);
-      case "focus":
-        return hexToRgb(palette.focus);
-      case "approval":
-      case "danger":
-        return hexToRgb(palette.approval);
-      case "success":
-        return hexToRgb(palette.success);
-      case "warning":
-        return hexToRgb(palette.warning);
-    }
+  if (theme !== "paper") return NOCTURNE_ANSI_TOKENS[role].rgb;
+
+  const palette = PAPER_PALETTE;
+  switch (role) {
+    case "muted":
+      return hexToRgb(palette.muted);
+    case "text":
+      return hexToRgb(palette.text);
+    case "focus":
+      return hexToRgb(palette.focus);
+    case "approval":
+      return hexToRgb(palette.approval);
+    case "success":
+      return hexToRgb(palette.success);
+    case "warning":
+      return hexToRgb(palette.warning);
+    case "danger":
+      return hexToRgb(palette.danger);
   }
-  return RGB_CODES[role];
+}
+
+function ansi256ForRole(role: ColorRole, theme: ThemeName): number {
+  return theme === "paper"
+    ? PAPER_ANSI_256_CODES[role]
+    : NOCTURNE_ANSI_TOKENS[role].ansi256;
 }
 
 function hexToRgb(hex: string): readonly [number, number, number] {
@@ -387,10 +418,14 @@ export function statusGlyphName(state: string): GlyphName {
       return "approval";
     case "authorizing":
       return "authorized";
+    case "scheduling":
+      return "accepted";
     case "executing":
       return "executing";
     case "integrating_results":
       return "integrating";
+    case "waiting_for_input":
+      return "approval";
     case "completed":
       return "completed";
     case "cancelled":

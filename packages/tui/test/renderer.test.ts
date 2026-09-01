@@ -32,6 +32,48 @@ describe("EventRenderer", () => {
     expect(formatEvent(event, false)).toBe("[ok] completed");
   });
 
+  it("uses the Nocturne timeline tokens by default in a rich terminal", () => {
+    let output = "";
+    const renderer = new EventRenderer({
+      env: {
+        TERM: "xterm-256color",
+        COLORTERM: "truecolor",
+        LANG: "en_US.UTF-8",
+      },
+      isTTY: true,
+      columns: 120,
+      write: (text) => {
+        output += text;
+      },
+    });
+
+    renderer.render(event);
+
+    expect(renderer.theme).toBe("nocturne");
+    expect(output).toBe("\u001b[38;2;121;169;136m0001 │ ✓ COMPLETED\u001b[0m\n");
+  });
+
+  it("falls back to an uncoloured ASCII timeline for TERM=dumb", () => {
+    let output = "";
+    const renderer = new EventRenderer({
+      env: { TERM: "dumb", LANG: "en_US.UTF-8" },
+      isTTY: true,
+      color: "truecolor",
+      write: (text) => {
+        output += text;
+      },
+    });
+
+    renderer.render(event);
+
+    expect(renderer.capabilities).toMatchObject({
+      colorDepth: "none",
+      unicode: false,
+      plain: true,
+    });
+    expect(output).toBe("0001 | OK COMPLETED\n");
+  });
+
   it("preserves transport diagnostics in JSONL mode", () => {
     let output = "";
     const renderer = new EventRenderer({
@@ -108,5 +150,29 @@ describe("EventRenderer", () => {
 
     expect(JSON.parse(output)).toEqual(rawEvent);
     expect(JSON.parse(output).payload.model_event.text).toBe(rawText);
+  });
+
+  it("keeps JSONL bytes independent of theme, colour and glyph settings", () => {
+    const outputs: string[] = [];
+    for (const options of [
+      { theme: "nocturne" as const, color: "truecolor" as const, ascii: false },
+      { theme: "paper" as const, color: "ansi256" as const, ascii: true },
+      { theme: "mono" as const, color: false, ascii: true },
+    ]) {
+      let output = "";
+      const renderer = new EventRenderer({
+        jsonl: true,
+        ...options,
+        isTTY: true,
+        env: { TERM: "xterm-256color", LANG: "en_US.UTF-8" },
+        write: (text) => {
+          output += text;
+        },
+      });
+      renderer.render(event);
+      outputs.push(output);
+    }
+
+    expect(new Set(outputs)).toEqual(new Set([`${JSON.stringify(event)}\n`]));
   });
 });

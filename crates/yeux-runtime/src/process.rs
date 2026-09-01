@@ -1,5 +1,7 @@
 //! Serialized, non-shell process execution with a minimal environment.
 
+#![allow(clippy::result_large_err)]
+
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},

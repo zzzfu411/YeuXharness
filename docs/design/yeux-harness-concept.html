@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="paper">
+<html lang="zh-CN" data-theme="nocturne">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -268,17 +268,24 @@
 
       .fish-mark {
         position: absolute;
-        right: clamp(8px, 4vw, 70px);
-        bottom: -4px;
-        width: 84px;
-        height: 44px;
-        color: var(--blue);
-        overflow: visible;
-        transform: rotate(2deg);
+        right: clamp(2px, 3vw, 48px);
+        bottom: -22px;
+        width: 176px;
+        height: 106px;
+        object-fit: cover;
+        object-position: 50% 43%;
+        opacity: 0.78;
+        pointer-events: none;
+        transform: rotate(1.2deg);
+      }
+
+      html[data-theme="paper"] .fish-mark--nocturne,
+      html[data-theme="nocturne"] .fish-mark--paper {
+        display: none;
       }
 
       html[data-theme="nocturne"] .fish-mark {
-        color: var(--signal);
+        opacity: 0.68;
       }
 
       .theme-station {
@@ -1166,7 +1173,9 @@
 
         .fish-mark {
           right: 0;
-          width: 65px;
+          bottom: -14px;
+          width: 132px;
+          height: 80px;
         }
 
         .theme-station {
@@ -1373,29 +1382,27 @@
           <h1>yeux</h1>
           <span class="harness-word">harness</span>
           <p class="hand-note">listen to the ledger, not the noise.</p>
-          <svg class="fish-mark" viewBox="0 0 108 56" aria-hidden="true">
-            <path
-              d="M18 29C31 12 57 8 79 24C88 18 97 15 104 16C101 24 101 32 104 40C96 40 87 37 79 32C57 48 31 45 18 29Z"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2.2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            />
-            <path d="M24 29C39 25 54 25 72 29" fill="none" stroke="currentColor" stroke-width="1.5" />
-            <circle cx="36" cy="23" r="2.3" fill="currentColor" />
-            <path d="M48 13C52 18 55 20 63 21" fill="none" stroke="currentColor" stroke-width="1.4" />
-            <path d="M48 44C53 38 57 36 64 35" fill="none" stroke="currentColor" stroke-width="1.4" />
-          </svg>
+          <img
+            class="fish-mark fish-mark--paper"
+            src="../../assets/brand/yeux-fish-doodle-paper-v2.png"
+            alt=""
+            aria-hidden="true"
+          />
+          <img
+            class="fish-mark fish-mark--nocturne"
+            src="../../assets/brand/yeux-fish-doodle-nocturne-v2.png"
+            alt=""
+            aria-hidden="true"
+          />
         </div>
 
         <div class="theme-station">
-          <div class="theme-readout" id="theme-readout" aria-live="polite">Theme / Paper</div>
+          <div class="theme-readout" id="theme-readout" aria-live="polite">Theme / Nocturne</div>
           <div class="theme-switch" role="group" aria-label="选择界面主题">
-            <button class="theme-button" type="button" data-theme-choice="paper" aria-pressed="true">
+            <button class="theme-button" type="button" data-theme-choice="paper" aria-pressed="false">
               Paper
             </button>
-            <button class="theme-button" type="button" data-theme-choice="nocturne" aria-pressed="false">
+            <button class="theme-button" type="button" data-theme-choice="nocturne" aria-pressed="true">
               Nocturne
             </button>
           </div>
@@ -1767,7 +1774,7 @@ crates/yeux-runtime/src/ledger.rs:554  EventLedger::replay</pre>
         <p class="design-note">
           <strong>Quiet Sequencer</strong> 将每个 Turn 视作一条可核验的音轨：事件顺序由 ledger 决定，动效只属于显示时钟；主题可以个性化，危险、审批和未知状态的符号与明文不可被主题覆盖。
         </p>
-        <div class="version-mark">YeuX Harness / interface concept<br />2026-08-30 · local-first</div>
+        <div class="version-mark">YeuX Harness / interface concept<br />2026-08-31 · local-first</div>
       </footer>
     </div>
 

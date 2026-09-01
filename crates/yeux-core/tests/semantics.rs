@@ -69,7 +69,7 @@ fn steering_is_ordered_and_interrupt_finishes_explicitly() {
 }
 
 #[test]
-fn unknown_non_idempotent_invocation_never_auto_retries() {
+fn unknown_non_idempotent_invocation_can_be_reconciled_but_not_retried() {
     let invocation_id = InvocationId::from_uuid(raw_id(4));
     let mut machine = InvocationMachine::proposed(invocation_id, Idempotency::NonIdempotent);
     for state in [
@@ -84,7 +84,54 @@ fn unknown_non_idempotent_invocation_never_auto_retries() {
         machine.recovery_disposition(),
         RecoveryDisposition::ReconcileOnly
     );
+    assert!(machine.transition(InvocationState::Started).is_err());
     assert!(machine.transition(InvocationState::Completed).is_err());
+    machine
+        .reconcile(InvocationReconciliationOutcome::Completed)
+        .unwrap();
+    assert_eq!(machine.state(), InvocationState::Completed);
+}
+
+#[test]
+fn reconciliation_is_only_legal_from_unknown_and_never_resolves_to_cancelled() {
+    let invocation_id = InvocationId::from_uuid(raw_id(4));
+    let mut machine = InvocationMachine::proposed(invocation_id, Idempotency::NonIdempotent);
+    assert!(machine
+        .reconcile(InvocationReconciliationOutcome::Failed)
+        .is_err());
+    for state in [
+        InvocationState::Approved,
+        InvocationState::Prepared,
+        InvocationState::Started,
+        InvocationState::Unknown,
+    ] {
+        machine.transition(state).unwrap();
+    }
+    machine
+        .reconcile(InvocationReconciliationOutcome::Failed)
+        .unwrap();
+    assert_eq!(machine.state(), InvocationState::Failed);
+}
+
+#[test]
+fn unknown_idempotent_invocation_requires_an_explicit_retry_transition() {
+    let invocation_id = InvocationId::from_uuid(raw_id(4));
+    let mut machine = InvocationMachine::proposed(invocation_id, Idempotency::IdempotentWithKey);
+    for state in [
+        InvocationState::Approved,
+        InvocationState::Prepared,
+        InvocationState::Started,
+        InvocationState::Unknown,
+    ] {
+        machine.transition(state).unwrap();
+    }
+    assert!(!InvocationState::Unknown.is_terminal());
+    assert_eq!(
+        machine.recovery_disposition(),
+        RecoveryDisposition::RetryWithSameIdempotencyKey
+    );
+    machine.transition(InvocationState::Started).unwrap();
+    machine.transition(InvocationState::Completed).unwrap();
 }
 
 fn grant(mode: CapabilityMode) -> CapabilityGrant {
@@ -158,9 +205,11 @@ fn approved_invocation() -> PreparedInvocation {
         expires_at: at() + Duration::minutes(10),
         approval: Some(ApprovalBinding {
             approval_id: ApprovalId::from_uuid(raw_id(5)),
+            invocation_id: InvocationId::from_uuid(raw_id(4)),
             workspace_id,
             workspace_identity_digest: "workspace-digest".to_owned(),
             thread_id,
+            turn_id: TurnId::from_uuid(raw_id(3)),
             agent_id,
             mode: CapabilityMode::Build,
             tool_id: "workspace.apply_patch".to_owned(),
@@ -184,6 +233,86 @@ fn approval_is_invalidated_by_argument_changes() {
             "normalized_arguments_content"
         ))
     );
+}
+
+#[test]
+fn approval_is_invalidated_by_effect_digest_changes() {
+    let mut invocation = approved_invocation();
+    invocation.approval.as_mut().unwrap().effect_digest = "different".to_owned();
+
+    assert_eq!(
+        validate_approval(&invocation, CapabilityMode::Build, at()),
+        Err(ApprovalError::BindingMismatch("effect_digest"))
+    );
+}
+
+#[test]
+fn approval_is_scoped_to_one_invocation_and_turn() {
+    let mut invocation = approved_invocation();
+    invocation.invocation_id = InvocationId::from_uuid(raw_id(6));
+    assert_eq!(
+        validate_approval(&invocation, CapabilityMode::Build, at()),
+        Err(ApprovalError::BindingMismatch("invocation_id"))
+    );
+
+    let mut invocation = approved_invocation();
+    invocation.turn_id = TurnId::from_uuid(raw_id(7));
+    assert_eq!(
+        validate_approval(&invocation, CapabilityMode::Build, at()),
+        Err(ApprovalError::BindingMismatch("turn_id"))
+    );
+}
+
+#[test]
+fn approval_rejects_every_mutable_security_binding() {
+    let assert_mismatch = |invocation: PreparedInvocation, field| {
+        assert_eq!(
+            validate_approval(&invocation, CapabilityMode::Build, at()),
+            Err(ApprovalError::BindingMismatch(field))
+        );
+    };
+
+    let mut invocation = approved_invocation();
+    invocation.workspace_id = WorkspaceId::from_uuid(raw_id(20));
+    assert_mismatch(invocation, "workspace_id");
+
+    let mut invocation = approved_invocation();
+    invocation.workspace_identity_digest = "other-workspace".into();
+    assert_mismatch(invocation, "workspace_identity_digest");
+
+    let mut invocation = approved_invocation();
+    invocation.thread_id = ThreadId::from_uuid(raw_id(21));
+    assert_mismatch(invocation, "thread_id");
+
+    let mut invocation = approved_invocation();
+    invocation.agent_id = AgentId::from("other-agent");
+    assert_mismatch(invocation, "agent_id");
+
+    let invocation = approved_invocation();
+    assert_eq!(
+        validate_approval(&invocation, CapabilityMode::Operate, at()),
+        Err(ApprovalError::BindingMismatch("mode"))
+    );
+
+    let mut invocation = approved_invocation();
+    invocation.tool_id = "other.tool".into();
+    assert_mismatch(invocation, "tool_id");
+
+    let mut invocation = approved_invocation();
+    invocation.tool_version = "2.0.0".into();
+    assert_mismatch(invocation, "tool_version");
+
+    let mut invocation = approved_invocation();
+    invocation.normalized_arguments_digest = "other-arguments".into();
+    assert_mismatch(invocation, "normalized_arguments_digest");
+
+    let mut invocation = approved_invocation();
+    invocation.effect_digest = "other-effects".into();
+    assert_mismatch(invocation, "effect_digest");
+
+    let mut invocation = approved_invocation();
+    invocation.approval.as_mut().unwrap().granted_effects = EffectSet::default();
+    assert_mismatch(invocation, "granted_effects");
 }
 
 fn envelope(seq: u64, event: Event, turn_id: Option<TurnId>) -> EventEnvelope {
@@ -311,4 +440,313 @@ fn replay_rejects_sequence_gaps_before_mutating_projection() {
             ..
         }
     ));
+}
+
+fn invocation_proposal(invocation_id: InvocationId) -> Event {
+    let effects = EffectSet {
+        idempotency: Idempotency::NonIdempotent,
+        reversibility: Reversibility::Unknown,
+        ..EffectSet::default()
+    };
+    Event::InvocationProposed {
+        invocation_id,
+        call_id: "provider-call-1".to_owned(),
+        tool_id: "workspace.apply_patch".to_owned(),
+        tool_version: "1.0.0".to_owned(),
+        normalized_arguments_digest: "arguments-digest".to_owned(),
+        effect_digest: digest_serializable(&effects).unwrap(),
+        idempotency: effects.idempotency,
+        effects,
+    }
+}
+
+#[test]
+fn replay_projects_complete_invocation_proposal_evidence() {
+    let mut events = trace();
+    events.pop();
+    let invocation_id = InvocationId::from_uuid(raw_id(8));
+    let turn_id = TurnId::from_uuid(raw_id(3));
+    events.push(envelope(
+        7,
+        invocation_proposal(invocation_id),
+        Some(turn_id),
+    ));
+
+    let projection = replay(events.iter()).unwrap();
+    let invocation = &projection.invocations[&invocation_id];
+    assert_eq!(invocation.turn_id, turn_id);
+    assert_eq!(invocation.agent_id, AgentId::from("root"));
+    assert_eq!(invocation.call_id, "provider-call-1");
+    assert_eq!(invocation.tool_id, "workspace.apply_patch");
+    assert_eq!(invocation.tool_version, "1.0.0");
+    assert_eq!(invocation.normalized_arguments_digest, "arguments-digest");
+    assert_eq!(invocation.idempotency, Idempotency::NonIdempotent);
+    assert!(!invocation.effect_digest.is_empty());
+}
+
+#[test]
+fn replay_rejects_a_proposal_with_a_forged_effect_digest() {
+    let mut events = trace();
+    events.pop();
+    let invocation_id = InvocationId::from_uuid(raw_id(8));
+    let turn_id = TurnId::from_uuid(raw_id(3));
+    let mut proposal = invocation_proposal(invocation_id);
+    if let Event::InvocationProposed { effect_digest, .. } = &mut proposal {
+        *effect_digest = "forged".into();
+    }
+    events.push(envelope(7, proposal, Some(turn_id)));
+
+    assert!(matches!(
+        replay(events.iter()),
+        Err(ReplayError::InvocationEvidenceMismatch {
+            invocation_id: found,
+            field: "effect_digest",
+        }) if found == invocation_id
+    ));
+}
+
+#[test]
+fn replay_rejects_invocation_state_from_another_thread() {
+    let mut events = trace();
+    events.pop();
+    let invocation_id = InvocationId::from_uuid(raw_id(8));
+    let turn_id = TurnId::from_uuid(raw_id(3));
+    events.push(envelope(
+        7,
+        invocation_proposal(invocation_id),
+        Some(turn_id),
+    ));
+    let mut projection = replay(events.iter()).unwrap();
+    let other_thread = ThreadId::from_uuid(raw_id(9));
+    let cross_thread = EventEnvelope::new(
+        PROTOCOL_VERSION,
+        EventId::from_uuid(raw_id(110)),
+        other_thread,
+        Some(turn_id),
+        AgentId::from("root"),
+        1,
+        at(),
+        None,
+        Event::InvocationStateChanged {
+            invocation_id,
+            from: InvocationState::Proposed,
+            to: InvocationState::Failed,
+            reason: Some("cross-thread mutation".to_owned()),
+        },
+    );
+
+    assert_eq!(
+        projection.apply(&cross_thread),
+        Err(ReplayError::EnvelopeMismatch("invocation parent"))
+    );
+}
+
+#[test]
+fn replay_rejects_invocation_state_from_another_agent() {
+    let mut events = trace();
+    events.pop();
+    let invocation_id = InvocationId::from_uuid(raw_id(8));
+    let turn_id = TurnId::from_uuid(raw_id(3));
+    events.push(envelope(
+        7,
+        invocation_proposal(invocation_id),
+        Some(turn_id),
+    ));
+    let mut projection = replay(events.iter()).unwrap();
+    let mut cross_agent = envelope(
+        8,
+        Event::InvocationStateChanged {
+            invocation_id,
+            from: InvocationState::Proposed,
+            to: InvocationState::Failed,
+            reason: Some("cross-agent mutation".to_owned()),
+        },
+        Some(turn_id),
+    );
+    cross_agent.agent_id = AgentId::from("other-agent");
+
+    assert_eq!(
+        projection.apply(&cross_agent),
+        Err(ReplayError::EnvelopeMismatch("invocation parent"))
+    );
+}
+
+#[test]
+fn replay_rejects_non_idempotent_unknown_retry() {
+    let mut events = trace();
+    events.pop();
+    let invocation_id = InvocationId::from_uuid(raw_id(8));
+    let turn_id = TurnId::from_uuid(raw_id(3));
+    events.push(envelope(
+        7,
+        invocation_proposal(invocation_id),
+        Some(turn_id),
+    ));
+    let transitions = [
+        (InvocationState::Proposed, InvocationState::Approved),
+        (InvocationState::Approved, InvocationState::Prepared),
+        (InvocationState::Prepared, InvocationState::Started),
+        (InvocationState::Started, InvocationState::Unknown),
+    ];
+    for (offset, (from, to)) in transitions.into_iter().enumerate() {
+        events.push(envelope(
+            8 + offset as u64,
+            Event::InvocationStateChanged {
+                invocation_id,
+                from,
+                to,
+                reason: None,
+            },
+            Some(turn_id),
+        ));
+    }
+    let mut projection = replay(events.iter()).unwrap();
+    let retry = envelope(
+        12,
+        Event::InvocationStateChanged {
+            invocation_id,
+            from: InvocationState::Unknown,
+            to: InvocationState::Started,
+            reason: Some("explicit retry".to_owned()),
+        },
+        Some(turn_id),
+    );
+
+    assert_eq!(
+        projection.apply(&retry),
+        Err(ReplayError::InvalidInvocationTransition {
+            from: InvocationState::Unknown,
+            to: InvocationState::Started,
+        })
+    );
+}
+
+#[test]
+fn replay_requires_an_explicit_evidenced_reconciliation_event() {
+    let mut events = trace();
+    events.pop();
+    let invocation_id = InvocationId::from_uuid(raw_id(8));
+    let turn_id = TurnId::from_uuid(raw_id(3));
+    events.push(envelope(
+        7,
+        invocation_proposal(invocation_id),
+        Some(turn_id),
+    ));
+    for (offset, (from, to)) in [
+        (InvocationState::Proposed, InvocationState::Approved),
+        (InvocationState::Approved, InvocationState::Prepared),
+        (InvocationState::Prepared, InvocationState::Started),
+        (InvocationState::Started, InvocationState::Unknown),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        events.push(envelope(
+            8 + offset as u64,
+            Event::InvocationStateChanged {
+                invocation_id,
+                from,
+                to,
+                reason: None,
+            },
+            Some(turn_id),
+        ));
+    }
+    let mut projection = replay(events.iter()).unwrap();
+    let ordinary_terminal = envelope(
+        12,
+        Event::InvocationStateChanged {
+            invocation_id,
+            from: InvocationState::Unknown,
+            to: InvocationState::Completed,
+            reason: Some("not explicit reconciliation".into()),
+        },
+        Some(turn_id),
+    );
+    assert_eq!(
+        projection.apply(&ordinary_terminal),
+        Err(ReplayError::InvalidInvocationTransition {
+            from: InvocationState::Unknown,
+            to: InvocationState::Completed,
+        })
+    );
+
+    let reconciled = envelope(
+        12,
+        Event::InvocationReconciled {
+            invocation_id,
+            outcome: InvocationReconciliationOutcome::Completed,
+            evidence: InvocationReconciliationEvidence {
+                source: "executor_receipt".into(),
+                summary: "receipt proves the write committed".into(),
+                artifact_uri: Some("artifact://sha256/example".into()),
+            },
+        },
+        Some(turn_id),
+    );
+    projection.apply(&reconciled).unwrap();
+    let invocation = &projection.invocations[&invocation_id];
+    assert_eq!(invocation.state, InvocationState::Completed);
+    assert_eq!(
+        invocation.reconciliation.as_ref().unwrap().source,
+        "executor_receipt"
+    );
+}
+
+#[test]
+fn replay_rejects_reconciliation_before_unknown_without_mutating_state() {
+    let mut events = trace();
+    events.pop();
+    let invocation_id = InvocationId::from_uuid(raw_id(8));
+    let turn_id = TurnId::from_uuid(raw_id(3));
+    events.push(envelope(
+        7,
+        invocation_proposal(invocation_id),
+        Some(turn_id),
+    ));
+    for (offset, (from, to)) in [
+        (InvocationState::Proposed, InvocationState::Approved),
+        (InvocationState::Approved, InvocationState::Prepared),
+        (InvocationState::Prepared, InvocationState::Started),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        events.push(envelope(
+            8 + offset as u64,
+            Event::InvocationStateChanged {
+                invocation_id,
+                from,
+                to,
+                reason: None,
+            },
+            Some(turn_id),
+        ));
+    }
+
+    let mut projection = replay(events.iter()).unwrap();
+    let reconciled = envelope(
+        11,
+        Event::InvocationReconciled {
+            invocation_id,
+            outcome: InvocationReconciliationOutcome::Failed,
+            evidence: InvocationReconciliationEvidence {
+                source: "executor_receipt".into(),
+                summary: "receipt is available".into(),
+                artifact_uri: None,
+            },
+        },
+        Some(turn_id),
+    );
+    assert_eq!(
+        projection.apply(&reconciled),
+        Err(ReplayError::InvalidInvocationTransition {
+            from: InvocationState::Started,
+            to: InvocationState::Failed,
+        })
+    );
+    assert_eq!(
+        projection.invocations[&invocation_id].state,
+        InvocationState::Started
+    );
 }

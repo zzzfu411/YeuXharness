@@ -58,6 +58,12 @@ pub fn validate_approval(
         "workspace_identity_digest"
     );
     require_equal!(approval.thread_id, invocation.thread_id, "thread_id");
+    require_equal!(
+        approval.invocation_id,
+        invocation.invocation_id,
+        "invocation_id"
+    );
+    require_equal!(approval.turn_id, invocation.turn_id, "turn_id");
     require_equal!(approval.agent_id, invocation.agent_id, "agent_id");
     require_equal!(approval.mode, expected_mode, "mode");
     require_equal!(approval.tool_id, invocation.tool_id, "tool_id");

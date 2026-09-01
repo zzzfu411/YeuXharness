@@ -5,5 +5,7 @@
 mod commands;
 pub mod runner;
 pub mod server;
+pub mod tool_calls;
+pub mod tools;
 
 pub use server::{Daemon, DaemonConfig, DaemonError};

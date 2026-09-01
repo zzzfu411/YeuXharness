@@ -9,6 +9,7 @@ import {
 } from "@yeux/protocol";
 
 import type { TuiOptions } from "./args.js";
+import { detectTerminalCapabilities } from "./aesthetic.js";
 import { TerminalPrompter } from "./prompter.js";
 import { EventRenderer } from "./renderer.js";
 import { sanitizeTerminalText } from "./terminal.js";
@@ -29,8 +30,11 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
     daemonCommand: options.daemonCommand,
     onDaemonStderr: (text) => process.stderr.write(sanitizeTerminalText(text)),
   });
-  const renderer = new EventRenderer({ jsonl: options.jsonl });
-  const prompter = options.jsonl ? undefined : new TerminalPrompter();
+  const capabilities = detectTerminalCapabilities({ ascii: options.ascii });
+  const renderer = new EventRenderer({ jsonl: options.jsonl, capabilities });
+  const prompter = options.jsonl
+    ? undefined
+    : new TerminalPrompter(process.stdin, process.stdout, { capabilities });
 
   try {
     const session = new RuntimeSession(connection.client, renderer, prompter);
@@ -74,7 +78,7 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
 
       let exitCode = 0;
       while (true) {
-        const prompt = (await prompter?.question("\nyeux> "))?.trim() ?? "";
+        const prompt = (await prompter?.command())?.trim() ?? "";
         if (prompt === "/exit" || prompt === "/quit") break;
         if (prompt.length === 0) continue;
         const result = await session.runTurn(threadId, prompt, options.mode);

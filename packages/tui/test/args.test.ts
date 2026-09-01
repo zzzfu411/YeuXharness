@@ -32,6 +32,9 @@ describe("parseApprovalChoice", () => {
 
   it("recognizes scoped approvals", () => {
     expect(parseApprovalChoice("1")).toBe("allow_once");
+    expect(parseApprovalChoice("a")).toBe("allow_once");
     expect(parseApprovalChoice("2")).toBe("deny");
+    expect(parseApprovalChoice("d")).toBe("deny");
+    expect(parseApprovalChoice("i")).toBe("inspect");
   });
 });

@@ -9,13 +9,17 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-use yeux_core::{EventStore, PortError};
+use yeux_core::{
+    can_reconcile_invocation, can_transition_invocation,
+    can_transition_invocation_with_idempotency, digest_serializable, EventStore, PortError,
+};
 use yeux_protocol::{
-    AgentId, CausationId, Event, EventEnvelope, EventId, ProtocolVersion, ThreadId, TurnId,
+    AgentId, CausationId, ContentBlock, EffectSet, Event, EventEnvelope, EventId, Idempotency,
+    InvocationId, InvocationState, ItemKind, ProtocolVersion, ThreadId, TurnId,
 };
 
 /// A persisted event. `seq` is monotonic within a thread, not globally.
@@ -56,6 +60,38 @@ pub struct NewCommandReceipt {
     pub params_digest: String,
     pub response: Value,
     pub created_at: DateTime<Utc>,
+}
+
+/// The two durable events that expose one finished tool invocation.
+///
+/// The ledger stores the model-visible result first and the terminal state
+/// second in one SQLite transaction. Consequently, every replay prefix either
+/// sees neither event, sees a result while the invocation is still running, or
+/// sees both; it never observes `Completed`/`Failed` without its `ToolResult`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewInvocationOutcome {
+    pub tool_result: NewLedgerEvent,
+    pub terminal_state: NewLedgerEvent,
+}
+
+/// A durable `Started -> Unknown` transition emitted when the runtime cannot
+/// prove whether an invocation's external work completed.  This is deliberately
+/// a separate input type/API from [`NewInvocationOutcome`]: an unknown marker
+/// has no model-visible result and must never be mistaken for a successful or
+/// failed terminal outcome.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewInvocationUnknown {
+    pub state: NewLedgerEvent,
+}
+
+/// The two durable events emitted when an invocation's outcome is unknown but
+/// the daemon has a bounded diagnostic it can show to the model.  The marker
+/// remains non-terminal; pairing it with the diagnostic in one transaction
+/// prevents a crash from exposing only one half of the explanation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewInvocationUnknownOutcome {
+    pub unknown_state: NewLedgerEvent,
+    pub tool_result: NewLedgerEvent,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -132,6 +168,15 @@ impl TryFrom<LedgerEvent> for EventEnvelope {
     type Error = LedgerError;
 
     fn try_from(event: LedgerEvent) -> LedgerResult<Self> {
+        if !yeux_protocol::PROTOCOL_VERSION.accepts(event.schema_version) {
+            return Err(LedgerError::InvalidEnvelope(format!(
+                "unsupported event schema {}.{}; runtime supports {}.{}",
+                event.schema_version.major,
+                event.schema_version.minor,
+                yeux_protocol::PROTOCOL_VERSION.major,
+                yeux_protocol::PROTOCOL_VERSION.minor,
+            )));
+        }
         let protocol_event: Event = serde_json::from_value(serde_json::json!({
             "kind": event.kind,
             "payload": event.payload,
@@ -166,6 +211,14 @@ pub enum LedgerError {
     CommandIdConflict { command_id: String },
     #[error("an event-producing command must append at least one event")]
     EmptyEventBatch,
+    #[error("invalid invocation outcome event batch: {0}")]
+    InvalidInvocationOutcome(String),
+    #[error("invocation {invocation_id} expected state {expected:?}, found {found:?}")]
+    InvocationStateConflict {
+        invocation_id: String,
+        expected: InvocationState,
+        found: Option<InvocationState>,
+    },
     #[error("event sequence exhausted for {scope}")]
     SequenceOverflow { scope: String },
     #[error(
@@ -253,16 +306,18 @@ impl EventLedger {
             });
         }
 
-        let next: u64 = transaction.query_row(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE thread_id = ?1",
+        let current: u64 = transaction.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM events WHERE thread_id = ?1",
             [&input.thread_id],
             |row| row.get(0),
         )?;
-        let append_order: u64 = transaction.query_row(
-            "SELECT COALESCE(MAX(append_order), 0) + 1 FROM events",
+        let next = next_sqlite_sequence(current, format!("thread {}", input.thread_id))?;
+        let current_append_order: u64 = transaction.query_row(
+            "SELECT COALESCE(MAX(append_order), 0) FROM events",
             [],
             |row| row.get(0),
         )?;
+        let append_order = next_sqlite_sequence(current_append_order, "global append order")?;
         let payload = serde_json::to_string(&input.payload)?;
         transaction.execute(
             "INSERT INTO events (
@@ -286,6 +341,193 @@ impl EventLedger {
         let event = get_event_by_id(&transaction, &input.event_id)?.expect("inserted event exists");
         transaction.commit()?;
         Ok(event)
+    }
+
+    /// Atomically append a runtime-produced event batch without a command
+    /// receipt.
+    ///
+    /// This is the persistence primitive used when one logical runtime fact
+    /// spans multiple events, for example an invocation terminal transition
+    /// and its model-visible `ToolResult`. A crash can expose either the whole
+    /// batch or none of it. Repeating an identical, fully committed batch is
+    /// idempotent by event ID; partial or divergent reuse is rejected.
+    pub fn append_batch(&self, inputs: Vec<NewLedgerEvent>) -> LedgerResult<Vec<LedgerEvent>> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let events = append_batch_transaction(&transaction, inputs)?;
+        transaction.commit()?;
+        Ok(events)
+    }
+
+    /// Atomically append a model-visible `ToolResult` and the matching terminal
+    /// invocation state.
+    ///
+    /// This entry point validates the pair before acquiring a sequence number:
+    /// both events must have the same protocol scope and causation, the result
+    /// item must name the same invocation, and success/error polarity must agree
+    /// with the terminal state. Unknown outcomes must use the explicit
+    /// `tool/reconciled` event rather than an ordinary state transition.
+    pub fn append_invocation_outcome(
+        &self,
+        input: NewInvocationOutcome,
+    ) -> LedgerResult<Vec<LedgerEvent>> {
+        validate_invocation_outcome(&input)?;
+        let (invocation_id, expected_state, expected_final_state) =
+            invocation_outcome_precondition(&input)?;
+        self.append_invocation_events_checked(
+            vec![input.tool_result, input.terminal_state],
+            invocation_id,
+            expected_state,
+            expected_final_state,
+        )
+    }
+
+    /// Persist the conservative marker for work that crossed the execution
+    /// boundary but whose external outcome is no longer observable.
+    ///
+    /// This helper intentionally accepts only `Started -> Unknown`; callers
+    /// cannot use it to manufacture a terminal state or to silently retry an
+    /// invocation.  Reconciliation must subsequently use
+    /// [`Self::append_invocation_reconciliation`] with explicit evidence.
+    pub fn append_invocation_unknown(
+        &self,
+        input: NewInvocationUnknown,
+    ) -> LedgerResult<LedgerEvent> {
+        let invocation_id = validate_invocation_unknown(&input.state)?;
+        let mut events = self.append_invocation_events_checked(
+            vec![input.state],
+            invocation_id,
+            InvocationState::Started,
+            InvocationState::Unknown,
+        )?;
+        Ok(events
+            .pop()
+            .expect("a one-event invocation marker always returns one event"))
+    }
+
+    /// Atomically append a `Started -> Unknown` marker and its bounded,
+    /// model-visible diagnostic.  This still does not create a terminal
+    /// outcome or authorize a retry; reconciliation must resolve `Unknown`
+    /// with explicit evidence later.
+    pub fn append_invocation_unknown_outcome(
+        &self,
+        input: NewInvocationUnknownOutcome,
+    ) -> LedgerResult<Vec<LedgerEvent>> {
+        let invocation_id = validate_invocation_unknown_outcome(&input)?;
+        self.append_invocation_events_checked(
+            vec![input.unknown_state, input.tool_result],
+            invocation_id,
+            InvocationState::Started,
+            InvocationState::Unknown,
+        )
+    }
+
+    /// Atomically persist a model-visible result together with an explicit
+    /// reconciliation conclusion for a previously unknown invocation.
+    ///
+    /// The terminal event must be `tool/reconciled`; ordinary
+    /// `tool/state_changed` events are rejected so a caller cannot turn an
+    /// indeterminate side effect into a normal completion without evidence.
+    pub fn append_invocation_reconciliation(
+        &self,
+        input: NewInvocationOutcome,
+    ) -> LedgerResult<Vec<LedgerEvent>> {
+        validate_invocation_reconciliation(&input)?;
+        let (invocation_id, expected_state, expected_final_state) =
+            invocation_outcome_precondition(&input)?;
+        debug_assert_eq!(expected_state, InvocationState::Unknown);
+        self.append_invocation_events_checked(
+            vec![input.tool_result, input.terminal_state],
+            invocation_id,
+            InvocationState::Unknown,
+            expected_final_state,
+        )
+    }
+
+    /// Append invocation events while holding the ledger mutex and transaction
+    /// together with a state precondition.  This closes the check/append race
+    /// that would otherwise let two recovery workers both emit a transition
+    /// from the same state.
+    fn append_invocation_events_checked(
+        &self,
+        inputs: Vec<NewLedgerEvent>,
+        invocation_id: InvocationId,
+        expected_state: InvocationState,
+        expected_final_state: InvocationState,
+    ) -> LedgerResult<Vec<LedgerEvent>> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        // A fully committed retry is allowed even though the projected state
+        // has already advanced to its terminal value.  The batch helper still
+        // compares every field and rejects divergent reuse.  We nevertheless
+        // rebuild the invocation history below for retries as well: otherwise
+        // an outcome batch imported without a proposal (or against a malformed
+        // proposal) could be replayed successfully and hide an unreplayable
+        // ledger.
+        let fully_existing = inputs.iter().try_fold(true, |all, input| {
+            Ok::<_, LedgerError>(all && get_event_by_id(&transaction, &input.event_id)?.is_some())
+        })?;
+        let invocation_id = invocation_id.to_string();
+        let found = invocation_state_in(&transaction, &invocation_id)?;
+        if !fully_existing {
+            if found != Some(expected_state) {
+                return Err(LedgerError::InvocationStateConflict {
+                    invocation_id: invocation_id.clone(),
+                    expected: expected_state,
+                    found,
+                });
+            }
+        } else if found != Some(expected_final_state) {
+            // An idempotent retry must describe the same durable outcome that
+            // is already projected.  Without this check, a generic append
+            // could pre-seed a pair and a later typed retry would report
+            // success even though the invocation had subsequently been
+            // reconciled to a different terminal state.
+            return Err(LedgerError::InvocationStateConflict {
+                invocation_id: invocation_id.clone(),
+                expected: expected_final_state,
+                found,
+            });
+        }
+        if found.is_none() {
+            return Err(LedgerError::InvalidInvocationOutcome(
+                "invocation outcome requires a persisted proposal".into(),
+            ));
+        }
+
+        // Bind every derived event to the original proposal's protocol scope.
+        // A valid state transition with a forged thread/turn/agent envelope
+        // would otherwise be appendable and only fail much later during
+        // projection replay.  Reject it while the same transaction still
+        // holds the invocation state precondition.
+        let Some((proposal_thread, proposal_turn, proposal_agent, proposal_call_id)) =
+            invocation_scope_in(&transaction, &invocation_id)?
+        else {
+            return Err(LedgerError::InvalidInvocationOutcome(
+                "invocation outcome requires a persisted proposal".into(),
+            ));
+        };
+        if inputs.iter().any(|input| {
+            input.thread_id != proposal_thread
+                || input.turn_id != proposal_turn
+                || input.agent_id != proposal_agent
+        }) {
+            return Err(LedgerError::InvalidInvocationOutcome(
+                "invocation outcome scope does not match its proposal".into(),
+            ));
+        }
+        if inputs.iter().any(|input| {
+            tool_result_call_id(input).is_some_and(|call_id| call_id != proposal_call_id)
+        }) {
+            return Err(LedgerError::InvalidInvocationOutcome(
+                "ToolResult call_id does not match its invocation proposal".into(),
+            ));
+        }
+
+        let events = append_batch_transaction(&transaction, inputs)?;
+        transaction.commit()?;
+        Ok(events)
     }
 
     /// Atomically append an event and durable command receipt.
@@ -318,16 +560,18 @@ impl EventLedger {
                 event_id: input.event_id,
             });
         }
-        let seq: u64 = transaction.query_row(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE thread_id = ?1",
+        let current_seq: u64 = transaction.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM events WHERE thread_id = ?1",
             [&input.thread_id],
             |row| row.get(0),
         )?;
-        let append_order: u64 = transaction.query_row(
-            "SELECT COALESCE(MAX(append_order), 0) + 1 FROM events",
+        let seq = next_sqlite_sequence(current_seq, format!("thread {}", input.thread_id))?;
+        let current_append_order: u64 = transaction.query_row(
+            "SELECT COALESCE(MAX(append_order), 0) FROM events",
             [],
             |row| row.get(0),
         )?;
+        let append_order = next_sqlite_sequence(current_append_order, "global append order")?;
         transaction.execute(
             "INSERT INTO events (
                 append_order, schema_version, event_id, thread_id, turn_id, agent_id, seq,
@@ -510,11 +754,12 @@ impl EventLedger {
                 event_id: event.event_id.clone(),
             });
         }
-        let expected: u64 = transaction.query_row(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE thread_id = ?1",
+        let current_seq: u64 = transaction.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM events WHERE thread_id = ?1",
             [&event.thread_id],
             |row| row.get(0),
         )?;
+        let expected = next_sqlite_sequence(current_seq, format!("thread {}", event.thread_id))?;
         if event.seq != expected {
             return Err(LedgerError::SequenceGap {
                 thread_id: event.thread_id.clone(),
@@ -522,11 +767,12 @@ impl EventLedger {
                 found: event.seq,
             });
         }
-        let append_order: u64 = transaction.query_row(
-            "SELECT COALESCE(MAX(append_order), 0) + 1 FROM events",
+        let current_append_order: u64 = transaction.query_row(
+            "SELECT COALESCE(MAX(append_order), 0) FROM events",
             [],
             |row| row.get(0),
         )?;
+        let append_order = next_sqlite_sequence(current_append_order, "global append order")?;
         transaction.execute(
             "INSERT INTO events (
                 append_order, schema_version, event_id, thread_id, turn_id, agent_id, seq,
@@ -561,7 +807,7 @@ impl EventLedger {
         let events = statement
             .query_map(params![thread_id, after_seq], row_to_event)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        validate_sequence(thread_id, after_seq + 1, &events)?;
+        validate_sequence(thread_id, after_seq.saturating_add(1), &events)?;
         Ok(events)
     }
 
@@ -649,6 +895,93 @@ impl EventLedger {
     }
 }
 
+/// Append a batch using an already-open transaction. Keeping allocation and
+/// insertion in this helper lets typed invocation APIs add a state precondition
+/// while retaining exactly the same all-or-nothing/idempotent behavior as the
+/// public [`EventLedger::append_batch`] method.
+fn append_batch_transaction(
+    transaction: &Transaction<'_>,
+    inputs: Vec<NewLedgerEvent>,
+) -> LedgerResult<Vec<LedgerEvent>> {
+    if inputs.is_empty() {
+        return Err(LedgerError::EmptyEventBatch);
+    }
+
+    let mut event_ids = BTreeSet::new();
+    let mut existing = Vec::with_capacity(inputs.len());
+    for input in &inputs {
+        if !event_ids.insert(input.event_id.as_str()) {
+            return Err(LedgerError::EventIdConflict {
+                event_id: input.event_id.clone(),
+            });
+        }
+        existing.push(get_event_by_id(transaction, &input.event_id)?);
+    }
+
+    let existing_count = existing.iter().filter(|event| event.is_some()).count();
+    if existing_count == inputs.len() {
+        let mut replayed = Vec::with_capacity(inputs.len());
+        for (input, event) in inputs.iter().zip(existing) {
+            let event = event.expect("every event was counted as existing");
+            if !new_event_matches(input, &event) {
+                return Err(LedgerError::EventIdConflict {
+                    event_id: input.event_id.clone(),
+                });
+            }
+            replayed.push(event);
+        }
+        return Ok(replayed);
+    }
+    if existing_count != 0 {
+        let event_id = inputs
+            .iter()
+            .zip(existing)
+            .find_map(|(input, event)| event.map(|_| input.event_id.clone()))
+            .expect("a partial batch contains an existing event");
+        return Err(LedgerError::EventIdConflict { event_id });
+    }
+
+    let mut last_seq_by_thread = BTreeMap::<String, u64>::new();
+    for input in &inputs {
+        if !last_seq_by_thread.contains_key(&input.thread_id) {
+            let last_seq = transaction.query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM events WHERE thread_id = ?1",
+                [&input.thread_id],
+                |row| row.get(0),
+            )?;
+            last_seq_by_thread.insert(input.thread_id.clone(), last_seq);
+        }
+    }
+    let mut append_order: u64 = transaction.query_row(
+        "SELECT COALESCE(MAX(append_order), 0) FROM events",
+        [],
+        |row| row.get(0),
+    )?;
+    let mut events = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let last_seq = last_seq_by_thread
+            .get_mut(&input.thread_id)
+            .expect("every input thread was preloaded");
+        *last_seq = next_sqlite_sequence(*last_seq, format!("thread {}", input.thread_id))?;
+        append_order = next_sqlite_sequence(append_order, "global append order")?;
+        let event = LedgerEvent {
+            schema_version: input.schema_version,
+            event_id: input.event_id,
+            thread_id: input.thread_id,
+            turn_id: input.turn_id,
+            agent_id: input.agent_id,
+            seq: *last_seq,
+            time: input.time,
+            causation_id: input.causation_id,
+            kind: input.kind,
+            payload: input.payload,
+        };
+        insert_event(transaction, &event, append_order)?;
+        events.push(event);
+    }
+    Ok(events)
+}
+
 #[async_trait]
 impl EventStore for EventLedger {
     async fn append(&self, event: &EventEnvelope) -> Result<(), PortError> {
@@ -683,6 +1016,593 @@ fn ledger_port_error(error: LedgerError) -> PortError {
                 )
         ),
     }
+}
+
+fn validate_invocation_outcome(input: &NewInvocationOutcome) -> LedgerResult<()> {
+    let result_scope = &input.tool_result;
+    let terminal_scope = &input.terminal_state;
+    if result_scope.schema_version != terminal_scope.schema_version
+        || result_scope.thread_id != terminal_scope.thread_id
+        || result_scope.turn_id != terminal_scope.turn_id
+        || result_scope.agent_id != terminal_scope.agent_id
+        || result_scope.causation_id != terminal_scope.causation_id
+    {
+        return Err(LedgerError::InvalidInvocationOutcome(
+            "ToolResult and terminal state must share schema, thread, turn, agent, and causation"
+                .into(),
+        ));
+    }
+    if !yeux_protocol::PROTOCOL_VERSION.accepts(result_scope.schema_version) {
+        return Err(LedgerError::InvalidInvocationOutcome(format!(
+            "unsupported event schema {}.{}",
+            result_scope.schema_version.major, result_scope.schema_version.minor,
+        )));
+    }
+    if result_scope.turn_id.is_none() {
+        return Err(LedgerError::InvalidInvocationOutcome(
+            "invocation outcome events require a turn".into(),
+        ));
+    }
+
+    let result_event = decode_new_event(result_scope)?;
+    let terminal_event = decode_new_event(terminal_scope)?;
+    let (invocation_id, terminal_state) = match terminal_event {
+        Event::InvocationStateChanged {
+            invocation_id,
+            from,
+            to,
+            ..
+        } if to.is_terminal() && can_transition_invocation(from, to) => (invocation_id, to),
+        Event::InvocationStateChanged {
+            from: InvocationState::Unknown,
+            ..
+        } => {
+            return Err(LedgerError::InvalidInvocationOutcome(
+                "Unknown must be resolved by tool/reconciled evidence".into(),
+            ));
+        }
+        Event::InvocationReconciled {
+            invocation_id,
+            outcome,
+            evidence,
+        } => {
+            if evidence.source.trim().is_empty() || evidence.summary.trim().is_empty() {
+                return Err(LedgerError::InvalidInvocationOutcome(
+                    "reconciliation evidence source and summary are required".into(),
+                ));
+            }
+            (invocation_id, outcome.state())
+        }
+        _ => {
+            return Err(LedgerError::InvalidInvocationOutcome(
+                "terminal_state must be a terminal tool/state_changed or tool/reconciled event"
+                    .into(),
+            ));
+        }
+    };
+
+    let item = match result_event {
+        Event::ItemAdded { item } if item.kind == ItemKind::ToolResult => item,
+        _ => {
+            return Err(LedgerError::InvalidInvocationOutcome(
+                "tool_result must be an item/added ToolResult".into(),
+            ));
+        }
+    };
+    if item.thread_id.to_string() != result_scope.thread_id
+        || Some(item.turn_id.to_string()) != result_scope.turn_id
+        || item.agent_id.to_string() != result_scope.agent_id
+    {
+        return Err(LedgerError::InvalidInvocationOutcome(
+            "ToolResult item parent does not match its event envelope".into(),
+        ));
+    }
+    let item_invocation_id: InvocationId =
+        serde_json::from_value(item.content.get("invocation_id").cloned().ok_or_else(|| {
+            LedgerError::InvalidInvocationOutcome("ToolResult item is missing invocation_id".into())
+        })?)
+        .map_err(|error| {
+            LedgerError::InvalidInvocationOutcome(format!(
+                "ToolResult item has an invalid invocation_id: {error}"
+            ))
+        })?;
+    if item_invocation_id != invocation_id {
+        return Err(LedgerError::InvalidInvocationOutcome(
+            "ToolResult and terminal state name different invocations".into(),
+        ));
+    }
+    let blocks: Vec<ContentBlock> =
+        serde_json::from_value(item.content.get("content").cloned().ok_or_else(|| {
+            LedgerError::InvalidInvocationOutcome(
+                "ToolResult item is missing content blocks".into(),
+            )
+        })?)
+        .map_err(|error| {
+            LedgerError::InvalidInvocationOutcome(format!(
+                "ToolResult item content is invalid: {error}"
+            ))
+        })?;
+    let is_error = match blocks.as_slice() {
+        [ContentBlock::ToolResult {
+            call_id, is_error, ..
+        }] if !call_id.trim().is_empty() => *is_error,
+        _ => {
+            return Err(LedgerError::InvalidInvocationOutcome(
+                "ToolResult item must contain exactly one named tool_result block".into(),
+            ));
+        }
+    };
+    let expected_error = terminal_state != InvocationState::Completed;
+    if is_error != expected_error {
+        return Err(LedgerError::InvalidInvocationOutcome(format!(
+            "ToolResult is_error={is_error} disagrees with terminal state {terminal_state:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_invocation_unknown(input: &NewLedgerEvent) -> LedgerResult<InvocationId> {
+    if !yeux_protocol::PROTOCOL_VERSION.accepts(input.schema_version) {
+        return Err(LedgerError::InvalidInvocationOutcome(format!(
+            "unsupported event schema {}.{}",
+            input.schema_version.major, input.schema_version.minor,
+        )));
+    }
+    if input.turn_id.is_none() {
+        return Err(LedgerError::InvalidInvocationOutcome(
+            "Started -> Unknown events require a turn".into(),
+        ));
+    }
+    match decode_new_event(input)? {
+        Event::InvocationStateChanged {
+            invocation_id,
+            from: InvocationState::Started,
+            to: InvocationState::Unknown,
+            reason,
+            ..
+        } => {
+            if reason
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(LedgerError::InvalidInvocationOutcome(
+                    "Started -> Unknown requires a non-empty reason".into(),
+                ));
+            }
+            Ok(invocation_id)
+        }
+        _ => Err(LedgerError::InvalidInvocationOutcome(
+            "unknown marker must be a Started -> Unknown tool/state_changed event".into(),
+        )),
+    }
+}
+
+fn validate_invocation_unknown_outcome(
+    input: &NewInvocationUnknownOutcome,
+) -> LedgerResult<InvocationId> {
+    let state_scope = &input.unknown_state;
+    let result_scope = &input.tool_result;
+    if state_scope.event_id == result_scope.event_id {
+        return Err(LedgerError::InvalidInvocationOutcome(
+            "Unknown marker and ToolResult must use distinct event IDs".into(),
+        ));
+    }
+    if state_scope.schema_version != result_scope.schema_version
+        || state_scope.thread_id != result_scope.thread_id
+        || state_scope.turn_id != result_scope.turn_id
+        || state_scope.agent_id != result_scope.agent_id
+        || state_scope.causation_id != result_scope.causation_id
+    {
+        return Err(LedgerError::InvalidInvocationOutcome(
+            "Unknown marker and ToolResult must share schema, thread, turn, agent, and causation"
+                .into(),
+        ));
+    }
+    if !yeux_protocol::PROTOCOL_VERSION.accepts(state_scope.schema_version) {
+        return Err(LedgerError::InvalidInvocationOutcome(format!(
+            "unsupported event schema {}.{}",
+            state_scope.schema_version.major, state_scope.schema_version.minor,
+        )));
+    }
+    if state_scope.turn_id.is_none() {
+        return Err(LedgerError::InvalidInvocationOutcome(
+            "Unknown outcomes require a turn".into(),
+        ));
+    }
+
+    let invocation_id = match decode_new_event(state_scope)? {
+        Event::InvocationStateChanged {
+            invocation_id,
+            from: InvocationState::Started,
+            to: InvocationState::Unknown,
+            reason,
+            ..
+        } => {
+            if reason
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                return Err(LedgerError::InvalidInvocationOutcome(
+                    "Started -> Unknown requires a non-empty reason".into(),
+                ));
+            }
+            invocation_id
+        }
+        _ => {
+            return Err(LedgerError::InvalidInvocationOutcome(
+                "unknown outcome marker must be a Started -> Unknown event".into(),
+            ));
+        }
+    };
+
+    let result_event = decode_new_event(result_scope)?;
+    let item = match result_event {
+        Event::ItemAdded { item } if item.kind == ItemKind::ToolResult => item,
+        _ => {
+            return Err(LedgerError::InvalidInvocationOutcome(
+                "unknown outcome must include an item/added ToolResult".into(),
+            ));
+        }
+    };
+    if item.thread_id.to_string() != result_scope.thread_id
+        || Some(item.turn_id.to_string()) != result_scope.turn_id
+        || item.agent_id.to_string() != result_scope.agent_id
+    {
+        return Err(LedgerError::InvalidInvocationOutcome(
+            "Unknown ToolResult item parent does not match its event envelope".into(),
+        ));
+    }
+    let item_invocation_id: InvocationId =
+        serde_json::from_value(item.content.get("invocation_id").cloned().ok_or_else(|| {
+            LedgerError::InvalidInvocationOutcome(
+                "Unknown ToolResult is missing invocation_id".into(),
+            )
+        })?)
+        .map_err(|error| {
+            LedgerError::InvalidInvocationOutcome(format!(
+                "Unknown ToolResult has an invalid invocation_id: {error}"
+            ))
+        })?;
+    if item_invocation_id != invocation_id {
+        return Err(LedgerError::InvalidInvocationOutcome(
+            "Unknown marker and ToolResult name different invocations".into(),
+        ));
+    }
+    let blocks: Vec<ContentBlock> =
+        serde_json::from_value(item.content.get("content").cloned().ok_or_else(|| {
+            LedgerError::InvalidInvocationOutcome(
+                "Unknown ToolResult is missing content blocks".into(),
+            )
+        })?)
+        .map_err(|error| {
+            LedgerError::InvalidInvocationOutcome(format!(
+                "Unknown ToolResult content is invalid: {error}"
+            ))
+        })?;
+    match blocks.as_slice() {
+        [ContentBlock::ToolResult {
+            call_id,
+            is_error: true,
+            ..
+        }] if !call_id.trim().is_empty() => Ok(invocation_id),
+        _ => Err(LedgerError::InvalidInvocationOutcome(
+            "Unknown ToolResult must contain exactly one error tool_result block".into(),
+        )),
+    }
+}
+
+fn validate_invocation_reconciliation(input: &NewInvocationOutcome) -> LedgerResult<()> {
+    validate_invocation_outcome(input)?;
+    match decode_new_event(&input.terminal_state)? {
+        Event::InvocationReconciled { .. } => Ok(()),
+        _ => Err(LedgerError::InvalidInvocationOutcome(
+            "reconciliation outcome must use the explicit tool/reconciled event".into(),
+        )),
+    }
+}
+
+/// Returns the state that must currently be projected before an outcome can be
+/// committed together with the state the input batch will leave projected.
+/// Normal terminal events carry their `from`/`to` states; reconciliation is
+/// intentionally only legal after `Unknown`.
+fn invocation_outcome_precondition(
+    input: &NewInvocationOutcome,
+) -> LedgerResult<(InvocationId, InvocationState, InvocationState)> {
+    match decode_new_event(&input.terminal_state)? {
+        Event::InvocationStateChanged {
+            invocation_id,
+            from,
+            to,
+            ..
+        } if to.is_terminal() => Ok((invocation_id, from, to)),
+        Event::InvocationReconciled {
+            invocation_id,
+            outcome,
+            ..
+        } => Ok((invocation_id, InvocationState::Unknown, outcome.state())),
+        _ => Err(LedgerError::InvalidInvocationOutcome(
+            "cannot determine invocation outcome precondition".into(),
+        )),
+    }
+}
+
+/// Reconstruct one invocation's state from durable events while the caller's
+/// append transaction is still open.  This is intentionally a small, local
+/// projection rather than a call to a runtime executor: recovery and outcome
+/// commits must never perform external work.
+fn invocation_state_in(
+    connection: &Connection,
+    invocation_id: &str,
+) -> LedgerResult<Option<InvocationState>> {
+    let mut statement = connection.prepare(
+        "SELECT kind, payload_json FROM events
+         WHERE kind IN ('tool/proposed', 'tool/state_changed', 'tool/reconciled')
+         ORDER BY append_order ASC",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut state = None;
+    let mut idempotency = None;
+    while let Some(row) = rows.next()? {
+        let kind: String = row.get(0)?;
+        let payload_json: String = row.get(1)?;
+        let payload: Value = serde_json::from_str(&payload_json).map_err(|error| {
+            LedgerError::InvalidInvocationOutcome(format!(
+                "invocation history contains invalid JSON payload: {error}"
+            ))
+        })?;
+        let event: Event = serde_json::from_value(serde_json::json!({
+            "kind": kind,
+            "payload": payload,
+        }))
+        .map_err(|error| {
+            LedgerError::InvalidInvocationOutcome(format!(
+                "invocation history contains an incomplete protocol event: {error}"
+            ))
+        })?;
+        match event {
+            Event::InvocationProposed {
+                invocation_id: candidate,
+                call_id,
+                tool_id,
+                tool_version,
+                normalized_arguments_digest,
+                effects,
+                effect_digest,
+                idempotency: declared_idempotency,
+                ..
+            } if candidate.to_string() == invocation_id => {
+                if state.is_some() {
+                    return Err(LedgerError::InvalidInvocationOutcome(
+                        "invocation has more than one proposal".into(),
+                    ));
+                }
+                validate_invocation_proposal_evidence(InvocationProposalEvidence {
+                    invocation_id: &candidate,
+                    call_id: &call_id,
+                    tool_id: &tool_id,
+                    tool_version: &tool_version,
+                    normalized_arguments_digest: &normalized_arguments_digest,
+                    effects: &effects,
+                    effect_digest: &effect_digest,
+                    declared_idempotency,
+                })?;
+                idempotency = Some(declared_idempotency);
+                state = Some(InvocationState::Proposed);
+            }
+            Event::InvocationStateChanged {
+                invocation_id: candidate,
+                from,
+                to,
+                ..
+            } if candidate.to_string() == invocation_id => {
+                let current = state.ok_or_else(|| {
+                    LedgerError::InvalidInvocationOutcome(
+                        "invocation state change has no proposal".into(),
+                    )
+                })?;
+                if current != from
+                    || !can_transition_invocation_with_idempotency(
+                        from,
+                        to,
+                        idempotency.unwrap_or(Idempotency::Unknown),
+                    )
+                {
+                    return Err(LedgerError::InvalidInvocationOutcome(
+                        "invocation state history is not a valid transition".into(),
+                    ));
+                }
+                state = Some(to);
+            }
+            Event::InvocationReconciled {
+                invocation_id: candidate,
+                outcome,
+                evidence,
+            } if candidate.to_string() == invocation_id => {
+                let current = state.ok_or_else(|| {
+                    LedgerError::InvalidInvocationOutcome(
+                        "invocation reconciliation has no proposal".into(),
+                    )
+                })?;
+                if evidence.source.trim().is_empty()
+                    || evidence.summary.trim().is_empty()
+                    || !can_reconcile_invocation(current, outcome)
+                {
+                    return Err(LedgerError::InvalidInvocationOutcome(
+                        "invocation reconciliation is not valid from the projected state".into(),
+                    ));
+                }
+                state = Some(outcome.state());
+            }
+            _ => {}
+        }
+    }
+    Ok(state)
+}
+
+/// Validate the evidence carried by a persisted invocation proposal before a
+/// typed outcome is allowed to extend its history.  Generic append/import
+/// intentionally remain append-only/schema-level APIs, so this check is kept
+/// at the transaction-local lookup used by outcome/recovery helpers.  Without
+/// it a forged proposal could establish a seemingly valid state and receive a
+/// result before core replay later rejects its digest or metadata.
+struct InvocationProposalEvidence<'a> {
+    invocation_id: &'a InvocationId,
+    call_id: &'a str,
+    tool_id: &'a str,
+    tool_version: &'a str,
+    normalized_arguments_digest: &'a str,
+    effects: &'a EffectSet,
+    effect_digest: &'a str,
+    declared_idempotency: Idempotency,
+}
+
+fn validate_invocation_proposal_evidence(
+    proposal: InvocationProposalEvidence<'_>,
+) -> LedgerResult<()> {
+    let InvocationProposalEvidence {
+        invocation_id,
+        call_id,
+        tool_id,
+        tool_version,
+        normalized_arguments_digest,
+        effects,
+        effect_digest,
+        declared_idempotency,
+    } = proposal;
+    for (field, value) in [
+        ("call_id", call_id),
+        ("tool_id", tool_id),
+        ("tool_version", tool_version),
+        ("normalized_arguments_digest", normalized_arguments_digest),
+        ("effect_digest", effect_digest),
+    ] {
+        if value.trim().is_empty() {
+            return Err(LedgerError::InvalidInvocationOutcome(format!(
+                "invocation proposal {invocation_id} has an empty {field}"
+            )));
+        }
+    }
+
+    if effects.idempotency != declared_idempotency {
+        return Err(LedgerError::InvalidInvocationOutcome(
+            "invocation proposal idempotency disagrees with effects".into(),
+        ));
+    }
+
+    let projected_effect_digest = digest_serializable(effects).map_err(|error| {
+        LedgerError::InvalidInvocationOutcome(format!(
+            "invocation proposal effects cannot be digested: {error}"
+        ))
+    })?;
+    if projected_effect_digest != effect_digest {
+        return Err(LedgerError::InvalidInvocationOutcome(format!(
+            "invocation proposal effect_digest does not match effects for {invocation_id}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_invocation_proposal_scope(
+    thread_id: &str,
+    turn_id: Option<&str>,
+    agent_id: &str,
+) -> LedgerResult<()> {
+    if thread_id.trim().is_empty() {
+        return Err(LedgerError::InvalidInvocationOutcome(
+            "invocation proposal has an empty thread_id".into(),
+        ));
+    }
+    if turn_id.is_none_or(|value| value.trim().is_empty()) {
+        return Err(LedgerError::InvalidInvocationOutcome(
+            "invocation proposal requires a non-empty turn_id".into(),
+        ));
+    }
+    if agent_id.trim().is_empty() {
+        return Err(LedgerError::InvalidInvocationOutcome(
+            "invocation proposal has an empty agent_id".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Return the protocol scope captured by an invocation proposal.  This query
+/// is deliberately transaction-local so a caller cannot validate against one
+/// proposal and append against another concurrently.
+type InvocationScope = (String, Option<String>, String, String);
+
+fn invocation_scope_in(
+    connection: &Connection,
+    invocation_id: &str,
+) -> LedgerResult<Option<InvocationScope>> {
+    let mut statement = connection.prepare(
+        "SELECT thread_id, turn_id, agent_id, payload_json FROM events
+         WHERE kind = 'tool/proposed' ORDER BY append_order ASC",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let thread_id: String = row.get(0)?;
+        let turn_id: Option<String> = row.get(1)?;
+        let agent_id: String = row.get(2)?;
+        let payload_json: String = row.get(3)?;
+        let payload: Value = serde_json::from_str(&payload_json).map_err(|error| {
+            LedgerError::InvalidInvocationOutcome(format!(
+                "invocation proposal contains invalid JSON payload: {error}"
+            ))
+        })?;
+        let event: Event = serde_json::from_value(serde_json::json!({
+            "kind": "tool/proposed",
+            "payload": payload,
+        }))
+        .map_err(|error| {
+            LedgerError::InvalidInvocationOutcome(format!(
+                "invocation proposal is incomplete: {error}"
+            ))
+        })?;
+        if let Event::InvocationProposed {
+            invocation_id: candidate,
+            call_id,
+            ..
+        } = event
+        {
+            if candidate.to_string() == invocation_id {
+                validate_invocation_proposal_scope(&thread_id, turn_id.as_deref(), &agent_id)?;
+                return Ok(Some((thread_id, turn_id, agent_id, call_id)));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Extract the call ID from a model-visible ToolResult event. Validators
+/// already require the exact one-block shape; this helper is deliberately
+/// conservative and returns `None` for any other event kind.
+fn tool_result_call_id(input: &NewLedgerEvent) -> Option<String> {
+    let Event::ItemAdded { item } = decode_new_event(input).ok()? else {
+        return None;
+    };
+    if item.kind != ItemKind::ToolResult {
+        return None;
+    }
+    let blocks: Vec<ContentBlock> =
+        serde_json::from_value(item.content.get("content")?.clone()).ok()?;
+    match blocks.as_slice() {
+        [ContentBlock::ToolResult { call_id, .. }] => Some(call_id.clone()),
+        _ => None,
+    }
+}
+
+fn decode_new_event(input: &NewLedgerEvent) -> LedgerResult<Event> {
+    serde_json::from_value(serde_json::json!({
+        "kind": input.kind,
+        "payload": input.payload,
+    }))
+    .map_err(|error| {
+        LedgerError::InvalidInvocationOutcome(format!(
+            "event {} is not valid protocol data: {error}",
+            input.event_id
+        ))
+    })
 }
 
 fn configure(connection: &Connection) -> LedgerResult<()> {
@@ -885,7 +1805,7 @@ fn validate_sequence(
                 found: event.seq,
             });
         }
-        expected += 1;
+        expected = expected.saturating_add(1);
     }
     Ok(())
 }
@@ -1027,8 +1947,10 @@ mod tests {
     use serde_json::json;
     use uuid::Uuid;
     use yeux_protocol::{
-        Event, EventId, Thread, ThreadId, ThreadStatus, Workspace, WorkspaceId, WorkspaceIdentity,
-        WorkspaceTrust,
+        AgentId, ContentBlock, EffectSet, Event, EventId, InvocationId,
+        InvocationReconciliationEvidence, InvocationReconciliationOutcome, InvocationState, Item,
+        ItemId, ItemKind, Thread, ThreadId, ThreadStatus, TurnId, Workspace, WorkspaceId,
+        WorkspaceIdentity, WorkspaceTrust,
     };
 
     fn event(thread: &str, event_id: &str, kind: &str) -> NewLedgerEvent {
@@ -1042,6 +1964,228 @@ mod tests {
             causation_id: None,
             kind: kind.into(),
             payload: json!({"turn_id": "turn-1"}),
+        }
+    }
+
+    fn protocol_event(
+        event_id: &str,
+        thread_id: ThreadId,
+        turn_id: TurnId,
+        causation_id: &str,
+        event: Event,
+    ) -> NewLedgerEvent {
+        let serialized = serde_json::to_value(event).unwrap();
+        NewLedgerEvent {
+            schema_version: yeux_protocol::PROTOCOL_VERSION,
+            event_id: event_id.into(),
+            thread_id: thread_id.to_string(),
+            turn_id: Some(turn_id.to_string()),
+            agent_id: "root".into(),
+            time: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            causation_id: Some(causation_id.into()),
+            kind: serialized["kind"].as_str().unwrap().into(),
+            payload: serialized["payload"].clone(),
+        }
+    }
+
+    fn invocation_outcome(
+        invocation_id: InvocationId,
+        terminal_state: InvocationState,
+    ) -> NewInvocationOutcome {
+        let thread_id = ThreadId::from_uuid(Uuid::now_v7());
+        let turn_id = TurnId::from_uuid(Uuid::now_v7());
+        let call_id = "provider-call-1";
+        let causation_id = invocation_id.to_string();
+        let item = Item {
+            id: ItemId::from_uuid(Uuid::now_v7()),
+            thread_id,
+            turn_id,
+            agent_id: AgentId::from("root"),
+            kind: ItemKind::ToolResult,
+            content: json!({
+                "invocation_id": invocation_id,
+                "content": [ContentBlock::ToolResult {
+                    call_id: call_id.into(),
+                    content: json!({"ok": terminal_state == InvocationState::Completed}),
+                    is_error: terminal_state != InvocationState::Completed,
+                }],
+            }),
+            created_at: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+        };
+        NewInvocationOutcome {
+            tool_result: protocol_event(
+                "outcome-result",
+                thread_id,
+                turn_id,
+                &causation_id,
+                Event::ItemAdded { item },
+            ),
+            terminal_state: protocol_event(
+                "outcome-terminal",
+                thread_id,
+                turn_id,
+                &causation_id,
+                Event::InvocationStateChanged {
+                    invocation_id,
+                    from: InvocationState::Started,
+                    to: terminal_state,
+                    reason: None,
+                },
+            ),
+        }
+    }
+
+    fn invocation_unknown(invocation_id: InvocationId) -> NewInvocationUnknown {
+        let thread_id = ThreadId::from_uuid(Uuid::now_v7());
+        let turn_id = TurnId::from_uuid(Uuid::now_v7());
+        NewInvocationUnknown {
+            state: protocol_event(
+                "unknown-marker",
+                thread_id,
+                turn_id,
+                &invocation_id.to_string(),
+                Event::InvocationStateChanged {
+                    invocation_id,
+                    from: InvocationState::Started,
+                    to: InvocationState::Unknown,
+                    reason: Some("daemon restart left the external outcome indeterminate".into()),
+                },
+            ),
+        }
+    }
+
+    fn invocation_unknown_outcome(invocation_id: InvocationId) -> NewInvocationUnknownOutcome {
+        let outcome = invocation_outcome(invocation_id, InvocationState::Failed);
+        let marker = unknown_for_outcome(&outcome);
+        NewInvocationUnknownOutcome {
+            unknown_state: marker.state,
+            tool_result: outcome.tool_result,
+        }
+    }
+
+    /// Seed the minimum valid invocation history needed by the guarded outcome
+    /// helpers.  Production callers already have these proposal/prepare/start
+    /// events; tests keep the fixture local so outcome tests exercise the same
+    /// state precondition rather than an orphan event pair.
+    fn seed_started_invocation(ledger: &EventLedger, input: &NewInvocationOutcome) {
+        seed_started_invocation_with_proposal(ledger, input, |_| {});
+    }
+
+    fn seed_started_invocation_with_proposal(
+        ledger: &EventLedger,
+        input: &NewInvocationOutcome,
+        mutate: impl FnOnce(&mut Event),
+    ) {
+        let terminal = decode_new_event(&input.terminal_state).unwrap();
+        let invocation_id = match terminal {
+            Event::InvocationStateChanged { invocation_id, .. }
+            | Event::InvocationReconciled { invocation_id, .. } => invocation_id,
+            _ => panic!("fixture terminal event must identify an invocation"),
+        };
+        let thread_id = input.tool_result.thread_id.parse::<ThreadId>().unwrap();
+        let turn_id = input
+            .tool_result
+            .turn_id
+            .as_deref()
+            .unwrap()
+            .parse::<TurnId>()
+            .unwrap();
+        let effects = EffectSet::default();
+        let mut proposal_event = Event::InvocationProposed {
+            invocation_id,
+            call_id: "provider-call-1".into(),
+            tool_id: "fixture.tool".into(),
+            tool_version: "1".into(),
+            normalized_arguments_digest: "fixture-args".into(),
+            effect_digest: digest_serializable(&effects).unwrap(),
+            idempotency: effects.idempotency,
+            effects,
+        };
+        mutate(&mut proposal_event);
+        let proposal = protocol_event(
+            &format!("proposal-{invocation_id}"),
+            thread_id,
+            turn_id,
+            &invocation_id.to_string(),
+            proposal_event,
+        );
+        ledger.append(proposal).unwrap();
+        for (index, (from, to)) in [
+            (InvocationState::Proposed, InvocationState::Approved),
+            (InvocationState::Approved, InvocationState::Prepared),
+            (InvocationState::Prepared, InvocationState::Started),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ledger
+                .append(protocol_event(
+                    &format!("start-{invocation_id}-{index}"),
+                    thread_id,
+                    turn_id,
+                    &invocation_id.to_string(),
+                    Event::InvocationStateChanged {
+                        invocation_id,
+                        from,
+                        to,
+                        reason: None,
+                    },
+                ))
+                .unwrap();
+        }
+    }
+
+    fn seed_unknown_invocation(ledger: &EventLedger, marker: &NewInvocationUnknown) {
+        let event = decode_new_event(&marker.state).unwrap();
+        let invocation_id = match event {
+            Event::InvocationStateChanged { invocation_id, .. } => invocation_id,
+            _ => panic!("fixture marker must be a state change"),
+        };
+        let thread_id = marker.state.thread_id.parse::<ThreadId>().unwrap();
+        let turn_id = marker
+            .state
+            .turn_id
+            .as_deref()
+            .unwrap()
+            .parse::<TurnId>()
+            .unwrap();
+        let outcome = invocation_outcome(invocation_id, InvocationState::Failed);
+        let mut outcome = outcome;
+        outcome.tool_result.thread_id = thread_id.to_string();
+        outcome.tool_result.turn_id = Some(turn_id.to_string());
+        outcome.terminal_state.thread_id = thread_id.to_string();
+        outcome.terminal_state.turn_id = Some(turn_id.to_string());
+        seed_started_invocation(ledger, &outcome);
+    }
+
+    fn unknown_for_outcome(input: &NewInvocationOutcome) -> NewInvocationUnknown {
+        let terminal = decode_new_event(&input.terminal_state).unwrap();
+        let invocation_id = match terminal {
+            Event::InvocationStateChanged { invocation_id, .. }
+            | Event::InvocationReconciled { invocation_id, .. } => invocation_id,
+            _ => panic!("fixture terminal event must identify an invocation"),
+        };
+        let thread_id = input.tool_result.thread_id.parse::<ThreadId>().unwrap();
+        let turn_id = input
+            .tool_result
+            .turn_id
+            .as_deref()
+            .unwrap()
+            .parse::<TurnId>()
+            .unwrap();
+        NewInvocationUnknown {
+            state: protocol_event(
+                &format!("unknown-{invocation_id}"),
+                thread_id,
+                turn_id,
+                &invocation_id.to_string(),
+                Event::InvocationStateChanged {
+                    invocation_id,
+                    from: InvocationState::Started,
+                    to: InvocationState::Unknown,
+                    reason: Some("external outcome requires reconciliation".into()),
+                },
+            ),
         }
     }
 
@@ -1193,6 +2337,28 @@ mod tests {
     }
 
     #[test]
+    fn incompatible_persisted_schema_is_rejected_before_payload_decode() {
+        let persisted = LedgerEvent {
+            schema_version: ProtocolVersion::new(1, 0),
+            event_id: Uuid::now_v7().to_string(),
+            thread_id: Uuid::now_v7().to_string(),
+            turn_id: None,
+            agent_id: "root".into(),
+            seq: 1,
+            time: Utc::now(),
+            causation_id: None,
+            kind: "tool/proposed".into(),
+            payload: json!({"legacy": true}),
+        };
+
+        assert!(matches!(
+            EventEnvelope::try_from(persisted),
+            Err(LedgerError::InvalidEnvelope(message))
+                if message.contains("unsupported event schema 1.0")
+        ));
+    }
+
+    #[test]
     fn command_receipt_replays_response_without_appending_again() {
         let ledger = EventLedger::open_in_memory().unwrap();
         let input = event("t", "event-1", "runtime/diagnostic");
@@ -1245,6 +2411,548 @@ mod tests {
             ledger.record_command_receipt(conflict),
             Err(LedgerError::CommandIdConflict { .. })
         ));
+    }
+
+    #[test]
+    fn runtime_batch_is_atomic_and_idempotent_by_event_id() {
+        let ledger = EventLedger::open_in_memory().unwrap();
+        let inputs = vec![
+            event("thread", "runtime-batch-1", "tool/state_changed"),
+            event("thread", "runtime-batch-2", "item/added"),
+        ];
+
+        let first = ledger.append_batch(inputs.clone()).unwrap();
+        assert_eq!(
+            first.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        let retry = ledger.append_batch(inputs).unwrap();
+        assert_eq!(retry, first);
+        assert_eq!(ledger.replay("thread", 0).unwrap(), first);
+    }
+
+    #[test]
+    fn runtime_batch_rejects_empty_partial_and_divergent_reuse() {
+        let ledger = EventLedger::open_in_memory().unwrap();
+        assert!(matches!(
+            ledger.append_batch(Vec::new()),
+            Err(LedgerError::EmptyEventBatch)
+        ));
+
+        let existing = event("thread", "runtime-existing", "runtime/diagnostic");
+        ledger.append(existing.clone()).unwrap();
+        assert!(matches!(
+            ledger.append_batch(vec![
+                existing.clone(),
+                event("thread", "runtime-new", "item/added"),
+            ]),
+            Err(LedgerError::EventIdConflict { .. })
+        ));
+        assert_eq!(ledger.replay("thread", 0).unwrap().len(), 1);
+
+        let mut divergent = existing;
+        divergent.kind = "different".into();
+        assert!(matches!(
+            ledger.append_batch(vec![divergent]),
+            Err(LedgerError::EventIdConflict { .. })
+        ));
+        assert_eq!(ledger.replay("thread", 0).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn invocation_outcome_is_atomic_idempotent_and_prefix_safe() {
+        let ledger = EventLedger::open_in_memory().unwrap();
+        let input = invocation_outcome(
+            InvocationId::from_uuid(Uuid::now_v7()),
+            InvocationState::Completed,
+        );
+        let thread_id = input.tool_result.thread_id.clone();
+        seed_started_invocation(&ledger, &input);
+
+        let first = ledger.append_invocation_outcome(input.clone()).unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].kind, "item/added");
+        assert_eq!(first[1].kind, "tool/state_changed");
+        assert_eq!([first[0].seq, first[1].seq], [5, 6]);
+
+        // Even a one-event replay page cannot expose Completed without its
+        // model-visible result because the result has the lower sequence.
+        let prefix = ledger.replay_page(&thread_id, 4, 1).unwrap();
+        assert_eq!(prefix.len(), 1);
+        assert_eq!(prefix[0].kind, "item/added");
+
+        let retry = ledger.append_invocation_outcome(input).unwrap();
+        assert_eq!(retry, first);
+        let all_events = ledger.replay(&thread_id, 0).unwrap();
+        assert_eq!(&all_events[4..], first.as_slice());
+    }
+
+    #[test]
+    fn invocation_outcome_retry_rejects_a_fully_existing_batch_without_proposal() {
+        let ledger = EventLedger::open_in_memory().unwrap();
+        let input = invocation_outcome(
+            InvocationId::from_uuid(Uuid::now_v7()),
+            InvocationState::Completed,
+        );
+        let thread_id = input.tool_result.thread_id.clone();
+
+        // Simulate an outcome pair imported through the generic append API.
+        // Both event IDs already exist, so the typed helper's idempotent path
+        // must still verify that a durable InvocationProposed anchor exists.
+        ledger
+            .append_batch(vec![
+                input.tool_result.clone(),
+                input.terminal_state.clone(),
+            ])
+            .unwrap();
+
+        assert!(matches!(
+            ledger.append_invocation_outcome(input),
+            Err(LedgerError::InvalidInvocationOutcome(message))
+                if message.contains("no proposal")
+        ));
+        assert_eq!(ledger.replay(&thread_id, 0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn invocation_outcome_retry_rejects_generic_terminal_pair_with_wrong_final_state() {
+        let ledger = EventLedger::open_in_memory().unwrap();
+        let invocation_id = InvocationId::from_uuid(Uuid::now_v7());
+        let input = invocation_outcome(invocation_id, InvocationState::Failed);
+        let thread_id = input.tool_result.thread_id.clone();
+        seed_started_invocation(&ledger, &input);
+
+        // A generic append can pre-seed a complete proposal/Started/terminal
+        // history.  A later typed retry must not treat the existing event IDs
+        // as sufficient evidence when its projected final state disagrees.
+        ledger
+            .append_batch(vec![
+                input.tool_result.clone(),
+                input.terminal_state.clone(),
+            ])
+            .unwrap();
+
+        let mut divergent_retry = input;
+        divergent_retry.terminal_state.payload["to"] = json!("completed");
+        divergent_retry.tool_result.payload["item"]["content"]["content"][0]["is_error"] =
+            json!(false);
+
+        assert!(matches!(
+            ledger.append_invocation_outcome(divergent_retry),
+            Err(LedgerError::InvocationStateConflict {
+                expected: InvocationState::Completed,
+                found: Some(InvocationState::Failed),
+                ..
+            })
+        ));
+        // The fail-closed retry must not append a duplicate or partial event.
+        assert_eq!(ledger.replay(&thread_id, 0).unwrap().len(), 6);
+    }
+
+    #[test]
+    fn invocation_outcome_validation_fails_before_any_append() {
+        let ledger = EventLedger::open_in_memory().unwrap();
+        let mut input = invocation_outcome(
+            InvocationId::from_uuid(Uuid::now_v7()),
+            InvocationState::Completed,
+        );
+        let thread_id = input.tool_result.thread_id.clone();
+        input.terminal_state.agent_id = "different-agent".into();
+
+        assert!(matches!(
+            ledger.append_invocation_outcome(input),
+            Err(LedgerError::InvalidInvocationOutcome(_))
+        ));
+        assert!(ledger.replay(&thread_id, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn invocation_outcome_rejects_forged_persisted_proposal_before_append() {
+        let ledger = EventLedger::open_in_memory().unwrap();
+        let input = invocation_outcome(
+            InvocationId::from_uuid(Uuid::now_v7()),
+            InvocationState::Completed,
+        );
+        let thread_id = input.tool_result.thread_id.clone();
+        seed_started_invocation_with_proposal(&ledger, &input, |proposal| {
+            if let Event::InvocationProposed { effect_digest, .. } = proposal {
+                *effect_digest = "forged-effect-digest".into();
+            }
+        });
+
+        assert!(matches!(
+            ledger.append_invocation_outcome(input),
+            Err(LedgerError::InvalidInvocationOutcome(message))
+                if message.contains("effect_digest")
+        ));
+        // The malformed generic proposal remains append-only evidence, but no
+        // derived ToolResult/terminal events may be added after it.
+        assert_eq!(ledger.replay(&thread_id, 0).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn invocation_outcome_rejects_incomplete_persisted_proposal_before_append() {
+        let ledger = EventLedger::open_in_memory().unwrap();
+        let input = invocation_outcome(
+            InvocationId::from_uuid(Uuid::now_v7()),
+            InvocationState::Failed,
+        );
+        let thread_id = input.tool_result.thread_id.clone();
+        seed_started_invocation_with_proposal(&ledger, &input, |proposal| {
+            if let Event::InvocationProposed { call_id, .. } = proposal {
+                call_id.clear();
+            }
+        });
+
+        assert!(matches!(
+            ledger.append_invocation_outcome(input),
+            Err(LedgerError::InvalidInvocationOutcome(message))
+                if message.contains("call_id")
+        ));
+        assert_eq!(ledger.replay(&thread_id, 0).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn invocation_outcome_rejects_idempotency_mismatch_in_persisted_proposal() {
+        let ledger = EventLedger::open_in_memory().unwrap();
+        let input = invocation_outcome(
+            InvocationId::from_uuid(Uuid::now_v7()),
+            InvocationState::Completed,
+        );
+        let thread_id = input.tool_result.thread_id.clone();
+        seed_started_invocation_with_proposal(&ledger, &input, |proposal| {
+            if let Event::InvocationProposed { idempotency, .. } = proposal {
+                *idempotency = Idempotency::Unknown;
+            }
+        });
+
+        assert!(matches!(
+            ledger.append_invocation_outcome(input),
+            Err(LedgerError::InvalidInvocationOutcome(message))
+                if message.contains("idempotency")
+        ));
+        assert_eq!(ledger.replay(&thread_id, 0).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn invocation_outcome_conflict_rolls_back_the_other_event() {
+        let ledger = EventLedger::open_in_memory().unwrap();
+        let input = invocation_outcome(
+            InvocationId::from_uuid(Uuid::now_v7()),
+            InvocationState::Failed,
+        );
+        let thread_id = input.tool_result.thread_id.clone();
+        seed_started_invocation(&ledger, &input);
+        let conflict = event(
+            "unrelated",
+            &input.terminal_state.event_id,
+            "runtime/diagnostic",
+        );
+        ledger.append(conflict).unwrap();
+
+        assert!(matches!(
+            ledger.append_invocation_outcome(input),
+            Err(LedgerError::EventIdConflict { .. })
+        ));
+        assert_eq!(ledger.replay(&thread_id, 0).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn invocation_outcome_requires_explicit_reconciliation_evidence() {
+        let ledger = EventLedger::open_in_memory().unwrap();
+        let invocation_id = InvocationId::from_uuid(Uuid::now_v7());
+        let mut input = invocation_outcome(invocation_id, InvocationState::Failed);
+        input.terminal_state.payload["from"] = json!("unknown");
+        assert!(matches!(
+            ledger.append_invocation_outcome(input.clone()),
+            Err(LedgerError::InvalidInvocationOutcome(message))
+                if message.contains("tool/reconciled")
+        ));
+
+        input.terminal_state = protocol_event(
+            "outcome-terminal-reconciled",
+            input.tool_result.thread_id.parse::<ThreadId>().unwrap(),
+            input
+                .tool_result
+                .turn_id
+                .as_deref()
+                .unwrap()
+                .parse::<TurnId>()
+                .unwrap(),
+            input.tool_result.causation_id.as_deref().unwrap(),
+            Event::InvocationReconciled {
+                invocation_id,
+                outcome: InvocationReconciliationOutcome::Failed,
+                evidence: InvocationReconciliationEvidence {
+                    source: "executor_receipt".into(),
+                    summary: "external receipt proves the operation failed".into(),
+                    artifact_uri: None,
+                },
+            },
+        );
+        seed_started_invocation(&ledger, &input);
+        ledger
+            .append_invocation_unknown(unknown_for_outcome(&input))
+            .unwrap();
+        let committed = ledger.append_invocation_outcome(input).unwrap();
+        assert_eq!(committed[1].kind, "tool/reconciled");
+    }
+
+    #[test]
+    fn unknown_marker_is_explicit_and_idempotent() {
+        let ledger = EventLedger::open_in_memory().unwrap();
+        let invocation_id = InvocationId::from_uuid(Uuid::now_v7());
+        let marker = invocation_unknown(invocation_id);
+        seed_unknown_invocation(&ledger, &marker);
+        let first = ledger.append_invocation_unknown(marker.clone()).unwrap();
+        assert_eq!(first.kind, "tool/state_changed");
+        assert_eq!(first.payload["from"], "started");
+        assert_eq!(first.payload["to"], "unknown");
+        assert_eq!(ledger.append_invocation_unknown(marker).unwrap(), first);
+
+        let mut malformed = invocation_unknown(invocation_id);
+        malformed.state.event_id = "different-marker".into();
+        malformed.state.payload["to"] = json!("started");
+        assert!(matches!(
+            ledger.append_invocation_unknown(malformed),
+            Err(LedgerError::InvalidInvocationOutcome(message))
+                if message.contains("Started -> Unknown")
+        ));
+        assert_eq!(ledger.replay(&first.thread_id, 0).unwrap().len(), 5);
+    }
+
+    #[test]
+    fn unknown_marker_scope_must_match_its_proposal() {
+        let ledger = EventLedger::open_in_memory().unwrap();
+        let invocation_id = InvocationId::from_uuid(Uuid::now_v7());
+        let marker = invocation_unknown(invocation_id);
+        let thread_id = marker.state.thread_id.clone();
+        seed_unknown_invocation(&ledger, &marker);
+
+        let mut forged = marker;
+        forged.state.event_id = "forged-scope-marker".into();
+        forged.state.agent_id = "different-agent".into();
+        assert!(matches!(
+            ledger.append_invocation_unknown(forged),
+            Err(LedgerError::InvalidInvocationOutcome(message))
+                if message.contains("scope")
+        ));
+        assert_eq!(ledger.replay(&thread_id, 0).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn unknown_outcome_is_atomic_and_idempotent() {
+        let ledger = EventLedger::open_in_memory().unwrap();
+        let invocation_id = InvocationId::from_uuid(Uuid::now_v7());
+        let input = invocation_unknown_outcome(invocation_id);
+        let thread_id = input.unknown_state.thread_id.clone();
+        let seed = NewInvocationOutcome {
+            tool_result: input.tool_result.clone(),
+            terminal_state: protocol_event(
+                "unknown-outcome-seed-terminal",
+                input.unknown_state.thread_id.parse::<ThreadId>().unwrap(),
+                input
+                    .unknown_state
+                    .turn_id
+                    .as_deref()
+                    .unwrap()
+                    .parse::<TurnId>()
+                    .unwrap(),
+                input.unknown_state.causation_id.as_deref().unwrap(),
+                Event::InvocationStateChanged {
+                    invocation_id,
+                    from: InvocationState::Started,
+                    to: InvocationState::Failed,
+                    reason: Some("seed only".into()),
+                },
+            ),
+        };
+        seed_started_invocation(&ledger, &seed);
+
+        let first = ledger
+            .append_invocation_unknown_outcome(input.clone())
+            .unwrap();
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].kind, "tool/state_changed");
+        assert_eq!(first[1].kind, "item/added");
+        assert_eq!(first[0].payload["from"], "started");
+        assert_eq!(first[0].payload["to"], "unknown");
+        assert_eq!(first[1].payload["item"]["kind"], "tool_result");
+        assert_eq!(
+            ledger.append_invocation_unknown_outcome(input).unwrap(),
+            first
+        );
+        assert_eq!(ledger.replay(&thread_id, 0).unwrap().len(), 6);
+    }
+
+    #[test]
+    fn unknown_outcome_call_id_must_match_its_proposal() {
+        let ledger = EventLedger::open_in_memory().unwrap();
+        let invocation_id = InvocationId::from_uuid(Uuid::now_v7());
+        let mut input = invocation_unknown_outcome(invocation_id);
+        let seed = NewInvocationOutcome {
+            tool_result: input.tool_result.clone(),
+            terminal_state: protocol_event(
+                "unknown-call-id-seed-terminal",
+                input.unknown_state.thread_id.parse::<ThreadId>().unwrap(),
+                input
+                    .unknown_state
+                    .turn_id
+                    .as_deref()
+                    .unwrap()
+                    .parse::<TurnId>()
+                    .unwrap(),
+                input.unknown_state.causation_id.as_deref().unwrap(),
+                Event::InvocationStateChanged {
+                    invocation_id,
+                    from: InvocationState::Started,
+                    to: InvocationState::Failed,
+                    reason: Some("seed only".into()),
+                },
+            ),
+        };
+        let thread_id = input.unknown_state.thread_id.clone();
+        seed_started_invocation(&ledger, &seed);
+        input.tool_result.payload["item"]["content"]["content"][0]["call_id"] =
+            json!("forged-call-id");
+
+        assert!(matches!(
+            ledger.append_invocation_unknown_outcome(input),
+            Err(LedgerError::InvalidInvocationOutcome(message))
+                if message.contains("call_id")
+        ));
+        assert_eq!(ledger.replay(&thread_id, 0).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn reconciliation_helper_rejects_ordinary_terminal_events() {
+        let ledger = EventLedger::open_in_memory().unwrap();
+        let input = invocation_outcome(
+            InvocationId::from_uuid(Uuid::now_v7()),
+            InvocationState::Completed,
+        );
+        assert!(matches!(
+            ledger.append_invocation_reconciliation(input),
+            Err(LedgerError::InvalidInvocationOutcome(message))
+                if message.contains("tool/reconciled")
+        ));
+    }
+
+    #[test]
+    fn outcome_batch_rolls_back_when_terminal_insert_fails() {
+        let ledger = EventLedger::open_in_memory().unwrap();
+        let input = invocation_outcome(
+            InvocationId::from_uuid(Uuid::now_v7()),
+            InvocationState::Completed,
+        );
+        seed_started_invocation(&ledger, &input);
+        {
+            let connection = ledger.lock().unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TRIGGER reject_invocation_terminal
+                     BEFORE INSERT ON events
+                     WHEN NEW.kind = 'tool/state_changed'
+                     BEGIN SELECT RAISE(ABORT, 'injected terminal failure'); END;",
+                )
+                .unwrap();
+        }
+        let thread_id = input.tool_result.thread_id.clone();
+        assert!(matches!(
+            ledger.append_invocation_outcome(input.clone()),
+            Err(LedgerError::Database(_))
+        ));
+        assert_eq!(ledger.replay(&thread_id, 0).unwrap().len(), 4);
+
+        // Removing the injected fault and retrying the exact same batch is
+        // safe: no prefix from the failed transaction survived.
+        {
+            let connection = ledger.lock().unwrap();
+            connection
+                .execute("DROP TRIGGER reject_invocation_terminal", [])
+                .unwrap();
+        }
+        let committed = ledger.append_invocation_outcome(input).unwrap();
+        assert_eq!(committed.len(), 2);
+        assert_eq!(ledger.replay(&thread_id, 0).unwrap().len(), 6);
+    }
+
+    #[test]
+    fn outcome_batch_survives_reopen_and_retries_by_event_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("outcome.sqlite3");
+        let input = invocation_outcome(
+            InvocationId::from_uuid(Uuid::now_v7()),
+            InvocationState::Failed,
+        );
+        let thread_id = input.tool_result.thread_id.clone();
+        let committed = {
+            let ledger = EventLedger::open(&path).unwrap();
+            seed_started_invocation(&ledger, &input);
+            ledger.append_invocation_outcome(input.clone()).unwrap()
+        };
+        let reopened = EventLedger::open(&path).unwrap();
+        let all_events = reopened.replay(&thread_id, 0).unwrap();
+        assert_eq!(all_events.len(), 6);
+        assert_eq!(&all_events[4..], committed.as_slice());
+        assert_eq!(
+            reopened.append_invocation_outcome(input).unwrap(),
+            committed
+        );
+    }
+
+    #[test]
+    fn reconciliation_batch_survives_reopen_without_reexecuting_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reconciliation.sqlite3");
+        let invocation_id = InvocationId::from_uuid(Uuid::now_v7());
+        let mut input = invocation_outcome(invocation_id, InvocationState::Failed);
+        let terminal = protocol_event(
+            "reconciled-terminal",
+            input.tool_result.thread_id.parse::<ThreadId>().unwrap(),
+            input
+                .tool_result
+                .turn_id
+                .as_deref()
+                .unwrap()
+                .parse::<TurnId>()
+                .unwrap(),
+            input.tool_result.causation_id.as_deref().unwrap(),
+            Event::InvocationReconciled {
+                invocation_id,
+                outcome: InvocationReconciliationOutcome::Failed,
+                evidence: InvocationReconciliationEvidence {
+                    source: "durable-receipt".into(),
+                    summary: "executor receipt proves no write was committed".into(),
+                    artifact_uri: None,
+                },
+            },
+        );
+        input.terminal_state = terminal;
+        let thread_id = input.tool_result.thread_id.clone();
+        let committed = {
+            let ledger = EventLedger::open(&path).unwrap();
+            seed_started_invocation(&ledger, &input);
+            ledger
+                .append_invocation_unknown(unknown_for_outcome(&input))
+                .unwrap();
+            ledger
+                .append_invocation_reconciliation(input.clone())
+                .unwrap()
+        };
+
+        let reopened = EventLedger::open(&path).unwrap();
+        let events = reopened.replay(&thread_id, 0).unwrap();
+        assert_eq!(events.len(), 7);
+        assert_eq!(&events[5..], committed.as_slice());
+        // A retry after restart is an event-ID replay, not a second external
+        // execution or a second reconciliation decision.
+        assert_eq!(
+            reopened.append_invocation_reconciliation(input).unwrap(),
+            committed
+        );
+        assert_eq!(reopened.replay(&thread_id, 0).unwrap().len(), 7);
     }
 
     #[test]

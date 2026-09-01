@@ -1,4 +1,4 @@
-# YeuX Protocol 1.0
+# YeuX Protocol 2.0
 
 状态：开发基线  
 规范源：`crates/yeux-protocol`  
@@ -21,7 +21,7 @@ stdio 和 Unix socket 使用相同 framing：每行一个完整 UTF-8 JSON 对�
   "command_id": "0195f6cc-0a3a-7a4d-8c9e-123456789abc",
   "method": "initialize",
   "params": {
-    "protocolVersion": { "major": 1, "minor": 0 },
+    "protocolVersion": { "major": 2, "minor": 0 },
     "clientInfo": { "name": "yeux", "version": "0.1.0" },
     "capabilities": {
       "event_replay": true,
@@ -39,20 +39,20 @@ stdio 和 Unix socket 使用相同 framing：每行一个完整 UTF-8 JSON 对�
   "jsonrpc": "2.0",
   "id": 1,
   "result": {
-    "protocolVersion": { "major": 1, "minor": 0 },
+    "protocolVersion": { "major": 2, "minor": 0 },
     "serverInfo": { "name": "yeuxd", "version": "0.1.0" },
     "capabilities": {
       "unix_socket": true,
-      "jobs": true,
+      "jobs": false,
       "subagents": false,
-      "plugins": true
+      "plugins": false
     },
     "hostCeiling": "operate"
   }
 }
 ```
 
-能力标志表示协议面或注册表可用，不一定表示完整执行闭环。例如当前 `jobs: true` 只覆盖 Job 创建、列出、暂停和恢复，`job/run` 尚不可用。
+能力标志只表示当前 daemon 已接通并可安全执行的闭环。当前 `jobs`、`plugins` 和 `subagents` 均为 `false`：Job 规格仍可由兼容客户端读取/管理，但后台调度、插件 authority 和子智能体执行尚未开放；`job/run` 返回 `feature unavailable`。
 
 ## 2. 命令包络
 
@@ -77,7 +77,8 @@ stdio 和 Unix socket 使用相同 framing：每行一个完整 UTF-8 JSON 对�
 
 ## 3. 版本兼容
 
-当前稳定协议版本是 `1.0`：
+当前稳定协议版本是 `2.0`。P1 为 invocation、approval 和 recovery 增加了
+授权所需的必填证据，因此该 major 与缺少这些证据的 1.0 ledger/wire 不兼容：
 
 - major 不同：`initialize` 失败，错误码 `-32001`。
 - major 相同：服务端接受不高于自身支持范围的客户端 minor。
@@ -113,7 +114,7 @@ Workspace、Thread、Turn、Item、Event 和 Command 的核心 ID 使用 UUIDv7�
   "jsonrpc": "2.0",
   "method": "event",
   "params": {
-    "schema_version": { "major": 1, "minor": 0 },
+    "schema_version": { "major": 2, "minor": 0 },
     "event_id": "0195f6cd-11f0-75b2-a187-123456789abc",
     "thread_id": "0195f6cc-b894-7e62-9f10-123456789abc",
     "turn_id": "0195f6cd-0211-7c91-850f-123456789abc",
@@ -136,7 +137,7 @@ Workspace、Thread、Turn、Item、Event 和 Command 的核心 ID 使用 UUIDv7�
 - `turn/started`、`turn/state_changed`、`turn/steered`
 - `item/added`
 - `model/requested`、`model/event`
-- `tool/proposed`、`tool/state_changed`
+- `tool/proposed`、`tool/state_changed`、`tool/reconciled`
 - `job/created`、`job/state_changed`
 - `agent/spawned`、`agent/completed`
 - `runtime/diagnostic`
@@ -172,9 +173,9 @@ Workspace、Thread、Turn、Item、Event 和 Command 的核心 ID 使用 UUIDv7�
 | `thread/archive` | 稳定 | 已实现；active Turn 时拒绝 |
 | `thread/compact` | 稳定声明 | 未实现，返回 feature unavailable |
 | `thread/subscribe` | 稳定 | 已实现；先固定并补发到 `replayedThroughSeq`，再进入实时订阅 |
-| `turn/start` | 稳定 | 创建 Turn 和用户 Item 后异步启动单请求 runner；配置 provider 时持久化流事件、assistant Item 和终态，不执行工具；未配置时以 `provider_unconfigured` 失败；重启不重调 provider，而是终结遗留 Turn 为 `failed` |
-| `turn/steer` | 稳定 | 只持久化 steering 事件 |
-| `turn/interrupt` | 稳定 | 已连接 runner 取消标志并持久化 cancelling -> cancelled；尚无工具执行取消 |
+| `turn/start` | 稳定 | 创建 Turn 和用户 Item 后异步启动有界 runner；配置 provider 且协商 tool calls 时，只注册 `workspace.list/read/search`，持久化多轮模型流、ToolCall/ToolResult、Invocation 和 assistant Item；未配置时以 `provider_unconfigured` 失败；重启不重调 provider/tool，而是终结遗留 Turn 为 `failed` |
+| `turn/steer` | 稳定 | 持久化 steering 事件；runner 在每次后续模型请求前重载 ledger，使消息在下一安全点进入当前 loop |
+| `turn/interrupt` | 稳定 | 已连接 runner 取消标志并持久化 `cancelling -> cancelled`（未跨越未决执行边界时）；取消后的 provider delta 不再落账；已越过执行边界但无法证明结果的工具会记录 `Unknown`/诊断，Turn 以 reconciliation-required 失败收束，禁止伪报成功、clean `Cancelled` 或静默重试 |
 | `model/list` | 稳定 | 读取 provider descriptor，不自动发现模型 |
 | `skill/list` | 稳定 | 读取 descriptor，不加载或执行 Skill |
 | `mcp/status` | 稳定 | 读取 descriptor，不连接 MCP server |

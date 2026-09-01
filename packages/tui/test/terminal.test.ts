@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { sanitizeTerminalText } from "../src/terminal.js";
+import { sanitizeTerminalLine, sanitizeTerminalText } from "../src/terminal.js";
 
 describe("sanitizeTerminalText", () => {
   it("removes terminal escape sequences and unsafe controls", () => {
@@ -20,5 +20,9 @@ describe("sanitizeTerminalText", () => {
     expect(sanitizeTerminalText("one\r\ntwo\tthree")).toBe("one\ntwo\tthree");
     expect(sanitizeTerminalText("\u001b")).toBe("");
     expect(sanitizeTerminalText("[31mtext")).toBe("[31mtext");
+  });
+
+  it("collapses untrusted structural labels to a single terminal line", () => {
+    expect(sanitizeTerminalLine("  tool\n\tresult\u001b[2J  ")).toBe("tool result");
   });
 });

@@ -1,5 +1,6 @@
 use crate::{
-    AgentId, AgentResult, AgentSpawnSpec, CausationId, EffectSet, EventId, InvocationId,
+    AgentId, AgentResult, AgentSpawnSpec, CausationId, EffectSet, EventId, Idempotency,
+    InvocationId, InvocationReconciliationEvidence, InvocationReconciliationOutcome,
     InvocationState, Item, JobId, JobSpec, JobState, ModelEvent, ModelRequestId, ProtocolVersion,
     Thread, ThreadId, Turn, TurnId, TurnState, Workspace, WorkspaceId, WorkspaceTrust,
 };
@@ -94,8 +95,13 @@ pub enum Event {
     #[serde(rename = "tool/proposed")]
     InvocationProposed {
         invocation_id: InvocationId,
+        call_id: String,
         tool_id: String,
+        tool_version: String,
+        normalized_arguments_digest: String,
         effects: EffectSet,
+        effect_digest: String,
+        idempotency: Idempotency,
     },
     #[serde(rename = "tool/state_changed")]
     InvocationStateChanged {
@@ -104,6 +110,14 @@ pub enum Event {
         to: InvocationState,
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
+    },
+    /// Explicitly resolves an invocation whose external outcome could not be
+    /// proven after execution started. This event never authorizes a retry.
+    #[serde(rename = "tool/reconciled")]
+    InvocationReconciled {
+        invocation_id: InvocationId,
+        outcome: InvocationReconciliationOutcome,
+        evidence: InvocationReconciliationEvidence,
     },
     #[serde(rename = "job/created")]
     JobCreated { job: JobSpec },

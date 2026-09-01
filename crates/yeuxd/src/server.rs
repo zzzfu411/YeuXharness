@@ -19,11 +19,15 @@ use yeux_core::{
     digest_value, Clock, IdError, IdGenerator, ReplayError, SystemClock, UuidV7Generator,
 };
 use yeux_protocol::{
-    method, CapabilityMode, CommandEnvelope, Event, EventEnvelope, ModelDescriptor,
-    NotificationEnvelope, ResponseEnvelope, RpcError, RpcId, ThreadId, Turn, TurnId, TurnState,
-    JSONRPC_VERSION, PROTOCOL_VERSION,
+    method, AgentId, CapabilityMode, CommandEnvelope, ContentBlock, Event, EventEnvelope,
+    InvocationId, InvocationState, Item, ItemId, ItemKind, ModelDescriptor, NotificationEnvelope,
+    ResponseEnvelope, RpcError, RpcId, ThreadId, TurnId, TurnState, JSONRPC_VERSION,
+    PROTOCOL_VERSION,
 };
-use yeux_runtime::{DescriptorStore, EventLedger, NewCommandReceipt, NewLedgerEvent};
+use yeux_runtime::{
+    DescriptorStore, EventLedger, NewCommandReceipt, NewInvocationOutcome, NewInvocationUnknown,
+    NewLedgerEvent,
+};
 
 use crate::runner::{
     CancellationFlag, ModelProviderConfig, TurnRunSpec, TurnRunner, TurnRunnerError,
@@ -88,6 +92,10 @@ impl DaemonConfig {
     pub fn without_turn_execution(mut self) -> Self {
         self.execute_turns = false;
         self
+    }
+
+    pub(crate) fn executes_turns(&self) -> bool {
+        self.execute_turns
     }
 }
 
@@ -674,17 +682,141 @@ fn recover_interrupted_turns(
         yeux_runtime::CoreProjectionError::Ledger(error) => DaemonError::Ledger(error),
         yeux_runtime::CoreProjectionError::Replay(error) => DaemonError::Replay(error),
     })?;
+
+    // Invocation state events must retain the proposal's complete envelope.
+    // In particular, an invocation may be attributed to a delegated agent
+    // rather than the turn's agent, so deriving this from `Turn` would make a
+    // replay disagree with the durable proposal.
+    let mut invocation_envelopes: HashMap<InvocationId, (ThreadId, TurnId, AgentId)> =
+        HashMap::new();
+    for persisted in ledger.all_events()? {
+        let envelope = EventEnvelope::try_from(persisted)?;
+        if let Event::InvocationProposed { invocation_id, .. } = envelope.event {
+            let turn_id = envelope.turn_id.ok_or_else(|| {
+                DaemonError::Replay(ReplayError::MissingEntity {
+                    kind: "invocation proposal turn",
+                    id: invocation_id.to_string(),
+                })
+            })?;
+            invocation_envelopes.insert(
+                invocation_id,
+                (envelope.thread_id, turn_id, envelope.agent_id),
+            );
+        }
+    }
+
+    let now = clock.now();
+    let mut recovery = Vec::new();
+
+    // Resolve every pre-execution invocation before terminating its parent
+    // turn. Once Started has been persisted, the external outcome is
+    // indeterminate: conservatively record Unknown and never replay it during
+    // daemon startup, regardless of its idempotency classification.
+    for invocation in projection
+        .invocations
+        .values()
+        .filter(|invocation| !invocation.state.is_terminal())
+    {
+        let to = match invocation.state {
+            InvocationState::Proposed | InvocationState::Approved | InvocationState::Prepared => {
+                InvocationState::Failed
+            }
+            InvocationState::Started => InvocationState::Unknown,
+            InvocationState::Unknown => continue,
+            InvocationState::Completed | InvocationState::Failed | InvocationState::Cancelled => {
+                unreachable!("terminal invocations were filtered")
+            }
+        };
+        let (thread_id, turn_id, agent_id) = invocation_envelopes
+            .get(&invocation.invocation_id)
+            .cloned()
+            .ok_or_else(|| {
+                DaemonError::Replay(ReplayError::MissingEntity {
+                    kind: "invocation proposal envelope",
+                    id: invocation.invocation_id.to_string(),
+                })
+            })?;
+        let reason = if to == InvocationState::Unknown {
+            "daemon restarted after the invocation crossed the execution boundary; outcome requires reconciliation"
+        } else {
+            "daemon restarted before the invocation crossed the execution boundary"
+        };
+        let causation_id = format!("daemon-restart:{}", invocation.invocation_id);
+        let state_event = new_recovery_event(
+            ids,
+            thread_id,
+            Some(turn_id),
+            agent_id.clone(),
+            now,
+            &causation_id,
+            Event::InvocationStateChanged {
+                invocation_id: invocation.invocation_id,
+                from: invocation.state,
+                to,
+                reason: Some(reason.into()),
+            },
+        )?;
+        if to == InvocationState::Unknown {
+            // Unknown is intentionally a marker-only fact: there is no
+            // proven external result to expose as a terminal ToolResult.  The
+            // typed ledger API still enforces Started -> Unknown and checks
+            // the projected state atomically, so a restart cannot append a
+            // stale or divergent marker.
+            ledger.append_invocation_unknown(NewInvocationUnknown { state: state_event })?;
+        } else {
+            // Pre-execution recovery is deterministic.  Persist a bounded
+            // diagnostic ToolResult together with the Failed transition so a
+            // replay can never observe a terminal invocation without its
+            // model-visible result.
+            let failure_message =
+                "daemon restarted before the invocation crossed the execution boundary";
+            let tool_result = new_recovery_event(
+                ids,
+                thread_id,
+                Some(turn_id),
+                agent_id.clone(),
+                now,
+                &causation_id,
+                Event::ItemAdded {
+                    item: Item {
+                        id: ItemId::from_uuid(ids.next_uuid()?),
+                        thread_id,
+                        turn_id,
+                        agent_id: agent_id.clone(),
+                        kind: ItemKind::ToolResult,
+                        content: json!({
+                            "content": [ContentBlock::ToolResult {
+                                call_id: invocation.call_id.clone(),
+                                content: json!({
+                                    "code": "tool_interrupted_by_restart",
+                                    "message": failure_message,
+                                }),
+                                is_error: true,
+                            }],
+                            "invocation_id": invocation.invocation_id,
+                        }),
+                        created_at: now,
+                    },
+                },
+            )?;
+            ledger.append_invocation_outcome(NewInvocationOutcome {
+                tool_result,
+                terminal_state: state_event,
+            })?;
+        }
+    }
+
     for turn in projection
         .turns
         .values()
         .filter(|turn| !turn.state.is_terminal())
     {
-        let now = clock.now();
         let causation_id = format!("daemon-restart:{}", turn.id);
-        append_recovery_event(
-            ledger,
+        recovery.push(new_recovery_event(
             ids,
-            turn,
+            turn.thread_id,
+            Some(turn.id),
+            turn.agent_id.clone(),
             now,
             &causation_id,
             Event::RuntimeDiagnostic {
@@ -692,11 +824,12 @@ fn recover_interrupted_turns(
                 message: "daemon restarted before the turn reached a terminal state; external work was not replayed".into(),
                 recoverable: false,
             },
-        )?;
-        append_recovery_event(
-            ledger,
+        )?);
+        recovery.push(new_recovery_event(
             ids,
-            turn,
+            turn.thread_id,
+            Some(turn.id),
+            turn.agent_id.clone(),
             now,
             &causation_id,
             Event::TurnStateChanged {
@@ -705,37 +838,41 @@ fn recover_interrupted_turns(
                 to: TurnState::Failed,
                 reason: Some("daemon restarted before the turn completed".into()),
             },
-        )?;
+        )?);
+    }
+    if !recovery.is_empty() {
+        ledger.append_batch(recovery)?;
     }
     Ok(())
 }
 
-fn append_recovery_event(
-    ledger: &EventLedger,
+#[allow(clippy::too_many_arguments)]
+fn new_recovery_event(
     ids: &dyn IdGenerator,
-    turn: &Turn,
+    thread_id: ThreadId,
+    turn_id: Option<TurnId>,
+    agent_id: AgentId,
     time: chrono::DateTime<chrono::Utc>,
     causation_id: &str,
     event: Event,
-) -> Result<(), DaemonError> {
+) -> Result<NewLedgerEvent, DaemonError> {
     let serialized = serde_json::to_value(event)?;
     let kind = serialized
         .get("kind")
         .and_then(Value::as_str)
         .expect("serialized protocol Event always has a kind")
         .to_owned();
-    ledger.append(NewLedgerEvent {
+    Ok(NewLedgerEvent {
         schema_version: PROTOCOL_VERSION,
         event_id: ids.next_uuid()?.to_string(),
-        thread_id: turn.thread_id.to_string(),
-        turn_id: Some(turn.id.to_string()),
-        agent_id: turn.agent_id.to_string(),
+        thread_id: thread_id.to_string(),
+        turn_id: turn_id.map(|id| id.to_string()),
+        agent_id: agent_id.to_string(),
         time,
         causation_id: Some(causation_id.to_owned()),
         kind,
         payload: serialized.get("payload").cloned().unwrap_or(Value::Null),
-    })?;
-    Ok(())
+    })
 }
 
 enum Frame {
@@ -907,6 +1044,7 @@ mod tests {
     use std::{
         future::Future,
         pin::Pin,
+        sync::atomic::{AtomicUsize, Ordering},
         task::{Context, Poll},
         time::Duration,
     };
@@ -916,8 +1054,9 @@ mod tests {
     };
     use yeux_core::{ModelEventSink, ModelProvider, PortError, SequenceIdGenerator, SystemClock};
     use yeux_protocol::{
-        ClientCapabilities, ClientInfo, ContentBlock, InitializeParams, ModelEvent, ModelRequest,
-        ProviderCapabilities, StopReason, TokenBudget, PROTOCOL_VERSION,
+        ClientCapabilities, ClientInfo, ContentBlock, EffectSet, Idempotency, InitializeParams,
+        InvocationId, InvocationState, ModelEvent, ModelRequest, ProviderCapabilities, StopReason,
+        TokenBudget, PROTOCOL_VERSION,
     };
 
     #[derive(Debug)]
@@ -951,6 +1090,70 @@ mod tests {
                     stop_reason: StopReason::EndTurn,
                 })
                 .await
+            })
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct ToolLoopProvider {
+        round: AtomicUsize,
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+
+    impl ModelProvider for ToolLoopProvider {
+        fn provider_id(&self) -> &str {
+            "tool-loop"
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                tool_calls: true,
+                parallel_tool_calls: true,
+                ..ProviderCapabilities::default()
+            }
+        }
+
+        fn stream<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            request: ModelRequest,
+            sink: &'life1 mut (dyn ModelEventSink + Send),
+        ) -> Pin<Box<dyn Future<Output = Result<(), PortError>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                self.requests.lock().unwrap().push(request);
+                match self.round.fetch_add(1, Ordering::SeqCst) {
+                    0 => {
+                        sink.emit(ModelEvent::ToolCallDelta {
+                            call_id: "read-facts".into(),
+                            name: "workspace.read".into(),
+                            json_delta: "{\"path\":\"facts.txt\"}".into(),
+                        })
+                        .await?;
+                        sink.emit(ModelEvent::Completed {
+                            stop_reason: StopReason::ToolUse,
+                        })
+                        .await
+                    }
+                    1 => {
+                        sink.emit(ModelEvent::TextDelta {
+                            text: "facts integrated".into(),
+                        })
+                        .await?;
+                        sink.emit(ModelEvent::Completed {
+                            stop_reason: StopReason::EndTurn,
+                        })
+                        .await
+                    }
+                    _ => Err(PortError {
+                        code: "unexpected_round".into(),
+                        message: "tool-loop provider was called too many times".into(),
+                        retryable: false,
+                    }),
+                }
             })
         }
     }
@@ -1073,6 +1276,101 @@ mod tests {
                 state,
             )
             .0
+    }
+
+    fn append_test_event(
+        ledger: &EventLedger,
+        thread_id: ThreadId,
+        turn_id: TurnId,
+        agent_id: &str,
+        event: Event,
+    ) {
+        let serialized = serde_json::to_value(event).unwrap();
+        ledger
+            .append(NewLedgerEvent {
+                schema_version: PROTOCOL_VERSION,
+                event_id: uuid::Uuid::now_v7().to_string(),
+                thread_id: thread_id.to_string(),
+                turn_id: Some(turn_id.to_string()),
+                agent_id: agent_id.into(),
+                time: chrono::Utc::now(),
+                causation_id: Some("restart-fixture".into()),
+                kind: serialized["kind"].as_str().unwrap().into(),
+                payload: serialized["payload"].clone(),
+            })
+            .unwrap();
+    }
+
+    fn append_invocation_fixture(
+        ledger: &EventLedger,
+        thread_id: ThreadId,
+        turn_id: TurnId,
+        invocation_id: InvocationId,
+        target_state: InvocationState,
+        idempotency: Idempotency,
+        agent_id: &str,
+    ) {
+        let effects = EffectSet {
+            idempotency,
+            ..EffectSet::default()
+        };
+        append_test_event(
+            ledger,
+            thread_id,
+            turn_id,
+            agent_id,
+            Event::InvocationProposed {
+                invocation_id,
+                call_id: format!("fixture-{invocation_id}"),
+                tool_id: "fixture.tool".into(),
+                tool_version: "1".into(),
+                normalized_arguments_digest: digest_value(&json!({"fixture": invocation_id})),
+                effect_digest: digest_value(&serde_json::to_value(&effects).unwrap()),
+                effects,
+                idempotency,
+            },
+        );
+
+        let transitions: &[InvocationState] = match target_state {
+            InvocationState::Proposed => &[],
+            InvocationState::Approved => &[InvocationState::Approved],
+            InvocationState::Prepared => &[InvocationState::Approved, InvocationState::Prepared],
+            InvocationState::Started => &[
+                InvocationState::Approved,
+                InvocationState::Prepared,
+                InvocationState::Started,
+            ],
+            InvocationState::Completed => &[
+                InvocationState::Approved,
+                InvocationState::Prepared,
+                InvocationState::Started,
+                InvocationState::Completed,
+            ],
+            InvocationState::Failed => &[InvocationState::Failed],
+            InvocationState::Cancelled => &[InvocationState::Cancelled],
+            InvocationState::Unknown => &[
+                InvocationState::Approved,
+                InvocationState::Prepared,
+                InvocationState::Started,
+                InvocationState::Unknown,
+            ],
+        };
+        let mut from = InvocationState::Proposed;
+        for to in transitions {
+            append_test_event(
+                ledger,
+                thread_id,
+                turn_id,
+                agent_id,
+                Event::InvocationStateChanged {
+                    invocation_id,
+                    from,
+                    to: *to,
+                    reason: None,
+                },
+            );
+            from = *to;
+        }
     }
 
     #[test]
@@ -1383,6 +1681,235 @@ mod tests {
         assert_ne!(next["result"]["turn"]["id"], orphaned_turn_id.to_string());
     }
 
+    #[test]
+    fn restart_recovers_invocations_before_turn_without_replaying_started_work() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let proposed = InvocationId::from_uuid(uuid::Uuid::now_v7());
+        let approved = InvocationId::from_uuid(uuid::Uuid::now_v7());
+        let prepared = InvocationId::from_uuid(uuid::Uuid::now_v7());
+        let started_non_idempotent = InvocationId::from_uuid(uuid::Uuid::now_v7());
+        let started_idempotent = InvocationId::from_uuid(uuid::Uuid::now_v7());
+        let already_unknown = InvocationId::from_uuid(uuid::Uuid::now_v7());
+        let completed = InvocationId::from_uuid(uuid::Uuid::now_v7());
+
+        let (thread_id, turn_id) = {
+            let daemon =
+                Daemon::open(DaemonConfig::in_directory(state_dir.path()).without_turn_execution())
+                    .unwrap();
+            let mut state = ConnectionState {
+                initialized: true,
+                ..ConnectionState::default()
+            };
+            let opened = direct_command(
+                &daemon,
+                &mut state,
+                method::WORKSPACE_OPEN,
+                json!({ "path": workspace.path() }),
+            );
+            let created = direct_command(
+                &daemon,
+                &mut state,
+                method::THREAD_START,
+                json!({ "workspaceId": opened["result"]["workspace"]["id"] }),
+            );
+            let thread_id = created["result"]["thread"]["id"]
+                .as_str()
+                .unwrap()
+                .parse::<ThreadId>()
+                .unwrap();
+            let started = direct_command(
+                &daemon,
+                &mut state,
+                method::TURN_START,
+                json!({
+                    "threadId": thread_id,
+                    "content": [{"type": "text", "text": "restart fixture"}]
+                }),
+            );
+            let turn_id = started["result"]["turn"]["id"]
+                .as_str()
+                .unwrap()
+                .parse::<TurnId>()
+                .unwrap();
+
+            for (invocation_id, target_state, idempotency, agent_id) in [
+                (
+                    proposed,
+                    InvocationState::Proposed,
+                    Idempotency::Idempotent,
+                    "proposal-agent",
+                ),
+                (
+                    approved,
+                    InvocationState::Approved,
+                    Idempotency::Idempotent,
+                    "approved-agent",
+                ),
+                (
+                    prepared,
+                    InvocationState::Prepared,
+                    Idempotency::IdempotentWithKey,
+                    "prepared-agent",
+                ),
+                (
+                    started_non_idempotent,
+                    InvocationState::Started,
+                    Idempotency::NonIdempotent,
+                    "non-idempotent-agent",
+                ),
+                (
+                    started_idempotent,
+                    InvocationState::Started,
+                    Idempotency::IdempotentWithKey,
+                    "idempotent-agent",
+                ),
+                (
+                    already_unknown,
+                    InvocationState::Unknown,
+                    Idempotency::Unknown,
+                    "unknown-agent",
+                ),
+                (
+                    completed,
+                    InvocationState::Completed,
+                    Idempotency::Idempotent,
+                    "completed-agent",
+                ),
+            ] {
+                append_invocation_fixture(
+                    daemon.inner.ledger.as_ref(),
+                    thread_id,
+                    turn_id,
+                    invocation_id,
+                    target_state,
+                    idempotency,
+                    agent_id,
+                );
+            }
+            (thread_id, turn_id)
+        };
+
+        let first_restart =
+            Daemon::open(DaemonConfig::in_directory(state_dir.path()).without_turn_execution())
+                .unwrap();
+        let projection = first_restart.projection().unwrap();
+        assert_eq!(
+            projection.invocations[&proposed].state,
+            InvocationState::Failed
+        );
+        assert_eq!(
+            projection.invocations[&approved].state,
+            InvocationState::Failed
+        );
+        assert_eq!(
+            projection.invocations[&prepared].state,
+            InvocationState::Failed
+        );
+        assert_eq!(
+            projection.invocations[&started_non_idempotent].state,
+            InvocationState::Unknown
+        );
+        assert_eq!(
+            projection.invocations[&started_idempotent].state,
+            InvocationState::Unknown
+        );
+        assert_eq!(
+            projection.invocations[&already_unknown].state,
+            InvocationState::Unknown
+        );
+        assert_eq!(
+            projection.invocations[&completed].state,
+            InvocationState::Completed
+        );
+        assert!(projection
+            .invocations
+            .values()
+            .all(|invocation| invocation.state != InvocationState::Started));
+        assert_eq!(projection.turns[&turn_id].state, TurnState::Failed);
+
+        // Recovery of work that never crossed the execution boundary must be
+        // a complete Failed outcome, not a bare state marker.  The typed
+        // ledger path above commits one ToolResult with each of these three
+        // transitions, while Started work remains marker-only Unknown.
+        for invocation_id in [proposed, approved, prepared] {
+            assert!(projection.items.values().any(|item| {
+                item.kind == ItemKind::ToolResult
+                    && item.content["invocation_id"] == invocation_id.to_string()
+            }));
+        }
+
+        let events = first_restart
+            .inner
+            .ledger
+            .replay(&thread_id.to_string(), 0)
+            .unwrap();
+        let recovery_events = events
+            .iter()
+            .filter(|event| {
+                event
+                    .causation_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("daemon-restart:"))
+            })
+            .collect::<Vec<_>>();
+        let turn_failure_index = recovery_events
+            .iter()
+            .position(|event| event.kind == "turn/state_changed")
+            .unwrap();
+        assert!(
+            recovery_events[..turn_failure_index]
+                .iter()
+                .filter(|event| event.kind == "tool/state_changed")
+                .count()
+                == 5
+        );
+        assert!(recovery_events[turn_failure_index + 1..]
+            .iter()
+            .all(|event| event.kind != "tool/state_changed"));
+
+        let non_idempotent_recovery = recovery_events
+            .iter()
+            .find(|event| {
+                event.kind == "tool/state_changed"
+                    && event.payload["invocation_id"] == started_non_idempotent.to_string()
+            })
+            .unwrap();
+        assert_eq!(non_idempotent_recovery.payload["from"], "started");
+        assert_eq!(non_idempotent_recovery.payload["to"], "unknown");
+        assert_eq!(non_idempotent_recovery.agent_id, "non-idempotent-agent");
+        assert_eq!(
+            non_idempotent_recovery.turn_id.as_deref(),
+            Some(turn_id.to_string().as_str())
+        );
+        assert!(!recovery_events.iter().any(|event| {
+            event.kind == "tool/state_changed"
+                && event.payload["invocation_id"] == started_non_idempotent.to_string()
+                && event.payload["from"] == "unknown"
+                && event.payload["to"] == "started"
+        }));
+
+        // A second restart has nothing left to mutate. This also proves that
+        // the recovery batch can be replayed into a stable core projection.
+        let event_count = events.len();
+        drop(first_restart);
+        let second_restart =
+            Daemon::open(DaemonConfig::in_directory(state_dir.path()).without_turn_execution())
+                .unwrap();
+        let rebuilt = second_restart.inner.ledger.project_core().unwrap();
+        assert_eq!(
+            second_restart
+                .inner
+                .ledger
+                .replay(&thread_id.to_string(), 0)
+                .unwrap()
+                .len(),
+            event_count
+        );
+        assert_eq!(rebuilt.invocations, projection.invocations);
+        assert_eq!(rebuilt.turns[&turn_id], projection.turns[&turn_id]);
+    }
+
     #[tokio::test]
     async fn cancelled_frame_read_preserves_partial_input() {
         let (mut client, server) = duplex(1_024);
@@ -1477,7 +2004,10 @@ mod tests {
             wire_command(method::INITIALIZE, initialize),
         )
         .await;
-        assert_eq!(response["result"]["protocolVersion"]["major"], 1);
+        assert_eq!(
+            response["result"]["protocolVersion"]["major"],
+            PROTOCOL_VERSION.major
+        );
 
         let response = send_json(
             &mut client_write,
@@ -1548,6 +2078,146 @@ mod tests {
                 && item.kind == yeux_protocol::ItemKind::AssistantMessage
                 && item.content["content"][0]["text"] == "faux answer"
         }));
+
+        client_write.shutdown().await.unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn structured_read_tool_loop_completes_over_the_wire() {
+        let state = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join("facts.txt"),
+            "ledger is authoritative",
+        )
+        .unwrap();
+        let provider = Arc::new(ToolLoopProvider::default());
+        let config =
+            DaemonConfig::in_directory(state.path()).with_model_provider(ModelProviderConfig::new(
+                provider.clone(),
+                "tool-model",
+                TokenBudget {
+                    max_input_tokens: 4_096,
+                    max_output_tokens: 256,
+                },
+            ));
+        let daemon = Daemon::open(config).unwrap();
+        let projection_daemon = daemon.clone();
+        let (client, server) = duplex(128 * 1_024);
+        let (server_read, server_write) = split(server);
+        let task = tokio::spawn(async move {
+            daemon
+                .serve_connection(BufReader::new(server_read), BufWriter::new(server_write))
+                .await
+        });
+        let (client_read, mut client_write) = split(client);
+        let mut client_read = BufReader::new(client_read);
+
+        let initialize = serde_json::to_value(InitializeParams {
+            protocol_version: PROTOCOL_VERSION,
+            client_info: ClientInfo {
+                name: "tool-wire-test".into(),
+                version: "0".into(),
+            },
+            capabilities: ClientCapabilities {
+                event_replay: true,
+                ..ClientCapabilities::default()
+            },
+        })
+        .unwrap();
+        send_json(
+            &mut client_write,
+            &mut client_read,
+            wire_command(method::INITIALIZE, initialize),
+        )
+        .await;
+        let opened = send_json(
+            &mut client_write,
+            &mut client_read,
+            wire_command(method::WORKSPACE_OPEN, json!({ "path": workspace.path() })),
+        )
+        .await;
+        let workspace_id = opened["result"]["workspace"]["id"].clone();
+        let started = send_json(
+            &mut client_write,
+            &mut client_read,
+            wire_command(method::THREAD_START, json!({ "workspaceId": workspace_id })),
+        )
+        .await;
+        let thread_id = started["result"]["thread"]["id"].clone();
+        let subscribed = send_json(
+            &mut client_write,
+            &mut client_read,
+            wire_command(
+                method::THREAD_SUBSCRIBE,
+                json!({ "threadId": thread_id, "afterSeq": 0 }),
+            ),
+        )
+        .await;
+        assert_eq!(subscribed["result"]["replayedThroughSeq"], 1);
+        assert_eq!(
+            read_json(&mut client_read).await["params"]["kind"],
+            "thread/started"
+        );
+
+        let started_turn = send_json(
+            &mut client_write,
+            &mut client_read,
+            wire_command(
+                method::TURN_START,
+                json!({
+                    "threadId": thread_id,
+                    "content": [ContentBlock::Text { text: "read facts".into() }]
+                }),
+            ),
+        )
+        .await;
+        let turn_id = started_turn["result"]["turn"]["id"]
+            .as_str()
+            .unwrap()
+            .parse::<TurnId>()
+            .unwrap();
+
+        let mut saw_proposal = false;
+        let mut saw_result = false;
+        loop {
+            let notification = read_json(&mut client_read).await;
+            let params = &notification["params"];
+            saw_proposal |= params["kind"] == "tool/proposed"
+                && params["payload"]["tool_id"] == "workspace.read";
+            saw_result |= params["kind"] == "item/added"
+                && params["payload"]["item"]["kind"] == "tool_result"
+                && params["payload"]["item"]["content"]["content"][0]["content"]["content"]
+                    == "ledger is authoritative";
+            if params["kind"] == "turn/state_changed" && params["payload"]["to"] == "completed" {
+                break;
+            }
+        }
+        assert!(saw_proposal);
+        assert!(saw_result);
+
+        {
+            let requests = provider.requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].tools.len(), 3);
+            assert!(requests[1]
+                .messages
+                .iter()
+                .flat_map(|message| &message.content)
+                .any(|block| matches!(
+                    block,
+                    ContentBlock::ToolResult { content, .. }
+                        if content["content"] == "ledger is authoritative"
+                )));
+        }
+
+        let projection = projection_daemon.projection().unwrap();
+        assert_eq!(projection.turns[&turn_id].state, TurnState::Completed);
+        assert!(projection
+            .invocations
+            .values()
+            .any(|invocation| invocation.state == InvocationState::Completed));
 
         client_write.shutdown().await.unwrap();
         task.await.unwrap().unwrap();

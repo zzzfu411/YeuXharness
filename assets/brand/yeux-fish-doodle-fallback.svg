@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 220" role="img" aria-labelledby="title desc">
+  <title id="title">YeuX fish doodle</title>
+  <desc id="desc">Two naive fish people stand back-to-back, with heads outward and tails almost touching.</desc>
+  <style>
+    .ink { stroke: #1b1815; }
+    .eye { fill: #1b1815; }
+    .retrace { opacity: 0.18; stroke-dasharray: 7 5 2 4; }
+    @media (prefers-color-scheme: dark) {
+      .ink { stroke: #d9d4c9; }
+      .eye { fill: #d9d4c9; }
+    }
+  </style>
+  <g class="ink" fill="none" stroke-width="3.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M143 101C118 82 89 68 59 72C33 75 22 93 27 113C33 136 60 145 87 140C111 136 128 119 143 101Z"/>
+    <path d="M143 101L160 88L158 114Z"/>
+    <path d="M177 102L162 89L162 116Z"/>
+    <path d="M177 102C199 82 229 70 259 74C285 78 297 96 292 116C286 139 259 146 232 141C207 136 192 119 177 102Z"/>
+    <path d="M79 141L69 185M91 139L105 181M240 142L227 184M252 141L264 188"/>
+    <path d="M234 75L239 61L250 65M239 61L253 70"/>
+    <path class="retrace" d="M142 104C113 83 84 71 57 76C31 82 25 99 31 117C39 137 64 141 89 136C111 131 130 117 142 104M180 105C204 84 232 74 260 79C283 84 292 99 287 117C280 137 256 142 234 137C211 132 193 118 180 105"/>
+  </g>
+  <g class="eye">
+    <circle cx="61" cy="101" r="4.1"/>
+    <circle cx="259" cy="103" r="4.1"/>
+  </g>
+</svg>

@@ -9,50 +9,137 @@ import {
   type UserInputRequestResult,
 } from "@yeux/protocol";
 
-import { sanitizeTerminalText } from "./terminal.js";
+import {
+  DEFAULT_THEME,
+  detectTerminalCapabilities,
+  glyph,
+  paint,
+  type TerminalCapabilities,
+  type ThemeName,
+} from "./aesthetic.js";
+import { sanitizeTerminalLine, sanitizeTerminalText } from "./terminal.js";
+
+export interface TerminalPrompterOptions {
+  readonly capabilities?: TerminalCapabilities;
+  readonly ascii?: boolean;
+  readonly columns?: number;
+  readonly isTTY?: boolean;
+  readonly theme?: ThemeName;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+}
 
 export class TerminalPrompter {
   readonly #readline: Interface;
   readonly #output: Writable;
+  readonly #capabilities: TerminalCapabilities;
+  readonly #theme: ThemeName;
   #queue: Promise<unknown> = Promise.resolve();
 
-  public constructor(input: Readable = process.stdin, output: Writable = process.stdout) {
+  public constructor(
+    input: Readable = process.stdin,
+    output: Writable = process.stdout,
+    options: TerminalPrompterOptions = {},
+  ) {
     const terminal = (output as Writable & { readonly isTTY?: boolean }).isTTY === true;
     this.#readline = createInterface({ input, output, terminal });
     this.#output = output;
+    this.#capabilities = options.capabilities ?? detectTerminalCapabilities(
+      {
+        isTTY: options.isTTY ?? terminal,
+        ...(options.ascii === undefined ? {} : { ascii: options.ascii }),
+        ...(options.columns === undefined ? {} : { columns: options.columns }),
+        ...(options.env === undefined ? {} : { env: options.env }),
+      },
+    );
+    this.#theme = options.theme ?? DEFAULT_THEME;
   }
 
   public question(prompt: string): Promise<string> {
-    const operation = this.#queue.then(
-      async () => await this.#readline.question(sanitizeTerminalText(prompt)),
+    return this.#enqueueQuestion(sanitizeTerminalText(prompt));
+  }
+
+  /** Renderer-owned interactive prompt; untrusted text never enters this path. */
+  public command(): Promise<string> {
+    const prompt = paint(
+      `yeux ${glyph("prompt", this.#capabilities)}`,
+      "focus",
+      this.#capabilities,
+      this.#theme,
     );
+    return this.#enqueueQuestion(`\n${prompt} `);
+  }
+
+  #enqueueQuestion(prompt: string): Promise<string> {
+    const operation = this.#queue.then(async () => await this.#readline.question(prompt));
     this.#queue = operation.catch(() => undefined);
     return operation;
   }
 
   public async approval(params: ApprovalRequestParams): Promise<ApprovalRequestResult> {
     const safe = normalizeApprovalRequest(params);
-    const tool = sanitizeTerminalText(
+    const tool = sanitizeTerminalLine(
       `${safe.invocation.tool_id}@${safe.invocation.tool_version}`,
     );
     const explanation = sanitizeTerminalText(safe.explanation);
-    this.#output.write(
-      `\nApproval required: ${tool}\n${explanation}\n`,
+    const invocationId = sanitizeTerminalLine(safe.invocation.invocation_id);
+    const digest = sanitizeTerminalLine(safe.invocation.effect_digest);
+    const safeEffects = sanitizeTerminalText(JSON.stringify(safe.invocation.effects, null, 2));
+    const safeArguments = sanitizeTerminalText(
+      JSON.stringify(safe.invocation.normalized_arguments, null, 2),
+    );
+    const border = glyph("approvalStart", this.#capabilities);
+    const rail = glyph("approvalRail", this.#capabilities);
+    const end = glyph("approvalEnd", this.#capabilities);
+    const lines = framedLines(safeEffects, rail);
+    const header = paint(
+      `${border} ${glyph("approval", this.#capabilities)} APPROVAL REQUIRED · ${tool}`,
+      "approval",
+      this.#capabilities,
+      this.#theme,
+    );
+    const footer = paint(
+      `${end} [a] ALLOW ONCE   [d] DENY (default)   [i] INSPECT`,
+      "approval",
+      this.#capabilities,
+      this.#theme,
     );
     this.#output.write(
-      `${sanitizeTerminalText(JSON.stringify(safe.invocation.effects, null, 2))}\n`,
+      `\n${header}\n` +
+      `${framedLines(explanation, rail)}\n` +
+      `${rail} binding ${digest} · invocation ${invocationId}\n` +
+      `${rail} effects\n` +
+      `${lines}\n` +
+      `${footer}\n`,
     );
-    const answer = await this.question(
-      "[1] allow once  [2] deny (default): ",
-    );
-    return { approved: parseApprovalChoice(answer) === "allow_once" };
+
+    while (true) {
+      const choice = parseApprovalChoice(
+        await this.#enqueueQuestion(
+          paint(
+            `${glyph("prompt", this.#capabilities)} approval: `,
+            "approval",
+            this.#capabilities,
+            this.#theme,
+          ),
+        ),
+      );
+      if (choice === "inspect") {
+        this.#output.write(
+          `${paint("INSPECT · NORMALIZED ARGUMENTS", "text", this.#capabilities, this.#theme)}\n` +
+          `${framedLines(safeArguments, rail)}\n`,
+        );
+        continue;
+      }
+      return { approved: choice === "allow_once" };
+    }
   }
 
   public async userInput(params: UserInputRequestParams): Promise<UserInputRequestResult> {
     if (!isRecord(params) || typeof params.prompt !== "string") {
       throw { code: -32602, message: "Invalid user/input request" };
     }
-    return { content: [{ type: "text", text: await this.question(`${params.prompt}: `) }] };
+    const prompt = sanitizeTerminalLine(params.prompt);
+    return { content: [{ type: "text", text: await this.#enqueueQuestion(`${prompt}: `) }] };
   }
 
   public close(): void {
@@ -60,19 +147,35 @@ export class TerminalPrompter {
   }
 }
 
-export type ApprovalChoice = "allow_once" | "deny";
+export type ApprovalChoice = "allow_once" | "deny" | "inspect";
 
 export function parseApprovalChoice(input: string): ApprovalChoice {
   switch (input.trim().toLowerCase()) {
     case "1":
+    case "a":
+    case "allow":
     case "once":
     case "allow_once":
     case "y":
     case "yes":
       return "allow_once";
+    case "2":
+    case "d":
+    case "deny":
+      return "deny";
+    case "i":
+    case "inspect":
+      return "inspect";
     default:
       return "deny";
   }
+}
+
+function framedLines(text: string, rail: string): string {
+  return text
+    .split("\n")
+    .map((line) => `${rail}   ${line}`)
+    .join("\n");
 }
 
 function normalizeApprovalRequest(params: ApprovalRequestParams): ApprovalRequestParams {
@@ -84,6 +187,7 @@ function normalizeApprovalRequest(params: ApprovalRequestParams): ApprovalReques
     typeof params.invocation.tool_version !== "string" ||
     !isRecord(params.invocation.effects) ||
     typeof params.invocation.effect_digest !== "string" ||
+    params.invocation.normalized_arguments === undefined ||
     typeof params.explanation !== "string"
   ) {
     throw { code: -32602, message: "Invalid approval/request payload" };

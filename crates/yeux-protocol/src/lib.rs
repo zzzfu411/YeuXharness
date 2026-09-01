@@ -29,4 +29,9 @@ pub use schema::*;
 pub use tool::*;
 
 /// Current stable wire protocol version.
-pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
+///
+/// P1 adds required invocation and approval evidence fields, so the wire and
+/// persisted event vocabulary are intentionally incompatible with the P0
+/// protocol rather than silently accepting history that cannot be authorized
+/// or reconciled safely.
+pub const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::new(2, 0);

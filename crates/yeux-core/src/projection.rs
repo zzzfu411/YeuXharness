@@ -1,21 +1,32 @@
-use crate::{can_transition_invocation, can_transition_turn};
+use crate::{
+    can_reconcile_invocation, can_transition_invocation_with_idempotency, can_transition_turn,
+    digest_serializable,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 use yeux_protocol::{
-    AgentResult, AgentRunId, EffectSet, Event, EventEnvelope, EventId, InvocationId,
-    InvocationState, Item, ItemId, JobId, JobSpec, JobState, ModelEvent, ModelRequestId, Thread,
-    ThreadId, ThreadStatus, Turn, TurnId, TurnState, Workspace, WorkspaceId, PROTOCOL_VERSION,
+    AgentId, AgentResult, AgentRunId, EffectSet, Event, EventEnvelope, EventId, Idempotency,
+    InvocationId, InvocationReconciliationEvidence, InvocationState, Item, ItemId, JobId, JobSpec,
+    JobState, ModelEvent, ModelRequestId, Thread, ThreadId, ThreadStatus, Turn, TurnId, TurnState,
+    Workspace, WorkspaceId, PROTOCOL_VERSION,
 };
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectedInvocation {
     pub invocation_id: InvocationId,
     pub thread_id: ThreadId,
-    pub turn_id: Option<TurnId>,
+    pub turn_id: TurnId,
+    pub agent_id: AgentId,
+    pub call_id: String,
     pub tool_id: String,
+    pub tool_version: String,
+    pub normalized_arguments_digest: String,
     pub effects: EffectSet,
+    pub effect_digest: String,
+    pub idempotency: Idempotency,
     pub state: InvocationState,
     pub reason: Option<String>,
+    pub reconciliation: Option<InvocationReconciliationEvidence>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -89,6 +100,11 @@ pub enum ReplayError {
     InvalidInvocationTransition {
         from: InvocationState,
         to: InvocationState,
+    },
+    #[error("invocation {invocation_id} evidence mismatch: {field}")]
+    InvocationEvidenceMismatch {
+        invocation_id: InvocationId,
+        field: &'static str,
     },
     #[error("job {job_id} state mismatch: projected {projected:?}, event says {event_from:?}")]
     JobStateMismatch {
@@ -312,9 +328,35 @@ impl Projection {
             }
             Event::InvocationProposed {
                 invocation_id,
+                call_id,
                 tool_id,
+                tool_version,
+                normalized_arguments_digest,
                 effects,
+                effect_digest,
+                idempotency,
             } => {
+                let turn_id = envelope
+                    .turn_id
+                    .ok_or(ReplayError::EnvelopeMismatch("invocation turn_id"))?;
+                if *idempotency != effects.idempotency {
+                    return Err(ReplayError::InvocationEvidenceMismatch {
+                        invocation_id: *invocation_id,
+                        field: "idempotency",
+                    });
+                }
+                let projected_effect_digest = digest_serializable(effects).map_err(|_| {
+                    ReplayError::InvocationEvidenceMismatch {
+                        invocation_id: *invocation_id,
+                        field: "effects",
+                    }
+                })?;
+                if projected_effect_digest != *effect_digest {
+                    return Err(ReplayError::InvocationEvidenceMismatch {
+                        invocation_id: *invocation_id,
+                        field: "effect_digest",
+                    });
+                }
                 if self.invocations.contains_key(invocation_id) {
                     return Err(ReplayError::DuplicateEntity {
                         kind: "invocation",
@@ -326,11 +368,18 @@ impl Projection {
                     ProjectedInvocation {
                         invocation_id: *invocation_id,
                         thread_id: envelope.thread_id,
-                        turn_id: envelope.turn_id,
+                        turn_id,
+                        agent_id: envelope.agent_id.clone(),
+                        call_id: call_id.clone(),
                         tool_id: tool_id.clone(),
+                        tool_version: tool_version.clone(),
+                        normalized_arguments_digest: normalized_arguments_digest.clone(),
                         effects: effects.clone(),
+                        effect_digest: effect_digest.clone(),
+                        idempotency: *idempotency,
                         state: InvocationState::Proposed,
                         reason: None,
+                        reconciliation: None,
                     },
                 );
             }
@@ -346,6 +395,12 @@ impl Projection {
                         id: invocation_id.to_string(),
                     }
                 })?;
+                if invocation.thread_id != envelope.thread_id
+                    || Some(invocation.turn_id) != envelope.turn_id
+                    || invocation.agent_id != envelope.agent_id
+                {
+                    return Err(ReplayError::EnvelopeMismatch("invocation parent"));
+                }
                 if invocation.state != *from {
                     return Err(ReplayError::InvocationStateMismatch {
                         invocation_id: *invocation_id,
@@ -353,7 +408,7 @@ impl Projection {
                         event_from: *from,
                     });
                 }
-                if !can_transition_invocation(*from, *to) {
+                if !can_transition_invocation_with_idempotency(*from, *to, invocation.idempotency) {
                     return Err(ReplayError::InvalidInvocationTransition {
                         from: *from,
                         to: *to,
@@ -361,6 +416,39 @@ impl Projection {
                 }
                 invocation.state = *to;
                 invocation.reason = reason.clone();
+            }
+            Event::InvocationReconciled {
+                invocation_id,
+                outcome,
+                evidence,
+            } => {
+                let invocation = self.invocations.get_mut(invocation_id).ok_or_else(|| {
+                    ReplayError::MissingEntity {
+                        kind: "invocation",
+                        id: invocation_id.to_string(),
+                    }
+                })?;
+                if invocation.thread_id != envelope.thread_id
+                    || Some(invocation.turn_id) != envelope.turn_id
+                    || invocation.agent_id != envelope.agent_id
+                {
+                    return Err(ReplayError::EnvelopeMismatch("invocation parent"));
+                }
+                if evidence.source.trim().is_empty() || evidence.summary.trim().is_empty() {
+                    return Err(ReplayError::InvocationEvidenceMismatch {
+                        invocation_id: *invocation_id,
+                        field: "reconciliation evidence",
+                    });
+                }
+                if !can_reconcile_invocation(invocation.state, *outcome) {
+                    return Err(ReplayError::InvalidInvocationTransition {
+                        from: invocation.state,
+                        to: outcome.state(),
+                    });
+                }
+                invocation.state = outcome.state();
+                invocation.reason = Some(evidence.summary.clone());
+                invocation.reconciliation = Some(evidence.clone());
             }
             Event::JobCreated { job } => {
                 if self.jobs.contains_key(&job.id) {

@@ -1,6 +1,6 @@
 export const JSON_RPC_VERSION = "2.0" as const;
 
-export const PROTOCOL_VERSION = Object.freeze({ major: 1, minor: 0 });
+export const PROTOCOL_VERSION = Object.freeze({ major: 2, minor: 0 });
 
 export type JsonRpcId = string | number | null;
 
@@ -74,6 +74,7 @@ export type KnownEventKind =
   | "model/event"
   | "tool/proposed"
   | "tool/state_changed"
+  | "tool/reconciled"
   | "job/created"
   | "job/state_changed"
   | "agent/spawned"

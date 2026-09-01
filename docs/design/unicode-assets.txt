@@ -1,0 +1,96 @@
+YeuX Harness · Paper Signal terminal asset sheet
+Version: 1.1 · 2026-08-31
+
+The first column is the preferred UTF-8 appearance. The second column is the
+stable ASCII appearance used by --ascii, TERM=dumb, non-UTF-8 locales, and
+width detection failures. State words and effect text are mandatory; glyphs
+are never the security boundary.
+
+BRAND / SESSION
+  compact mark       ><                 ><
+  local workspace    ⌂                  [local]
+  socket connected   ↔                  <->
+  replay             ⟲                  [R]
+  observe           ○                  [RO]
+
+RAIL / STRUCTURE
+  rail               │                  |
+  branch             ├─                 +-
+  end                └─                 `-
+  light divider      ┄                  - -
+  strong divider     ━                  =
+  sequence gap       ╎                  :
+
+TURN / ITEM STATE
+  queued             ·                  .
+  context            ◌                  o
+  model requested    ↗                  ->
+  streaming          ≈                  ~
+  tool proposed      ◇                  o
+  waiting approval   ?                  ?
+  authorized         ◆                  *
+  executing          ▶                  >
+  integrating        ∿                  ~
+  completed          ✓                  OK
+  failed             ×                  ERR
+  cancelled          —                  --
+  unknown            !                  !!
+  paused             Ⅱ                  ||
+
+EFFECT / RISK
+  filesystem read    ○                  [r]
+  filesystem write   ✎                  [w]
+  delete             ⌫                  [del]
+  process            ▶                  [proc]
+  network            ↗                  [net]
+  secret handle      #                  [secret]
+  external write     ⇥                  [ext]
+  sandbox            □                  [sbx]
+  approval gate      ?                  [ask]
+  reconciliation     ↻                  [reconcile]
+
+REPLAY / DIAGNOSTICS
+  checkpoint         ▣                  [C]
+  causation          ↳                  ->
+  projection match   ≡                  ==
+  projection drift   ≠                  !=
+  backpressure       ⋮                  ...
+  diagnostic         !                  [diag]
+
+EXAMPLES (Unicode)
+  ><  YeuX / HARNESS   workshop/7f2a   BUILD   local/qwen   ↔ SOCKET CONNECTED
+  0184 │ ◌ CONTEXT                         0.2s
+  0185 ├─↗ MODEL REQUESTED                 local/qwen
+  0186 │ ≈ STREAMING  Replay reads events only…
+  0189 └─✓ COMPLETED                       1.8k tok · 6.4s
+
+  ┏ APPROVAL REQUIRED · workspace.apply_patch@1
+  ┃ ! WRITE 1 FILE · PROCESS none · NETWORK none
+  ┃ target  crates/yeux-core/src/approval.rs
+  ┃ binding d42f…91c8 · expires 45s · default DENY
+  ┗ [a] ALLOW ONCE   [d] DENY   [i] INSPECT
+
+  ⟲ REPLAY READ-ONLY · seq 0180–0189 · ZERO EXTERNAL CALLS
+
+EXAMPLES (ASCII)
+  >< YeuX / HARNESS   workshop/7f2a   BUILD   local/qwen   <-> SOCKET CONNECTED
+  0184 | . CONTEXT                         0.2s
+  0185 +- -> MODEL REQUESTED               local/qwen
+  0186 | ~ STREAMING  Replay reads events only...
+  0189 `- OK COMPLETED                    1.8k tok · 6.4s
+
+  +- APPROVAL REQUIRED · workspace.apply_patch@1
+  | !! WRITE 1 FILE · PROCESS none · NETWORK none
+  | target  crates/yeux-core/src/approval.rs
+  | binding d42f...91c8 · expires 45s · default DENY
+  `- [a] ALLOW ONCE   [d] DENY   [i] INSPECT
+
+  [R] REPLAY READ-ONLY · seq 0180-0189 · ZERO EXTERNAL CALLS
+
+IMPLEMENTATION NOTES
+  * Use grapheme-aware wrapping and wcwidth/wcswidth; never slice UTF-16 units.
+  * Treat ambiguous-width glyphs as optional decoration and fall back to ASCII
+    when the terminal reports an unexpected width.
+  * Keep state words, effect names, targets, approval default, and replay mode
+    in every output mode. Color and animation are only secondary signals.
+  * Do not pass model/plugin/MCP control sequences through to a human terminal.

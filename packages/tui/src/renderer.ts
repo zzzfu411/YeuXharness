@@ -13,7 +13,7 @@ import {
   type TerminalCapabilities,
   type ThemeName,
 } from "./aesthetic.js";
-import { sanitizeTerminalText } from "./terminal.js";
+import { sanitizeTerminalLine, sanitizeTerminalText } from "./terminal.js";
 
 export class EventRenderer {
   readonly #jsonl: boolean;
@@ -24,6 +24,7 @@ export class EventRenderer {
 
   public constructor(options: {
     readonly jsonl?: boolean;
+    readonly capabilities?: TerminalCapabilities;
     readonly color?: boolean | DetectTerminalCapabilitiesOptions["color"];
     readonly ascii?: boolean;
     readonly columns?: number;
@@ -35,15 +36,17 @@ export class EventRenderer {
     readonly write?: (text: string) => void;
   } = {}) {
     this.#jsonl = options.jsonl ?? false;
-    this.#capabilities = detectTerminalCapabilities({
-      ...(options.color === undefined ? {} : { color: options.color }),
-      ...(options.ascii === undefined ? {} : { ascii: options.ascii }),
-      ...(options.columns === undefined ? {} : { columns: options.columns }),
-      ...(options.plain === undefined ? {} : { plain: options.plain }),
-      ...(options.reducedMotion === undefined ? {} : { reducedMotion: options.reducedMotion }),
-      ...(options.isTTY === undefined ? {} : { isTTY: options.isTTY }),
-      ...(options.env === undefined ? {} : { env: options.env }),
-    });
+    this.#capabilities = options.capabilities ?? detectTerminalCapabilities(
+      {
+        ...(options.color === undefined ? {} : { color: options.color }),
+        ...(options.ascii === undefined ? {} : { ascii: options.ascii }),
+        ...(options.columns === undefined ? {} : { columns: options.columns }),
+        ...(options.plain === undefined ? {} : { plain: options.plain }),
+        ...(options.reducedMotion === undefined ? {} : { reducedMotion: options.reducedMotion }),
+        ...(options.isTTY === undefined ? {} : { isTTY: options.isTTY }),
+        ...(options.env === undefined ? {} : { env: options.env }),
+      },
+    );
     this.#theme = options.theme ?? DEFAULT_THEME;
     this.#write = options.write ?? ((text) => process.stdout.write(text));
   }
@@ -144,6 +147,12 @@ export function formatEvent(event: EventEnvelope, color = false): string | undef
         "muted",
         legacyCapabilities(color),
       );
+    case "tool/reconciled":
+      return paintTerminalText(
+        `tool: reconciled${text === undefined ? "" : `: ${text}`}`,
+        "warning",
+        legacyCapabilities(color),
+      );
     case "runtime/diagnostic":
       return paintTerminalText(text ?? JSON.stringify(event.payload), "muted", legacyCapabilities(color));
     case "model/event":
@@ -229,6 +238,20 @@ export function formatAestheticEvent(
     );
   }
 
+  if (event.kind === "tool/reconciled") {
+    const summary = text === undefined ? "" : ` · ${singleLine(text)}`;
+    return timelineLine(
+      seq,
+      event,
+      glyph("unknown", capabilities),
+      `TOOL RECONCILED${summary}`,
+      "warning",
+      capabilities,
+      theme,
+      true,
+    );
+  }
+
   if (event.kind === "runtime/diagnostic") {
     const diagnostic = text === undefined ? JSON.stringify(event.payload) : text;
     return timelineLine(
@@ -283,7 +306,7 @@ function paintTerminalText(
   capabilities: Pick<TerminalCapabilities, "colorDepth">,
   theme: ThemeName = DEFAULT_THEME,
 ): string {
-  return paint(sanitizeTerminalText(text), role, capabilities, theme);
+  return paint(sanitizeTerminalLine(text), role, capabilities, theme);
 }
 
 function timelineLine(
@@ -304,5 +327,5 @@ function timelineLine(
 }
 
 function singleLine(value: string): string {
-  return sanitizeTerminalText(value).replace(/[\r\n\t]+/g, " ").trim();
+  return sanitizeTerminalLine(value);
 }

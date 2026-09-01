@@ -96,7 +96,7 @@ YeuX 的终端不是“黑底霓虹 AI 聊天框”，而是一台本地的黑�
 | 语义 | 主 glyph / 组合 | ASCII fallback | 推荐标签与用法 |
 | --- | --- | --- | --- |
 | YeuX compact mark | `><` | `><` | 唯一的常驻品牌标记；不要在每个 Item 前重复鱼形 |
-| YeuX seal（欢迎/空状态） | `⋈`（仅装饰） | `X` | 只用于启动、About、空状态；不是安全状态 |
+| YeuX full doodle | 图片/SVG（不进对齐列） | `><` | 只用于启动、About、空状态；不是安全状态，不使用 `⋈` 无限符号 |
 | 本地 workspace | `⌂` | `[local]` | 与 workspace 短码同一行，不能代替 trust |
 | 已连接 daemon/socket | `↔` | `<->` | `socket CONNECTED`；连接失败显示文字而非仅断线 glyph |
 | provider/model | `◇` | `o` | 仅作来源标记，不能表示 tool proposed |
@@ -299,20 +299,23 @@ ASCII fallback：
 
 ## 7. 位图 / ImageGen 资产边界
 
-普通终端不依赖位图。可为网页和支持图像协议的欢迎页生成一个 **静态、低对比、无文字** 的“黑墨双鱼 + 时间轨”背景，但它不是状态图标，也不能出现在 approval、unknown 或 error 行中。
+普通终端不依赖位图。网页和支持图像协议的欢迎页可以使用一个 **静态、低对比、无文字** 的鱼仔墨稿，但它不是状态图标，也不能出现在 approval、unknown 或 error 行中。鱼仔保持实物母版的“背对背、头朝外、尾巴朝内”构图；时间轨属于运行界面，不画进角色资产。
 
 建议的生成 brief（供未来 `image_gen` 或设计师使用）：
 
 ```text
-Minimal monochrome terminal welcome plate for YeuX Harness, dark ink-black
-background (#080909), warm paper-white linework (#E2DED5), two abstract fish
-forming a quiet X around a thin vertical event rail, muted deep blue accent
-(#173A52), one restrained vermilion seal (#D17968), lots of negative space,
-hard-edged instrument-panel geometry, no gradients, no neon, no readable text,
-no UI buttons, no emoji, 3:1 wide aspect, suitable for a CLI/TUI splash screen.
+Private-notebook fish doodle for YeuX Harness, explicitly not a logo or badge.
+Two crude fish people stand back-to-back: leaf-shaped heads face outward, tiny
+forked tails point inward and nearly touch, one dot eye and two crooked legs per
+fish, with the right fish retaining one small dorsal scribble. Dry broken
+graphite ink, separately drawn and non-mirrored, small subject with generous
+transparent negative space. One monochrome ink layer only; no spark, signal
+wave, event rail, frame, text, geometry, glow, gradient, neon, scales or elegant
+fish anatomy. The application deterministically recolors the transparent ink
+for Paper or Nocturne.
 ```
 
-导出建议：SVG/PNG 仅用于 web/欢迎页；终端核心仍使用上表中的 `><`、rail 和状态 glyph。若终端支持 Kitty/iTerm2/Sixel，图片加载失败必须静默回退到纯 Unicode 启动画面。
+导出建议：SVG/PNG 仅用于 web/欢迎页；终端核心仍使用上表中的 `><`、rail 和状态 glyph。若终端支持 Kitty/iTerm2/Sixel，图片加载失败必须静默回退到纯 Unicode 启动画面。首选资产是从用户自有 `yuzai.png` 母版确定性提取的单色透明墨稿；`image_gen` 只用于探索，不得覆盖母版造型。
 
 ## 8. 实施顺序与验收门槛
 

@@ -601,19 +601,39 @@
             "payload": {
               "type": "object",
               "required": [
+                "call_id",
+                "effect_digest",
                 "effects",
+                "idempotency",
                 "invocation_id",
-                "tool_id"
+                "normalized_arguments_digest",
+                "tool_id",
+                "tool_version"
               ],
               "properties": {
+                "call_id": {
+                  "type": "string"
+                },
+                "effect_digest": {
+                  "type": "string"
+                },
                 "effects": {
                   "$ref": "#/definitions/EffectSet"
+                },
+                "idempotency": {
+                  "$ref": "#/definitions/Idempotency"
                 },
                 "invocation_id": {
                   "type": "string",
                   "format": "uuid"
                 },
+                "normalized_arguments_digest": {
+                  "type": "string"
+                },
                 "tool_id": {
+                  "type": "string"
+                },
+                "tool_version": {
                   "type": "string"
                 }
               }
@@ -656,6 +676,42 @@
                 },
                 "to": {
                   "$ref": "#/definitions/InvocationState"
+                }
+              }
+            }
+          }
+        },
+        {
+          "description": "Explicitly resolves an invocation whose external outcome could not be proven after execution started. This event never authorizes a retry.",
+          "type": "object",
+          "required": [
+            "kind",
+            "payload"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "tool/reconciled"
+              ]
+            },
+            "payload": {
+              "type": "object",
+              "required": [
+                "evidence",
+                "invocation_id",
+                "outcome"
+              ],
+              "properties": {
+                "evidence": {
+                  "$ref": "#/definitions/InvocationReconciliationEvidence"
+                },
+                "invocation_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "outcome": {
+                  "$ref": "#/definitions/InvocationReconciliationOutcome"
                 }
               }
             }
@@ -885,6 +941,38 @@
         "idempotent_with_key",
         "non_idempotent",
         "unknown"
+      ]
+    },
+    "InvocationReconciliationEvidence": {
+      "description": "Durable evidence explaining how an unknown invocation was reconciled.",
+      "type": "object",
+      "required": [
+        "source",
+        "summary"
+      ],
+      "properties": {
+        "artifact_uri": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "Stable identifier for the reconciliation mechanism, such as an executor receipt lookup or an operator review workflow.",
+          "type": "string"
+        },
+        "summary": {
+          "description": "Bounded human-readable conclusion. Large receipts belong in the artifact store and are referenced by `artifact_uri`.",
+          "type": "string"
+        }
+      }
+    },
+    "InvocationReconciliationOutcome": {
+      "description": "A conclusion reached without executing an invocation again after its outcome became unknown.\n\nCancellation is intentionally absent: once execution may have produced a side effect, reconciliation must determine whether that effect completed or failed. It cannot retroactively claim that the invocation was cancelled.",
+      "type": "string",
+      "enum": [
+        "completed",
+        "failed"
       ]
     },
     "InvocationState": {

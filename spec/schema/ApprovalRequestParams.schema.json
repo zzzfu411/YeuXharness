@@ -23,11 +23,13 @@
         "effect_digest",
         "expires_at",
         "granted_effects",
+        "invocation_id",
         "mode",
         "normalized_arguments_digest",
         "thread_id",
         "tool_id",
         "tool_version",
+        "turn_id",
         "workspace_id",
         "workspace_identity_digest"
       ],
@@ -49,6 +51,11 @@
         "granted_effects": {
           "$ref": "#/definitions/EffectSet"
         },
+        "invocation_id": {
+          "description": "`allow once` is scoped to one concrete invocation, never merely to an equivalent tool call elsewhere in the thread.",
+          "type": "string",
+          "format": "uuid"
+        },
         "mode": {
           "$ref": "#/definitions/CapabilityMode"
         },
@@ -64,6 +71,10 @@
         },
         "tool_version": {
           "type": "string"
+        },
+        "turn_id": {
+          "type": "string",
+          "format": "uuid"
         },
         "workspace_id": {
           "type": "string",

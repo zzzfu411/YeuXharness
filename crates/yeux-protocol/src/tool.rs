@@ -172,11 +172,43 @@ pub enum InvocationState {
 
 impl InvocationState {
     pub const fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Completed | Self::Failed | Self::Cancelled | Self::Unknown
-        )
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
+}
+
+/// A conclusion reached without executing an invocation again after its
+/// outcome became unknown.
+///
+/// Cancellation is intentionally absent: once execution may have produced a
+/// side effect, reconciliation must determine whether that effect completed or
+/// failed. It cannot retroactively claim that the invocation was cancelled.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InvocationReconciliationOutcome {
+    Completed,
+    Failed,
+}
+
+impl InvocationReconciliationOutcome {
+    pub const fn state(self) -> InvocationState {
+        match self {
+            Self::Completed => InvocationState::Completed,
+            Self::Failed => InvocationState::Failed,
+        }
+    }
+}
+
+/// Durable evidence explaining how an unknown invocation was reconciled.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct InvocationReconciliationEvidence {
+    /// Stable identifier for the reconciliation mechanism, such as an
+    /// executor receipt lookup or an operator review workflow.
+    pub source: String,
+    /// Bounded human-readable conclusion. Large receipts belong in the
+    /// artifact store and are referenced by `artifact_uri`.
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_uri: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

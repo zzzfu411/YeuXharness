@@ -8,11 +8,11 @@
 pub mod artifact;
 pub mod descriptors;
 pub mod ledger;
-pub mod policy;
 pub mod process;
 pub mod provider;
 pub mod sandbox;
 pub mod workspace;
+pub mod workspace_tools;
 
 pub use artifact::{Artifact, ArtifactError, ArtifactStore};
 pub use descriptors::{
@@ -20,10 +20,10 @@ pub use descriptors::{
 };
 pub use ledger::{
     CommandAppendResult, CommandBatchAppendResult, CommandReceipt, CoreProjectionError,
-    EventLedger, LedgerError, LedgerEvent, NewCommandReceipt, NewLedgerEvent, Projection,
-    ProjectionItem, ProjectionThread, ProjectionTurn,
+    EventLedger, LedgerError, LedgerEvent, NewCommandReceipt, NewInvocationOutcome,
+    NewInvocationUnknown, NewInvocationUnknownOutcome, NewLedgerEvent, Projection, ProjectionItem,
+    ProjectionThread, ProjectionTurn,
 };
-pub use policy::{PolicyDecision, PolicyEvaluator, PolicyRequest};
 pub use process::{ProcessError, ProcessExecutor, ProcessOutput, ProcessRequest};
 pub use provider::{
     CredentialSource, NoCredentials, OpenAiCompatibleProvider, ProviderConfig, ProviderError,
@@ -32,7 +32,19 @@ pub use provider::{
 pub use sandbox::{
     SandboxBackend, SandboxCapabilities, SandboxError, SandboxRequirement, SandboxedCommand,
 };
-pub use workspace::{ApplyPatchError, ApplyPatchResult, RevisionedFile, Workspace, WorkspaceError};
+pub use workspace::{
+    ApplyPatchError, ApplyPatchResult, FileRevisionSnapshot, RevisionedFile, Workspace,
+    WorkspaceError, WorkspaceIdentitySnapshot,
+};
+pub use workspace_tools::{
+    workspace_apply_patch_spec, workspace_list_spec, workspace_mutation_tool_specs,
+    workspace_read_spec, workspace_search_spec, workspace_tool_specs, PreparedWorkspaceMutation,
+    SearchCancellation, SearchControl, SearchOperationBudget, WorkspaceDiffSummary,
+    WorkspaceSearchControl, WorkspaceToolError, WorkspaceToolLimits, WorkspaceTools,
+    WORKSPACE_APPLY_PATCH_TOOL_ID, WORKSPACE_LIST_TOOL_ID, WORKSPACE_READ_TOOL_ID,
+    WORKSPACE_SEARCH_DEFAULT_OPERATION_BUDGET, WORKSPACE_SEARCH_HARD_OPERATION_LIMIT,
+    WORKSPACE_SEARCH_TOOL_ID, WORKSPACE_TOOL_HARD_LIMITS, WORKSPACE_TOOL_VERSION,
+};
 
 /// Error shared by the concrete runtime adapters.
 #[derive(Debug, thiserror::Error)]
