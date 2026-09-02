@@ -19,13 +19,34 @@ import {
   type ThemeName,
 } from "./aesthetic.js";
 import { sanitizeTerminalLine, sanitizeTerminalText } from "./terminal.js";
+import {
+  modelInkMotionAllowed,
+  typewriterCaret,
+  writeTypewriterInk,
+} from "./typewriter.js";
+
+export {
+  HUMAN_KEYBOARD_DELAY_MS,
+  TYPEWRITER_CARET,
+  TYPEWRITER_CARET_ASCII,
+  TYPEWRITER_CJK_DELAY_MS,
+  TYPEWRITER_LATIN_DELAY_MS,
+  TYPEWRITER_SEGMENT_CAP_MS,
+  modelInkMotionAllowed,
+  typewriterCaret,
+  typewriterDelayMs,
+  writeTypewriterInk,
+} from "./typewriter.js";
 
 export class EventRenderer {
   readonly #jsonl: boolean;
+  readonly #typewriter: boolean | undefined;
   readonly #capabilities: TerminalCapabilities;
   readonly #theme: ThemeName;
   readonly #write: (text: string) => void;
   readonly #recentEvents: EventEnvelope[] = [];
+  #chain: Promise<void> = Promise.resolve();
+  #inFlight = 0;
 
   public constructor(options: {
     readonly jsonl?: boolean;
@@ -39,8 +60,11 @@ export class EventRenderer {
     readonly env?: Readonly<Record<string, string | undefined>>;
     readonly theme?: ThemeName;
     readonly write?: (text: string) => void;
+    /** Force live typewriter on or off. Replay and JSONL always pass false. */
+    readonly typewriter?: boolean;
   } = {}) {
     this.#jsonl = options.jsonl ?? false;
+    this.#typewriter = options.typewriter;
     this.#capabilities = options.capabilities ?? detectTerminalCapabilities(
       {
         ...(options.color === undefined ? {} : { color: options.color }),
@@ -64,15 +88,54 @@ export class EventRenderer {
     return this.#theme;
   }
 
-  public render(event: EventEnvelope): void {
+  public render(event: EventEnvelope): Promise<void> {
     if (this.#jsonl) {
       this.#write(`${JSON.stringify(event)}\n`);
-      return;
+      return Promise.resolve();
     }
 
     this.rememberEvents([event]);
 
     const text = event.kind === "model/event" ? modelDeltaText(event.payload) : undefined;
+    const motion = text !== undefined && this.#motionAllowed();
+    if (!motion && this.#inFlight === 0) {
+      this.#emitInstant(event, text);
+      return Promise.resolve();
+    }
+
+    this.#inFlight += 1;
+    const queued = this.#inFlight > 1;
+    const run = queued ? this.#chain.then(() => this.#emit(event)) : this.#emit(event);
+    this.#chain = run
+      .catch(() => undefined)
+      .finally(() => {
+        this.#inFlight -= 1;
+      });
+    return run;
+  }
+
+  /** Wait until live model ink has finished walking onto the paper. */
+  public async flush(): Promise<void> {
+    await this.#chain;
+  }
+
+  #motionAllowed(): boolean {
+    return modelInkMotionAllowed(this.#capabilities, {
+      jsonl: this.#jsonl,
+      ...(this.#typewriter === undefined ? {} : { typewriter: this.#typewriter }),
+    });
+  }
+
+  async #emit(event: EventEnvelope): Promise<void> {
+    const text = event.kind === "model/event" ? modelDeltaText(event.payload) : undefined;
+    if (text !== undefined && this.#motionAllowed()) {
+      await this.#emitTypewriter(event, text);
+      return;
+    }
+    this.#emitInstant(event, text);
+  }
+
+  #emitInstant(event: EventEnvelope, text: string | undefined): void {
     if (text !== undefined) {
       this.#write(`${formatAestheticModelEvent(event, text, {
         capabilities: this.#capabilities,
@@ -86,6 +149,25 @@ export class EventRenderer {
       theme: this.#theme,
     });
     if (formatted !== undefined) this.#write(`${formatted}\n`);
+  }
+
+  async #emitTypewriter(event: EventEnvelope, text: string): Promise<void> {
+    const ink = sanitizeTerminalText(text).replace(/[\r\n\t]+/g, " ");
+    this.#write(formatAestheticModelEvent(event, "", {
+      capabilities: this.#capabilities,
+      theme: this.#theme,
+    }));
+    await writeTypewriterInk(ink, this.#write, {
+      caret: paint(
+        typewriterCaret(this.#capabilities.unicode),
+        "text",
+        this.#capabilities,
+        this.#theme,
+      ),
+      paintInk: (chunk) => paint(chunk, "focus", this.#capabilities, this.#theme),
+      catchUp: () => this.#inFlight > 1,
+    });
+    this.#write("\n");
   }
 
   public renderDiagnostic(diagnostic: RuntimeDiagnosticNotification): void {

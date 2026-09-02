@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { PassThrough, Readable } from "node:stream";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -178,6 +179,59 @@ describe("paper presenters", () => {
     expect(output).toMatch(/`- \[a\] ALLOW ONCE   \[d\] DENY \(default\)   \[i\] INSPECT -+\+/);
     expect(output).toContain("approval:");
     expect(output).toMatch(/\+- \? APPROVAL REQUIRED[^\n]*\+/);
+    expect(output).not.toContain("INSPECTOR");
+  });
+
+  it("keeps the default paper surface free of Inspector until the operator asks", () => {
+    let output = "";
+    const renderer = new EventRenderer({
+      color: false,
+      ascii: true,
+      write: (text) => {
+        output += text;
+      },
+    });
+    renderer.renderSessionBar({
+      cwd: "/tmp/ws",
+      thread: "thread-1",
+      mode: "observe",
+      model: "local/qwen",
+    });
+    for (const event of loadFixture("paper-approval-gate.jsonl")) renderer.render(event);
+    expect(output).toContain("><  YeuX / HARNESS");
+    expect(output).toContain("0001 | . START TURN fixture-turn-gate");
+    expect(output).not.toContain("INSPECTOR");
+    expect(output).not.toContain("POLICY ·");
+    expect(output).not.toContain("RECENT EVENTS");
+  });
+
+  it("replays model ink in one write without a typewriter delay", async () => {
+    const modelEvent = {
+      schema_version: { major: 1, minor: 0 },
+      event_id: "evt-replay-ink",
+      thread_id: "fixture-thread-ink",
+      turn_id: "fixture-turn-ink",
+      agent_id: "agent-root",
+      seq: 1,
+      time: "2026-09-02T12:00:00Z",
+      kind: "model/event",
+      payload: { model_event: { type: "text_delta", text: "hello paper" } },
+    };
+    const path = join(mkdtempSync(join(tmpdir(), "yeux-replay-")), "paper-model-ink.jsonl");
+    writeFileSync(path, `${JSON.stringify(modelEvent)}\n`);
+
+    const writes: string[] = [];
+    const status = await replayFixture(path, {
+      ascii: true,
+      write: (text) => {
+        writes.push(text);
+      },
+    });
+    expect(status).toBe(0);
+    expect(writes.filter((chunk) => chunk.includes("hello paper"))).toEqual([
+      "0001 | ~ STREAMING · hello paper\n",
+    ]);
+    expect(writes.join("")).not.toContain("INSPECTOR");
   });
 
   it("keeps unknown visible after the turn fails", () => {
@@ -247,5 +301,6 @@ describe("paper presenters", () => {
     expect(output).toContain("[a] ALLOW ONCE");
     expect(output).toContain("[d] DENY (default)");
     expect(output).toContain("[i] INSPECT");
+    expect(output).not.toContain("INSPECTOR");
   });
 });
