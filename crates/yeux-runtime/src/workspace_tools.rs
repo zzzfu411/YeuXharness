@@ -1037,10 +1037,6 @@ struct FileCollection {
 }
 
 impl WorkspaceDiffSummary {
-    fn between(previous: &[u8], replacement: &[u8]) -> Self {
-        Self::for_path("file", previous, replacement)
-    }
-
     fn for_path(path: &str, previous: &[u8], replacement: &[u8]) -> Self {
         let changed = previous != replacement;
         let common_prefix = common_prefix_len(previous, replacement);
@@ -1086,7 +1082,7 @@ fn split_unified_lines(bytes: &[u8]) -> Vec<&[u8]> {
         return Vec::new();
     }
     let mut lines: Vec<&[u8]> = bytes.split(|byte| *byte == b'\n').collect();
-    if bytes.ends_with(&[b'\n']) {
+    if bytes.ends_with(b"\n") {
         lines.pop();
     }
     lines
