@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { USAGE, parseArgs } from "./args.js";
-import { runTui } from "./app.js";
+import { replayFixture, runTui } from "./app.js";
 import { sanitizeTerminalText } from "./terminal.js";
 
 const VERSION = "0.1.0";
@@ -22,8 +22,13 @@ async function main(): Promise<number> {
     process.stdout.write(`${VERSION}\n`);
     return 0;
   }
-
   try {
+    if (options.command === "replay") {
+      return await replayFixture(options.replayPath as string, {
+        ascii: options.ascii,
+        jsonl: options.jsonl,
+      });
+    }
     const result = await runTui(options);
     return result.exitCode;
   } catch (error) {

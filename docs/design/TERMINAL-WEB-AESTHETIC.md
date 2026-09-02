@@ -1,13 +1,13 @@
 # YeuX Harness 深色优先终端与网页美学需求
 
 **版本：v1.1 · 2026-08-31**
-**方向：Paper Signal / Nocturne default**
+**方向：Paper Signal / Paper default**
 **适用：`yeux` CLI、OpenTUI/TUI、网页运行台、欢迎页和发行物**
 
 > 黑墨是底，纸白是信号；每一次副作用都必须看起来像一个需要确认的事实。
 
-这份需求把 YeuX 的个人主页（暖灰纸面、石墨墨色、双鱼线稿、留白）与
-`music.yeuxark.com` / KAZAM（纯黑夜间主题、硬边仪器面板、错位阴影、密集控制）
+这份需求把 YeuX 的暖灰纸面、石墨墨色、双鱼线稿、留白与
+硬边仪器面板、错位阴影、密集控制
 合成一套可执行的产品语言。它只规定呈现层，不改变 Rust authority、policy、approval、
 ledger、replay 或 JSON-RPC 的语义。
 
@@ -17,13 +17,13 @@ ledger、replay 或 JSON-RPC 的语义。
 
 用户应该记住三件事：
 
-1. **黑墨仪器**：接近黑色的底、暖白的字、少量藏青和朱红；不是紫色渐变的 AI 控制台。
+1. **夜墨仪器**：夜墨底、暖白的字、少量藏青和朱红；不是紫色渐变的 AI 控制台。
 2. **事件时间轨**：Thread/Turn/Item 像一条有序的乐谱，`seq` 与 causation 关系始终可追溯。
 3. **鱼仔手稿**：两只鱼人背对背、头朝外、尾巴朝内；它只在品牌锁定、欢迎页和空状态出现，运行中不把鱼图标重复到每一行。
 
-### 1.2 深色默认，纸面可切换
+### 1.2 纸面默认，夜墨可切换
 
-- `nocturne` 是 TUI、网页和首次启动的默认主题：`#080909` 墨黑背景，`#E2DED5` 暖白正文。
+- `paper` 是 TUI 与 CLI 的默认主题：`#D8D3CC` 纸面背景；`nocturne` 使用 `#2A2733` 夜墨背景。
 - `paper` 是同一系统的浅色主题，保留 `#D8D3CC` 暖灰纸面，不是另一个产品。
 - `mono` 和 `high-contrast` 是终端能力/无障碍降级，不参与品牌竞赛。
 - 主题只能改变表面、普通焦点和装饰密度，不能重新映射 `approval`、`unknown`、`danger`、
@@ -50,7 +50,7 @@ ledger、replay 或 JSON-RPC 的语义。
 120 列或宽屏网页的首选结构：
 
 ```text
-><  YeuX / HARNESS   workshop/7f2a   BUILD   local/qwen   ↔ SOCKET CONNECTED
+><  YeuX / HARNESS   workshop/7f2a   OBSERVE   local/qwen   ↔ SOCKET CONNECTED
 ```
 
 必须可见：`workspace identity`、trust、mode、provider/model、transport。窄屏可折叠 provider
@@ -87,11 +87,11 @@ ledger、replay 或 JSON-RPC 的语义。
 审批面板是视觉上最明确的边界，默认焦点在 deny：
 
 ```text
-┏ APPROVAL REQUIRED · workspace.apply_patch@1
-┃ ! WRITE 1 FILE · PROCESS none · NETWORK none
-┃ target  crates/yeux-core/src/approval.rs
-┃ binding d42f…91c8 · expires 45s · default DENY
-┗ [a] ALLOW ONCE   [d] DENY   [i] INSPECT
+╔═ APPROVAL REQUIRED · workspace.apply_patch@1
+║ ! WRITE 1 FILE · PROCESS none · NETWORK none
+║ target  crates/yeux-core/src/approval.rs
+║ binding d42f…91c8 · expires 45s · default DENY
+╚═ [a] ALLOW ONCE   [d] DENY   [i] INSPECT
 ```
 
 网页中同一信息进入右侧 drawer；Allow/Deny 必须是可聚焦按钮，effect、binding digest、
@@ -130,7 +130,7 @@ checkpoint 来源、projection match/drift 和 causation 链。
 
 | 角色 | 值 | 说明 |
 | --- | --- | --- |
-| background | `#080909` | 墨黑，不使用蓝紫发光 |
+| background | `#2A2733` | 夜墨，不使用蓝紫发光 |
 | surface | `#101214` | timeline/session 面板 |
 | raised | `#171B1E` | 当前行、输入区、approval drawer |
 | line | `#3B4145` | rail、分隔线、边框 |
@@ -144,7 +144,7 @@ checkpoint 来源、projection match/drift 和 causation 链。
 
 Nocturne 有两层深色，而不是一张蓝黑渐变：
 
-- **运行层 / instrument black**：`#080909`、`#101214`、`#171B1E`，用于 timeline、approval、Inspector 和 TUI；继承 KAZAM 的硬边与高密度控制。
+- **运行层 / instrument black**：`#2A2733`、`#101214`、`#171B1E`，用于 timeline、approval、Inspector 和 TUI。
 - **人格层 / dusk paper**：`#2A2733` 配 `#D9D4C9`，只用于 Welcome、About、空状态与鱼仔墨稿；继承个人主页“夜墨纸面”的安静感。
 
 天青 `#5F968F` 只能是 replay/idle 的极弱次级流动色，不能替代 tide 焦点，更不能表示安全；人格层与运行层之间使用硬切面、纸雾或留白，不使用渐变光效。

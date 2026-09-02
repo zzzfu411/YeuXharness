@@ -1,4 +1,9 @@
-import type { EventEnvelope, RuntimeDiagnosticNotification } from "@yeux/protocol";
+import type {
+  CapabilityGrant,
+  EventEnvelope,
+  RuntimeDiagnosticNotification,
+  RuntimeMode,
+} from "@yeux/protocol";
 
 import {
   DEFAULT_THEME,
@@ -20,7 +25,7 @@ export class EventRenderer {
   readonly #capabilities: TerminalCapabilities;
   readonly #theme: ThemeName;
   readonly #write: (text: string) => void;
-  #streamingText = false;
+  readonly #recentEvents: EventEnvelope[] = [];
 
   public constructor(options: {
     readonly jsonl?: boolean;
@@ -65,16 +70,15 @@ export class EventRenderer {
       return;
     }
 
+    this.rememberEvents([event]);
+
     const text = event.kind === "model/event" ? modelDeltaText(event.payload) : undefined;
     if (text !== undefined) {
-      this.#write(sanitizeTerminalText(text));
-      this.#streamingText = true;
+      this.#write(`${formatAestheticModelEvent(event, text, {
+        capabilities: this.#capabilities,
+        theme: this.#theme,
+      })}\n`);
       return;
-    }
-
-    if (this.#streamingText) {
-      this.#write("\n");
-      this.#streamingText = false;
     }
 
     const formatted = formatAestheticEvent(event, {
@@ -85,10 +89,6 @@ export class EventRenderer {
   }
 
   public renderDiagnostic(diagnostic: RuntimeDiagnosticNotification): void {
-    if (this.#streamingText) {
-      this.#write("\n");
-      this.#streamingText = false;
-    }
     if (this.#jsonl) {
       this.#write(
         `${JSON.stringify({
@@ -106,7 +106,157 @@ export class EventRenderer {
     const text = `[diagnostic:${diagnostic.code}] ${diagnostic.message}${sequence}`;
     this.#write(`${paintTerminalText(text, "warning", this.#capabilities, this.#theme)}\n`);
   }
+
+  /** Emit the identity block once a thread and provider have been resolved. */
+  public renderSessionBar(state: SessionBarState): void {
+    if (this.#jsonl) return;
+    this.#write(`${formatSessionBar(state, {
+      capabilities: this.#capabilities,
+      theme: this.#theme,
+    })}\n`);
+  }
+
+  /** Seed the Inspector from a resumed thread without replaying its timeline. */
+  public rememberEvents(events: readonly EventEnvelope[]): void {
+    for (const event of events) {
+      this.#recentEvents.push(event);
+      if (this.#recentEvents.length > 12) this.#recentEvents.shift();
+    }
+  }
+
+  /** Emit a compact policy/event readout for an operator or test fixture. */
+  public renderInspector(policy: CapabilityGrant | undefined = undefined): void {
+    if (this.#jsonl) return;
+    this.#write(`${formatInspector({
+      ...(policy === undefined ? {} : { policy }),
+      events: this.#recentEvents,
+    }, {
+      capabilities: this.#capabilities,
+      theme: this.#theme,
+    })}\n`);
+  }
 }
+
+export interface SessionBarState {
+  readonly cwd: string;
+  readonly thread: string;
+  readonly mode: RuntimeMode | string;
+  readonly model: string;
+  readonly trust?: string;
+  readonly transport?: string;
+  /** Non-empty write paths, or true. Required together with sandbox to display BUILD. */
+  readonly writeGrant?: readonly string[] | boolean;
+  /** Named OS sandbox is actually available. Required together with writeGrant to display BUILD. */
+  readonly sandbox?: boolean;
+}
+
+export interface PresenterFormatOptions {
+  readonly capabilities?: TerminalCapabilities;
+  readonly theme?: ThemeName;
+}
+
+/** The identity bar is deliberately explicit: it is never replaced by a prompt. */
+export function formatSessionBar(
+  state: SessionBarState,
+  options: PresenterFormatOptions = {},
+): string {
+  const capabilities = options.capabilities ?? detectTerminalCapabilities();
+  const theme = options.theme ?? DEFAULT_THEME;
+  const required = [
+    `CWD ${singleLine(state.cwd)}`,
+    `THREAD ${singleLine(state.thread)}`,
+    `MODE ${sessionBarModeLabel(state)}`,
+    `MODEL ${singleLine(state.model)}`,
+  ];
+  if (state.trust !== undefined) required.push(`TRUST ${singleLine(state.trust).toUpperCase()}`);
+  if (state.transport !== undefined) required.push(`TRANSPORT ${singleLine(state.transport)}`);
+  const body = `${glyph("brandCompact", capabilities)}  YeuX / HARNESS   ${required.join("   ")}`;
+  return paint(sanitizeTerminalLine(body), "text", capabilities, theme);
+}
+
+/**
+ * Fail closed: MODE BUILD/OPERATE is only shown when a write grant and a
+ * sandbox are both present. `--mode build` may still be requested; the Bar
+ * must not claim BUILD when the client only has list/read/search.
+ */
+export function sessionBarModeLabel(
+  state: Pick<SessionBarState, "mode" | "writeGrant" | "sandbox">,
+): string {
+  const requested = singleLine(String(state.mode)).toUpperCase();
+  if (requested === "BUILD" || requested === "OPERATE") {
+    if (!hasWriteGrant(state.writeGrant) || state.sandbox !== true) {
+      return "OBSERVE";
+    }
+  }
+  return requested;
+}
+
+function hasWriteGrant(writeGrant: SessionBarState["writeGrant"]): boolean {
+  if (writeGrant === true) return true;
+  return Array.isArray(writeGrant) && writeGrant.length > 0;
+}
+
+export interface InspectorState {
+  readonly policy?: CapabilityGrant | Record<string, unknown>;
+  readonly events: readonly EventEnvelope[];
+}
+
+/** Render the current capability policy and a bounded recent-event ledger tail. */
+export function formatInspector(
+  state: InspectorState,
+  options: PresenterFormatOptions = {},
+): string {
+  const capabilities = options.capabilities ?? detectTerminalCapabilities();
+  const theme = options.theme ?? DEFAULT_THEME;
+  const lines = [
+    "INSPECTOR",
+    `POLICY · ${state.policy === undefined ? "unresolved" : formatPolicy(state.policy)}`,
+    "RECENT EVENTS",
+  ];
+  if (state.events.length === 0) {
+    lines.push("  none");
+  } else {
+    for (const event of state.events.slice(-12)) {
+      const summary = payloadText(event.payload);
+      lines.push(`  ${sequenceLabel(event.seq)} ${glyph("rail", capabilities)} ${singleLine(event.kind)}${summary === undefined ? "" : ` · ${singleLine(summary)}`}`);
+    }
+  }
+  const diffStart = lines.length;
+  const hunk = latestUnifiedDiff(state.events);
+  if (hunk !== undefined) {
+    lines.push("UNIFIED DIFF");
+    lines.push(...splitDiffLines(hunk).map((line) => `  ${line}`));
+  }
+  return lines
+    .map((line, index) => paint(
+      index > diffStart ? sanitizeTerminalText(line) : sanitizeTerminalLine(line),
+      index === 0 ? "focus" : "muted",
+      capabilities,
+      theme,
+    ))
+    .join("\n");
+}
+
+function formatPolicy(policy: CapabilityGrant | Record<string, unknown>): string {
+  const record = policy as Record<string, unknown>;
+  const mode = typeof record.mode === "string" ? record.mode.toUpperCase() : "UNKNOWN";
+  const read = formatPolicyValue(record.filesystem_read);
+  const write = formatPolicyValue(record.filesystem_write);
+  const remove = formatPolicyValue(record.filesystem_delete);
+  const process = record.process === true ? "yes" : "none";
+  const network = formatPolicyValue(record.network);
+  const secrets = formatPolicyValue(record.secrets);
+  const external = formatPolicyValue(record.external_write ?? record.external_writes);
+  const writeTools = record.write_tools_available === true ? "yes" : "none";
+  const processTools = record.process_tools_available === true ? "yes" : "none";
+  const sandbox = typeof record.sandbox === "string" ? record.sandbox : "unavailable";
+  return `MODE ${mode} · filesystem_read ${read} · filesystem_write ${write} · filesystem_delete ${remove} · process ${process} · network ${network} · secrets ${secrets} · external_write ${external} · write_tools ${writeTools} · process_tools ${processTools} · sandbox ${sandbox}`;
+}
+
+// Names used by screen-mode callers; keeping aliases avoids a second presenter contract.
+export const renderSessionBar = formatSessionBar;
+export const formatInspectorBlock = formatInspector;
+export const renderInspector = formatInspector;
 
 /**
  * Backwards-compatible compact formatter retained for callers that used the
@@ -142,6 +292,13 @@ export function formatEvent(event: EventEnvelope, color = false): string | undef
     case "tool/proposed":
       return paintTerminalText(`[tool] ${text ?? "proposed"}`, "focus", legacyCapabilities(color));
     case "tool/state_changed":
+      if (event.payload["to"] === "unknown") {
+        return paintTerminalText(
+          "[unknown] reconciliation required",
+          "danger",
+          legacyCapabilities(color),
+        );
+      }
       return paintTerminalText(
         `tool: ${String(event.payload["to"] ?? "updated")}`,
         "muted",
@@ -149,8 +306,8 @@ export function formatEvent(event: EventEnvelope, color = false): string | undef
       );
     case "tool/reconciled":
       return paintTerminalText(
-        `tool: reconciled${text === undefined ? "" : `: ${text}`}`,
-        "warning",
+        `[unknown] reconciliation required${text === undefined ? "" : `: ${text}`}`,
+        "danger",
         legacyCapabilities(color),
       );
     case "runtime/diagnostic":
@@ -182,7 +339,33 @@ export function formatAestheticEvent(
   const text = payloadText(event.payload);
   const seq = sequenceLabel(event.seq);
 
-  if (event.kind === "model/event" || event.kind === "model/requested") return undefined;
+  if (event.kind === "model/event") {
+    const delta = modelDeltaText(event.payload);
+    if (delta !== undefined) {
+      return formatAestheticModelEvent(event, delta, { capabilities, theme });
+    }
+    return timelineLine(
+      seq,
+      event,
+      glyph("model", capabilities),
+      modelEventSummary(event.payload),
+      "focus",
+      capabilities,
+      theme,
+    );
+  }
+
+  if (event.kind === "model/requested") {
+    return timelineLine(
+      seq,
+      event,
+      glyph("model", capabilities),
+      "MODEL REQUESTED",
+      "focus",
+      capabilities,
+      theme,
+    );
+  }
 
   if (event.kind === "turn/started") {
     return timelineLine(
@@ -226,7 +409,19 @@ export function formatAestheticEvent(
 
   if (event.kind === "tool/state_changed") {
     const state = event.payload["to"] === undefined ? "UPDATED" : String(event.payload["to"]).replaceAll("_", " ").toUpperCase();
-    return timelineLine(
+    if (state === "UNKNOWN") {
+      return timelineLine(
+        seq,
+        event,
+        glyph("unknown", capabilities),
+        `UNKNOWN · RECONCILIATION REQUIRED${text === undefined ? "" : ` · ${singleLine(text)}`}`,
+        "danger",
+        capabilities,
+        theme,
+        true,
+      );
+    }
+    const completed = timelineLine(
       seq,
       event,
       glyph("rail", capabilities),
@@ -236,6 +431,30 @@ export function formatAestheticEvent(
       theme,
       true,
     );
+    if (state === "COMPLETED") {
+      const hunk = extractUnifiedDiff(event.payload);
+      if (hunk !== undefined) {
+        return `${completed}\n${formatDiffBlock(hunk, capabilities, theme)}`;
+      }
+    }
+    return completed;
+  }
+
+  if (event.kind === "item/added") {
+    const hunk = extractUnifiedDiff(event.payload);
+    if (hunk !== undefined) {
+      const header = timelineLine(
+        seq,
+        event,
+        glyph("rail", capabilities),
+        "TOOL RESULT",
+        "muted",
+        capabilities,
+        theme,
+        true,
+      );
+      return `${header}\n${formatDiffBlock(hunk, capabilities, theme)}`;
+    }
   }
 
   if (event.kind === "tool/reconciled") {
@@ -244,8 +463,8 @@ export function formatAestheticEvent(
       seq,
       event,
       glyph("unknown", capabilities),
-      `TOOL RECONCILED${summary}`,
-      "warning",
+      `UNKNOWN · RECONCILIATION REQUIRED${summary}`,
+      "danger",
       capabilities,
       theme,
       true,
@@ -277,7 +496,7 @@ export function formatAestheticEvent(
   );
 }
 
-function modelDeltaText(payload: unknown): string | undefined {
+export function modelDeltaText(payload: unknown): string | undefined {
   if (typeof payload !== "object" || payload === null) return undefined;
   const modelEvent = (payload as Record<string, unknown>)["model_event"];
   if (typeof modelEvent !== "object" || modelEvent === null) return undefined;
@@ -287,6 +506,96 @@ function modelDeltaText(payload: unknown): string | undefined {
     : undefined;
 }
 
+function modelEventSummary(payload: unknown): string {
+  if (typeof payload !== "object" || payload === null) return "MODEL EVENT";
+  const modelEvent = (payload as Record<string, unknown>)["model_event"];
+  if (typeof modelEvent !== "object" || modelEvent === null) return "MODEL EVENT";
+  const type = (modelEvent as Record<string, unknown>)["type"];
+  return typeof type === "string" ? `MODEL ${type.replaceAll("_", " ").toUpperCase()}` : "MODEL EVENT";
+}
+
+export function formatAestheticModelEvent(
+  event: EventEnvelope,
+  text: string,
+  options: AestheticFormatOptions = {},
+): string {
+  const capabilities = options.capabilities ?? detectTerminalCapabilities();
+  const theme = options.theme ?? DEFAULT_THEME;
+  const body = `STREAMING · ${text}`;
+  return timelineLine(
+    sequenceLabel(event.seq),
+    event,
+    glyph("streaming", capabilities),
+    body,
+    "focus",
+    capabilities,
+    theme,
+  );
+}
+
+export const renderTimelineEvent = formatAestheticEvent;
+export const formatTimelineEvent = formatAestheticEvent;
+
+export function extractUnifiedDiff(
+  value: unknown,
+  seen: Set<object> = new Set(),
+  depth = 0,
+): string | undefined {
+  if (depth > 12) return undefined;
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 32)) {
+      const found = extractUnifiedDiff(item, seen, depth + 1);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (typeof value !== "object" || value === null) return undefined;
+  if (seen.has(value)) return undefined;
+  seen.add(value);
+  const record = value as Record<string, unknown>;
+  for (const key of ["unified_diff", "unifiedDiff"] as const) {
+    const candidate = record[key];
+    if (typeof candidate === "string" && candidate.trim() !== "") {
+      return candidate.length > 256 * 1024 ? candidate.slice(0, 256 * 1024) : candidate;
+    }
+  }
+  let scanned = 0;
+  for (const [, nested] of Object.entries(record)) {
+    if (typeof nested === "string" && nested.length > 64 * 1024) continue;
+    scanned += 1;
+    if (scanned > 32) break;
+    const found = extractUnifiedDiff(nested, seen, depth + 1);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+function latestUnifiedDiff(events: readonly EventEnvelope[]): string | undefined {
+  let found: string | undefined;
+  for (const event of events) {
+    const hunk = extractUnifiedDiff(event.payload);
+    if (hunk !== undefined) found = hunk;
+  }
+  return found;
+}
+
+function splitDiffLines(hunk: string): string[] {
+  const lines = hunk.split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
+function formatDiffBlock(
+  hunk: string,
+  capabilities: TerminalCapabilities,
+  theme: ThemeName,
+): string {
+  const rail = glyph("rail", capabilities);
+  return splitDiffLines(hunk)
+    .map((line) => paint(`${rail} ${sanitizeTerminalText(line)}`, "muted", capabilities, theme))
+    .join("\n");
+}
+
 function payloadText(payload: unknown): string | undefined {
   if (typeof payload !== "object" || payload === null) return undefined;
   for (const key of ["text", "message", "summary", "error"] as const) {
@@ -294,6 +603,15 @@ function payloadText(payload: unknown): string | undefined {
     if (typeof value === "string") return value;
   }
   return undefined;
+}
+
+function formatPolicyValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "none";
+    return value.map((entry) => singleLine(String(entry))).join(", ");
+  }
+  if (typeof value === "string") return singleLine(value);
+  return value === true ? "yes" : "none";
 }
 
 function legacyCapabilities(color: boolean): Pick<TerminalCapabilities, "colorDepth"> {

@@ -36,12 +36,12 @@ export interface DetectTerminalCapabilitiesOptions {
   readonly reducedMotion?: boolean;
 }
 
-export const DEFAULT_THEME: ThemeName = "nocturne";
+/** Paper is the presenter surface: warm, quiet, and readable in a pipe. */
+export const DEFAULT_THEME: ThemeName = "paper";
 
 /**
- * Stable, copyable glyphs.  They are intentionally kept to characters that
- * are normally one terminal column wide.  `brandCompact` is the one
- * intentional two-character mark.
+ * Stable, copyable glyphs. Most are one terminal column wide; the brand mark
+ * and double-line approval corners intentionally use two columns.
  */
 export const UNICODE_GLYPHS = Object.freeze({
   brandCompact: "><",
@@ -54,9 +54,12 @@ export const UNICODE_GLYPHS = Object.freeze({
   branch: "├─",
   end: "└─",
   continuation: "│ ",
-  approvalStart: "┏",
-  approvalRail: "┃",
-  approvalEnd: "┗",
+  approvalStart: "╔═",
+  approvalHorizontal: "═",
+  approvalTopRight: "╗",
+  approvalRail: "║",
+  approvalEnd: "╚═",
+  approvalBottomRight: "╝",
   lightDivider: "┄",
   strongDivider: "━",
   beat: "·",
@@ -107,8 +110,11 @@ export const ASCII_GLYPHS = Object.freeze({
   end: "`-",
   continuation: "| ",
   approvalStart: "+-",
+  approvalHorizontal: "-",
+  approvalTopRight: "+",
   approvalRail: "|",
   approvalEnd: "`-",
+  approvalBottomRight: "+",
   lightDivider: "- -",
   strongDivider: "=",
   beat: ".",
@@ -187,7 +193,7 @@ export interface ThemePalette {
 }
 
 export const NOCTURNE_PALETTE: ThemePalette = Object.freeze({
-  background: "#080909",
+  background: "#2A2733",
   surface: "#101214",
   raised: "#171B1E",
   line: "#3B4145",
@@ -311,9 +317,8 @@ export interface AnsiRoleToken {
 export const ANSI_RESET = "\u001b[0m";
 
 /**
- * Nocturne is the canonical terminal palette. Keeping its SGR values in one
- * exported table prevents renderers, prompts and future OpenTUI widgets from
- * inventing subtly different safety colours.
+ * The night palette keeps its SGR values in one exported table so renderers,
+ * prompts and future OpenTUI widgets share the same safety colours.
  */
 export const NOCTURNE_ANSI_TOKENS: Readonly<Record<ColorRole, AnsiRoleToken>> =
   Object.freeze({
@@ -336,6 +341,9 @@ const PAPER_ANSI_256_CODES: Readonly<Record<ColorRole, number>> = Object.freeze(
   danger: 88,
 });
 
+/** Closest xterm cube index to paper `#D8D3CC` so dark ink stays readable. */
+const PAPER_ANSI_256_BACKGROUND = 188;
+
 /** Paint only renderer-owned text; callers must sanitize untrusted text first. */
 export function paint(
   text: string,
@@ -350,6 +358,12 @@ export function paint(
 function ansiPrefix(role: ColorRole, depth: ColorDepth, theme: ThemeName): string {
   if (theme === "mono") return "";
 
+  const foreground = foregroundPrefix(role, depth, theme);
+  if (foreground.length === 0 || theme !== "paper") return foreground;
+  return `${foreground}${paperBackgroundPrefix(depth)}`;
+}
+
+function foregroundPrefix(role: ColorRole, depth: ColorDepth, theme: ThemeName): string {
   switch (depth) {
     case "truecolor": {
       const [r, g, b] = rgbForRole(role, theme);
@@ -359,6 +373,21 @@ function ansiPrefix(role: ColorRole, depth: ColorDepth, theme: ThemeName): strin
       return `\u001b[38;5;${ansi256ForRole(role, theme)}m`;
     case "ansi16":
       return `\u001b[${NOCTURNE_ANSI_TOKENS[role].ansi16}m`;
+    case "none":
+      return "";
+  }
+}
+
+function paperBackgroundPrefix(depth: ColorDepth): string {
+  switch (depth) {
+    case "truecolor": {
+      const [r, g, b] = hexToRgb(PAPER_PALETTE.background);
+      return `\u001b[48;2;${r};${g};${b}m`;
+    }
+    case "ansi256":
+      return `\u001b[48;5;${PAPER_ANSI_256_BACKGROUND}m`;
+    case "ansi16":
+      return "\u001b[47m";
     case "none":
       return "";
   }

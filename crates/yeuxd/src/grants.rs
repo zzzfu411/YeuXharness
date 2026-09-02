@@ -123,12 +123,8 @@ mod tests {
 
     #[test]
     fn missing_optional_layers_are_identity_not_observe() {
-        let layers = resolve_grant_layers(
-            CapabilityMode::Build,
-            WorkspaceTrust::Trusted,
-            None,
-            None,
-        );
+        let layers =
+            resolve_grant_layers(CapabilityMode::Build, WorkspaceTrust::Trusted, None, None);
         let decision = evaluate_policy(PolicyInput {
             host_ceiling: layers.host_ceiling,
             user_profile: layers.user_profile,

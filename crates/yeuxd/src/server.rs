@@ -12,17 +12,17 @@ use fs2::FileExt;
 use serde_json::{json, Value};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
-    sync::broadcast,
+    sync::{broadcast, mpsc, oneshot},
 };
 use uuid::Version;
 use yeux_core::{
     digest_value, Clock, IdError, IdGenerator, ReplayError, SystemClock, UuidV7Generator,
 };
 use yeux_protocol::{
-    method, AgentId, CapabilityMode, CommandEnvelope, ContentBlock, Event, EventEnvelope,
-    InvocationId, InvocationState, Item, ItemId, ItemKind, ModelDescriptor, NotificationEnvelope,
-    ResponseEnvelope, RpcError, RpcId, ThreadId, TurnId, TurnState, JSONRPC_VERSION,
-    PROTOCOL_VERSION,
+    method, AgentId, ApprovalRequestParams, ApprovalRequestResult, CapabilityMode, CommandEnvelope,
+    ContentBlock, Event, EventEnvelope, InvocationId, InvocationState, Item, ItemId, ItemKind,
+    ModelDescriptor, NotificationEnvelope, ResponseEnvelope, RpcError, RpcId,
+    ServerRequestEnvelope, ThreadId, TurnId, TurnState, JSONRPC_VERSION, PROTOCOL_VERSION,
 };
 use yeux_runtime::{
     DescriptorStore, EventLedger, NewCommandReceipt, NewInvocationOutcome, NewInvocationUnknown,
@@ -30,7 +30,8 @@ use yeux_runtime::{
 };
 
 use crate::runner::{
-    CancellationFlag, ModelProviderConfig, TurnRunSpec, TurnRunner, TurnRunnerError,
+    ApprovalHandler, CancellationFlag, ModelProviderConfig, TurnRunSpec, TurnRunner,
+    TurnRunnerError,
 };
 
 const DEFAULT_MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -151,6 +152,12 @@ pub(crate) struct DaemonInner {
     _state_lock: File,
 }
 
+impl Drop for DaemonInner {
+    fn drop(&mut self) {
+        let _ = self._state_lock.unlock();
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct CommandOutcome {
     pub(crate) result: Value,
@@ -170,6 +177,43 @@ pub(crate) struct ReplayWindow {
 pub(crate) struct ConnectionState {
     pub(crate) initialized: bool,
     pub(crate) subscriptions: BTreeMap<ThreadId, u64>,
+}
+
+struct ApprovalRequestMessage {
+    params: ApprovalRequestParams,
+    response: oneshot::Sender<ApprovalRequestResult>,
+}
+
+#[derive(Clone)]
+struct ConnectionApprovalHandler {
+    requests: mpsc::Sender<ApprovalRequestMessage>,
+}
+
+impl ApprovalHandler for ConnectionApprovalHandler {
+    fn request<'a>(
+        &'a self,
+        params: ApprovalRequestParams,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ApprovalRequestResult> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let (response, receiver) = oneshot::channel();
+            if self
+                .requests
+                .send(ApprovalRequestMessage { params, response })
+                .await
+                .is_err()
+            {
+                return ApprovalRequestResult {
+                    approved: false,
+                    approval: None,
+                };
+            }
+            receiver.await.unwrap_or(ApprovalRequestResult {
+                approved: false,
+                approval: None,
+            })
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -229,9 +273,16 @@ impl Daemon {
             .truncate(false)
             .open(&lock_path)?;
         set_private_file(&lock_path)?;
-        state_lock
-            .try_lock_exclusive()
-            .map_err(|_| DaemonError::AlreadyRunning(lock_path))?;
+        state_lock.try_lock_exclusive().map_err(|error| {
+            if matches!(
+                error.kind(),
+                io::ErrorKind::AlreadyExists | io::ErrorKind::WouldBlock
+            ) {
+                DaemonError::AlreadyRunning(lock_path)
+            } else {
+                DaemonError::Io(error)
+            }
+        })?;
 
         let database = config.state_dir.join("state.sqlite3");
         let ledger = Arc::new(EventLedger::open(&database)?);
@@ -248,13 +299,14 @@ impl Daemon {
                 display_name: selection.model.clone(),
                 capabilities: selection.provider.capabilities(),
             });
-        let turn_runner = TurnRunner::new(
+        let turn_runner = TurnRunner::new_with_host_ceiling(
             Arc::clone(&ledger),
             events.clone(),
             Arc::clone(&clock),
             Arc::clone(&ids),
             config.model_provider.clone(),
             Arc::clone(&command_gate),
+            config.host_ceiling,
         );
         Ok(Self {
             inner: Arc::new(DaemonInner {
@@ -271,6 +323,27 @@ impl Daemon {
                 _state_lock: state_lock,
             }),
         })
+    }
+
+    /// Re-open a state directory after the previous [`Daemon`] was dropped.
+    ///
+    /// macOS can report `owner.lock` as still held for a short window after the
+    /// last file descriptor is closed, especially when other tests are spawning
+    /// sandboxed children in the same process. Retry only that contention.
+    #[cfg(test)]
+    pub(crate) fn reopen(config: DaemonConfig) -> Result<Self, DaemonError> {
+        let started = std::time::Instant::now();
+        loop {
+            match Self::open(config.clone()) {
+                Ok(daemon) => return Ok(daemon),
+                Err(DaemonError::AlreadyRunning(_))
+                    if started.elapsed() < std::time::Duration::from_millis(750) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     pub async fn serve_stdio(self) -> Result<(), DaemonError> {
@@ -337,6 +410,13 @@ impl Daemon {
     {
         let mut state = ConnectionState::default();
         let mut receiver = self.inner.events.subscribe();
+        let (approval_requests, mut approval_rx) = mpsc::channel::<ApprovalRequestMessage>(16);
+        let approval_handler: Arc<dyn ApprovalHandler> = Arc::new(ConnectionApprovalHandler {
+            requests: approval_requests,
+        });
+        let mut approval_ids: u64 = 0;
+        let mut pending_approvals: HashMap<RpcId, oneshot::Sender<ApprovalRequestResult>> =
+            HashMap::new();
         let mut buffered = Vec::new();
         loop {
             tokio::select! {
@@ -391,12 +471,15 @@ impl Daemon {
                     if input.trim().is_empty() {
                         continue;
                     }
+                    if consume_approval_response(&input, &mut pending_approvals) {
+                        continue;
+                    }
                     let (response, mut outcome) = self.handle_line(&input, &mut state);
                     if self.inner.config.execute_turns {
                         if let Some(spec) = outcome.as_mut().and_then(|value| value.turn_run.take()) {
                             // The command and its receipt are already durable. Launch before writing
                             // the response so a disconnected client cannot strand an accepted turn.
-                            self.launch_turn(spec);
+                            self.launch_turn(spec, Arc::clone(&approval_handler));
                         }
                     }
                     write_json(&mut writer, &response).await?;
@@ -459,6 +542,21 @@ impl Daemon {
                         }
                         Err(broadcast::error::RecvError::Closed) => return Ok(()),
                     }
+                }
+                request = approval_rx.recv() => {
+                    let Some(request) = request else { return Ok(()); };
+                    approval_ids = approval_ids.wrapping_add(1);
+                    let id = RpcId::String(format!("approval-{approval_ids}"));
+                    pending_approvals.insert(id.clone(), request.response);
+                    let envelope = serde_json::to_value(ServerRequestEnvelope {
+                        jsonrpc: JSONRPC_VERSION.to_owned(),
+                        id,
+                        method: method::APPROVAL_REQUEST.to_owned(),
+                        params: request.params,
+                    })
+                    .map_err(DaemonError::Json)?;
+                    write_json(&mut writer, &envelope).await?;
+                    writer.flush().await?;
                 }
             }
         }
@@ -614,7 +712,7 @@ impl Daemon {
         }
     }
 
-    fn launch_turn(&self, spec: TurnRunSpec) {
+    fn launch_turn(&self, spec: TurnRunSpec, approval: Arc<dyn ApprovalHandler>) {
         let cancellation = Arc::new(CancellationFlag::default());
         if let Ok(mut active) = self.inner.active_turns.lock() {
             active.insert(spec.turn_id, Arc::clone(&cancellation));
@@ -622,7 +720,10 @@ impl Daemon {
         let runner = self.inner.turn_runner.clone();
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
-            match runner.run(spec, cancellation.as_ref()).await {
+            match runner
+                .run_with_approval(spec, cancellation.as_ref(), Some(approval))
+                .await
+            {
                 Err(TurnRunnerError::UnexpectedState { actual, .. }) if actual.is_terminal() => {}
                 Err(error) => {
                     eprintln!("yeuxd: turn runner failed for {}: {error}", spec.turn_id);
@@ -945,6 +1046,58 @@ fn raw_error(id: Option<Value>, code: i32, message: &str, data: Option<Value>) -
     })
 }
 
+fn consume_approval_response(
+    input: &str,
+    pending: &mut HashMap<RpcId, oneshot::Sender<ApprovalRequestResult>>,
+) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(input) else {
+        return false;
+    };
+    // Command envelopes always carry `method` and `command_id`; a response is
+    // the only inbound JSON-RPC shape with an id but no method.
+    if value.get("method").is_some() || value.get("command_id").is_some() {
+        return false;
+    }
+    if value.get("jsonrpc").and_then(Value::as_str) != Some(JSONRPC_VERSION) {
+        deny_pending_approvals(pending);
+        return true;
+    }
+    let Some(id_value) = value.get("id") else {
+        deny_pending_approvals(pending);
+        return true;
+    };
+    let Ok(id) = serde_json::from_value::<RpcId>(id_value.clone()) else {
+        deny_pending_approvals(pending);
+        return true;
+    };
+    let Some(response) = pending.remove(&id) else {
+        // An unknown response id cannot be safely associated with an
+        // approval request. Deny all outstanding requests rather than leaving
+        // a runner blocked indefinitely on an untrusted frame.
+        deny_pending_approvals(pending);
+        return true;
+    };
+    let result = value
+        .get("result")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<ApprovalRequestResult>(value).ok())
+        .unwrap_or(ApprovalRequestResult {
+            approved: false,
+            approval: None,
+        });
+    let _ = response.send(result);
+    true
+}
+
+fn deny_pending_approvals(pending: &mut HashMap<RpcId, oneshot::Sender<ApprovalRequestResult>>) {
+    for response in pending.drain().map(|(_, response)| response) {
+        let _ = response.send(ApprovalRequestResult {
+            approved: false,
+            approval: None,
+        });
+    }
+}
+
 async fn write_json<W: AsyncWrite + Unpin>(writer: &mut W, value: &Value) -> io::Result<()> {
     let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
     writer.write_all(&bytes).await?;
@@ -1050,7 +1203,7 @@ mod tests {
     };
     use tokio::{
         io::{duplex, split, AsyncWriteExt, DuplexStream, ReadHalf, WriteHalf},
-        sync::Notify,
+        sync::{oneshot, Notify},
     };
     use yeux_core::{ModelEventSink, ModelProvider, PortError, SequenceIdGenerator, SystemClock};
     use yeux_protocol::{
@@ -1058,6 +1211,18 @@ mod tests {
         InvocationId, InvocationState, ModelEvent, ModelRequest, ProviderCapabilities, StopReason,
         TokenBudget, PROTOCOL_VERSION,
     };
+
+    #[test]
+    fn malformed_approval_response_denies_pending_request() {
+        let (sender, mut receiver) = oneshot::channel();
+        let mut pending = HashMap::from([(RpcId::String("approval-1".into()), sender)]);
+        assert!(consume_approval_response(
+            r#"{"jsonrpc":"2.0","result":{"approved":true}}"#,
+            &mut pending,
+        ));
+        assert!(pending.is_empty());
+        assert!(!receiver.try_recv().unwrap().approved);
+    }
 
     #[derive(Debug)]
     struct FauxProvider;
@@ -1647,7 +1812,7 @@ mod tests {
         };
 
         let daemon =
-            Daemon::open(DaemonConfig::in_directory(state_dir.path()).without_turn_execution())
+            Daemon::reopen(DaemonConfig::in_directory(state_dir.path()).without_turn_execution())
                 .unwrap();
         let projection = daemon.projection().unwrap();
         assert_eq!(projection.turns[&orphaned_turn_id].state, TurnState::Failed);
@@ -1791,7 +1956,7 @@ mod tests {
         };
 
         let first_restart =
-            Daemon::open(DaemonConfig::in_directory(state_dir.path()).without_turn_execution())
+            Daemon::reopen(DaemonConfig::in_directory(state_dir.path()).without_turn_execution())
                 .unwrap();
         let projection = first_restart.projection().unwrap();
         assert_eq!(
@@ -1894,7 +2059,7 @@ mod tests {
         let event_count = events.len();
         drop(first_restart);
         let second_restart =
-            Daemon::open(DaemonConfig::in_directory(state_dir.path()).without_turn_execution())
+            Daemon::reopen(DaemonConfig::in_directory(state_dir.path()).without_turn_execution())
                 .unwrap();
         let rebuilt = second_restart.inner.ledger.project_core().unwrap();
         assert_eq!(
@@ -2200,7 +2365,18 @@ mod tests {
         {
             let requests = provider.requests.lock().unwrap();
             assert_eq!(requests.len(), 2);
-            assert_eq!(requests[0].tools.len(), 3);
+            let advertised = requests[0]
+                .tools
+                .iter()
+                .map(|tool| tool.id.as_str())
+                .collect::<Vec<_>>();
+            assert!(advertised.len() >= 3);
+            for tool in ["workspace.list", "workspace.read", "workspace.search"] {
+                assert!(
+                    advertised.contains(&tool),
+                    "expected {tool} among advertised tools {advertised:?}"
+                );
+            }
             assert!(requests[1]
                 .messages
                 .iter()

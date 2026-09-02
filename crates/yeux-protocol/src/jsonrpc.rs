@@ -196,6 +196,14 @@ pub struct ServerCapabilities {
     pub subagents: bool,
     #[serde(default)]
     pub plugins: bool,
+    /// True only when the daemon has registered the M2 write pipeline and the
+    /// required host sandbox is available.
+    #[serde(default)]
+    pub write_tools: bool,
+    #[serde(default)]
+    pub process_tools: bool,
+    #[serde(default)]
+    pub sandbox: Option<String>,
 }
 
 /// Stable method names. Experimental methods must use an `experimental/` prefix.

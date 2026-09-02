@@ -76,11 +76,27 @@
           "default": false,
           "type": "boolean"
         },
+        "process_tools": {
+          "default": false,
+          "type": "boolean"
+        },
+        "sandbox": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "subagents": {
           "default": false,
           "type": "boolean"
         },
         "unix_socket": {
+          "default": false,
+          "type": "boolean"
+        },
+        "write_tools": {
+          "description": "True only when the daemon has registered the M2 write pipeline and the required host sandbox is available.",
           "default": false,
           "type": "boolean"
         }

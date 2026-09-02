@@ -82,7 +82,8 @@ pub struct WorkspaceToolLimits {
 }
 
 /// Compact, deterministic mutation evidence suitable for an approval surface
-/// and append-only persistence. It intentionally contains no file contents.
+/// and append-only persistence. Compact stats PLUS a bounded unified diff so
+/// the approval surface can show which lines changed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceDiffSummary {
     pub changed: bool,
@@ -97,6 +98,7 @@ pub struct WorkspaceDiffSummary {
     pub removed_bytes: u64,
     pub inserted_bytes: u64,
     pub first_changed_line: Option<u64>,
+    pub unified_diff: String,
 }
 
 /// An indivisible preparation result for one structured workspace mutation.
@@ -722,8 +724,11 @@ impl WorkspaceTools {
                 validate_patch_target_utf8(&before.relative_path, &before.bytes)?;
 
                 let path = tool_path(&before.relative_path)?;
-                let diff_summary =
-                    WorkspaceDiffSummary::between(&before.bytes, arguments.replacement.as_bytes());
+                let diff_summary = WorkspaceDiffSummary::for_path(
+                    &path,
+                    &before.bytes,
+                    arguments.replacement.as_bytes(),
+                );
                 let effects = mutation_effects(&path);
                 let normalized_arguments = json!({
                     "path": path,
@@ -788,15 +793,15 @@ impl WorkspaceTools {
             .into());
         }
         validate_patch_target_utf8(&before.relative_path, &before.bytes)?;
+        let path = tool_path(&before.relative_path)?;
         let diff_summary =
-            WorkspaceDiffSummary::between(&before.bytes, arguments.replacement.as_bytes());
+            WorkspaceDiffSummary::for_path(&path, &before.bytes, arguments.replacement.as_bytes());
         debug_assert_eq!(diff_summary, prepared.diff_summary);
 
         // The result is deterministic from the validated base and replacement.
         // Serialize and budget it before publishing so an output-budget failure
         // can never turn a successful filesystem mutation into a reported
         // failure with no durable result.
-        let path = tool_path(&before.relative_path)?;
         let expected_revision = blake3::hash(arguments.replacement.as_bytes())
             .to_hex()
             .to_string();
@@ -1032,7 +1037,7 @@ struct FileCollection {
 }
 
 impl WorkspaceDiffSummary {
-    fn between(previous: &[u8], replacement: &[u8]) -> Self {
+    fn for_path(path: &str, previous: &[u8], replacement: &[u8]) -> Self {
         let changed = previous != replacement;
         let common_prefix = common_prefix_len(previous, replacement);
         let common_suffix = if changed {
@@ -1065,8 +1070,82 @@ impl WorkspaceDiffSummary {
                     .count() as u64
                     + 1
             }),
+            unified_diff: unified_diff_for_path(path, previous, replacement),
         }
     }
+}
+
+const UNIFIED_DIFF_CONTEXT: usize = 3;
+
+fn split_unified_lines(bytes: &[u8]) -> Vec<&[u8]> {
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<&[u8]> = bytes.split(|byte| *byte == b'\n').collect();
+    if bytes.ends_with(b"\n") {
+        lines.pop();
+    }
+    lines
+}
+
+fn unified_diff_for_path(path: &str, previous: &[u8], replacement: &[u8]) -> String {
+    let old_lines = split_unified_lines(previous);
+    let new_lines = split_unified_lines(replacement);
+    let mut diff = format!("--- a/{path}\n+++ b/{path}\n");
+    if old_lines == new_lines {
+        return diff;
+    }
+
+    let mut prefix = 0;
+    let min_len = old_lines.len().min(new_lines.len());
+    while prefix < min_len && old_lines[prefix] == new_lines[prefix] {
+        prefix += 1;
+    }
+
+    let mut suffix = 0;
+    let old_rest = old_lines.len() - prefix;
+    let new_rest = new_lines.len() - prefix;
+    while suffix < old_rest
+        && suffix < new_rest
+        && old_lines[old_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let prefix_context = prefix.min(UNIFIED_DIFF_CONTEXT);
+    let suffix_context = suffix.min(UNIFIED_DIFF_CONTEXT);
+    let old_start_idx = prefix - prefix_context;
+    let old_end_idx = old_lines.len() - suffix + suffix_context;
+    let new_end_idx = new_lines.len() - suffix + suffix_context;
+    let old_count = old_end_idx - old_start_idx;
+    let new_count = new_end_idx - old_start_idx;
+    let old_start = if old_count == 0 { 0 } else { old_start_idx + 1 };
+    let new_start = if new_count == 0 { 0 } else { old_start_idx + 1 };
+
+    diff.push_str(&format!(
+        "@@ -{old_start},{old_count} +{new_start},{new_count} @@\n"
+    ));
+    for line in &old_lines[old_start_idx..prefix] {
+        diff.push(' ');
+        diff.push_str(&String::from_utf8_lossy(line));
+        diff.push('\n');
+    }
+    for line in &old_lines[prefix..old_lines.len() - suffix] {
+        diff.push('-');
+        diff.push_str(&String::from_utf8_lossy(line));
+        diff.push('\n');
+    }
+    for line in &new_lines[prefix..new_lines.len() - suffix] {
+        diff.push('+');
+        diff.push_str(&String::from_utf8_lossy(line));
+        diff.push('\n');
+    }
+    for line in &old_lines[old_lines.len() - suffix..old_end_idx] {
+        diff.push(' ');
+        diff.push_str(&String::from_utf8_lossy(line));
+        diff.push('\n');
+    }
+    diff
 }
 
 fn parse_arguments<T: DeserializeOwned>(
@@ -1659,7 +1738,8 @@ fn diff_summary_schema() -> Value {
             "common_suffix_bytes",
             "removed_bytes",
             "inserted_bytes",
-            "first_changed_line"
+            "first_changed_line",
+            "unified_diff"
         ],
         "properties": {
             "changed": {"type": "boolean"},
@@ -1678,7 +1758,8 @@ fn diff_summary_schema() -> Value {
                     {"type": "integer", "minimum": 1},
                     {"type": "null"}
                 ]
-            }
+            },
+            "unified_diff": {"type": "string"}
         }
     })
 }
@@ -1878,23 +1959,23 @@ mod tests {
             assert!(!scope.recursive);
             assert!(scope.resolved);
         }
-        assert_eq!(
-            prepared.diff_summary(),
-            &WorkspaceDiffSummary {
-                changed: true,
-                previous_bytes: 11,
-                replacement_bytes: 18,
-                byte_delta: 7,
-                previous_lines: 2,
-                replacement_lines: 3,
-                line_delta: 1,
-                common_prefix_bytes: 6,
-                common_suffix_bytes: 2,
-                removed_bytes: 3,
-                inserted_bytes: 10,
-                first_changed_line: Some(2),
-            }
-        );
+        let summary = prepared.diff_summary();
+        assert!(summary.changed);
+        assert_eq!(summary.previous_bytes, 11);
+        assert_eq!(summary.replacement_bytes, 18);
+        assert_eq!(summary.byte_delta, 7);
+        assert_eq!(summary.previous_lines, 2);
+        assert_eq!(summary.replacement_lines, 3);
+        assert_eq!(summary.line_delta, 1);
+        assert_eq!(summary.common_prefix_bytes, 6);
+        assert_eq!(summary.common_suffix_bytes, 2);
+        assert_eq!(summary.removed_bytes, 3);
+        assert_eq!(summary.inserted_bytes, 10);
+        assert_eq!(summary.first_changed_line, Some(2));
+        assert!(summary.unified_diff.contains("--- a/src/hello.txt"));
+        assert!(summary.unified_diff.contains("+++ b/src/hello.txt"));
+        assert!(summary.unified_diff.contains("-beta"));
+        assert!(summary.unified_diff.contains("+gamma"));
 
         let output = tools.execute_prepared_mutation(&prepared).unwrap();
         assert_eq!(output["path"], "src/hello.txt");
@@ -1916,7 +1997,7 @@ mod tests {
     #[test]
     fn diff_summary_is_stable_for_noop_empty_and_unicode_edits() {
         assert_eq!(
-            WorkspaceDiffSummary::between(b"", b""),
+            WorkspaceDiffSummary::for_path("file", b"", b""),
             WorkspaceDiffSummary {
                 changed: false,
                 previous_bytes: 0,
@@ -1930,13 +2011,25 @@ mod tests {
                 removed_bytes: 0,
                 inserted_bytes: 0,
                 first_changed_line: None,
+                unified_diff: String::from("--- a/file\n+++ b/file\n"),
             }
         );
-        let summary = WorkspaceDiffSummary::between("甲\n乙".as_bytes(), "甲\n丙".as_bytes());
+        let summary =
+            WorkspaceDiffSummary::for_path("file", "甲\n乙".as_bytes(), "甲\n丙".as_bytes());
         assert!(summary.changed);
         assert_eq!(summary.previous_lines, 2);
         assert_eq!(summary.replacement_lines, 2);
         assert_eq!(summary.first_changed_line, Some(2));
+        assert!(summary.unified_diff.contains("-乙"));
+        assert!(summary.unified_diff.contains("+丙"));
+    }
+
+    #[test]
+    fn diff_summary_unified_diff_contains_hunk_markers() {
+        let summary = WorkspaceDiffSummary::for_path("file", b"alpha\nbeta\n", b"alpha\ngamma\n");
+        assert!(summary.unified_diff.contains("@@"));
+        assert!(summary.unified_diff.contains("-beta"));
+        assert!(summary.unified_diff.contains("+gamma"));
     }
 
     #[test]

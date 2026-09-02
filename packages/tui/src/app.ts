@@ -1,5 +1,10 @@
+import { readFileSync } from "node:fs";
+import type { Readable } from "node:stream";
+import { Writable } from "node:stream";
+
 import {
   PROTOCOL_VERSION,
+  isRecord,
   isRuntimeDiagnosticNotification,
   type ApprovalRequestResult,
   type EventEnvelope,
@@ -10,7 +15,7 @@ import {
 
 import type { TuiOptions } from "./args.js";
 import { detectTerminalCapabilities } from "./aesthetic.js";
-import { TerminalPrompter } from "./prompter.js";
+import { formatApprovalGate, isReadOnlyEffects, TerminalPrompter } from "./prompter.js";
 import { EventRenderer } from "./renderer.js";
 import { sanitizeTerminalText } from "./terminal.js";
 import { connectRuntime, type RuntimeConnection } from "./transport.js";
@@ -22,6 +27,85 @@ export interface TuiRunResult {
   readonly exitCode: number;
   readonly threadId: string;
   readonly turnId?: string;
+}
+
+export interface ReplayOptions {
+  readonly ascii?: boolean;
+  readonly jsonl?: boolean;
+  readonly write?: (text: string) => void;
+  /** Fixture stdin for `Prompter.approval()`; defaults to process.stdin. */
+  readonly input?: Readable;
+}
+
+function writableFromWrite(write: (text: string) => void): Writable {
+  return new Writable({
+    decodeStrings: false,
+    write(chunk, _encoding, callback) {
+      const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+      write(text);
+      callback();
+    },
+  });
+}
+
+/** Replay inert JSONL events without opening a daemon or touching the workspace. */
+export async function replayFixture(path: string, options: ReplayOptions = {}): Promise<number> {
+  const jsonl = options.jsonl ?? false;
+  const write = options.write ?? ((text: string) => {
+    process.stdout.write(text);
+  });
+  const capabilities = detectTerminalCapabilities(
+    options.ascii === undefined ? {} : { ascii: options.ascii },
+  );
+  const renderer = new EventRenderer({ jsonl, capabilities, write });
+  const output = writableFromWrite(write);
+  const prompter = jsonl
+    ? undefined
+    : new TerminalPrompter(options.input ?? process.stdin, output, {
+        capabilities,
+        ...(options.ascii === undefined ? {} : { ascii: options.ascii }),
+      });
+  const lines = readFileSync(path, "utf8").split(/\r?\n/);
+  try {
+    for (const line of lines) {
+      if (line.trim().length === 0) continue;
+      const event = JSON.parse(line) as EventEnvelope;
+      renderer.render(event);
+      if (prompter !== undefined) {
+        const approval = approvalRequestForFixtureEvent(event);
+        if (approval !== undefined) await prompter.approval(approval);
+      }
+    }
+    return 0;
+  } finally {
+    prompter?.close();
+  }
+}
+
+function approvalRequestForFixtureEvent(
+  event: EventEnvelope,
+): Parameters<typeof formatApprovalGate>[0] | undefined {
+  if (event.kind !== "tool/proposed" || !isRecord(event.payload)) return undefined;
+  const payload = event.payload;
+  const effects = payload.effects;
+  if (!isRecord(effects) || isReadOnlyEffects(effects)) return undefined;
+  const unifiedDiff = typeof payload.unifiedDiff === "string"
+    ? payload.unifiedDiff
+    : typeof payload.unified_diff === "string"
+      ? payload.unified_diff
+      : undefined;
+  return {
+    invocation: {
+      invocation_id: typeof payload.invocation_id === "string" ? payload.invocation_id : event.event_id,
+      tool_id: typeof payload.tool_id === "string" ? payload.tool_id : "fixture.approval_boundary",
+      tool_version: typeof payload.tool_version === "string" ? payload.tool_version : "fixture",
+      effects,
+      effect_digest: typeof payload.effect_digest === "string" ? payload.effect_digest : "fixture-effects",
+      normalized_arguments: payload.normalized_arguments ?? {},
+    },
+    explanation: typeof payload.summary === "string" ? payload.summary : "side-effecting tool requires approval",
+    ...(unifiedDiff !== undefined && unifiedDiff.trim() !== "" ? { unifiedDiff } : {}),
+  };
 }
 
 export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
@@ -43,6 +127,63 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
       cwd: options.cwd,
       ...(options.threadId === undefined ? {} : { threadId: options.threadId }),
     });
+    const models = await session.listModels();
+    const model = models[0] === undefined
+      ? "unconfigured"
+      : `${models[0].provider}/${models[0].model}`;
+    const sandboxNamed = session.sandbox.trim().length > 0 && session.sandbox !== "unavailable";
+    const writeReady = session.writeToolsAvailable && sandboxNamed;
+    const effectiveMode: RuntimeMode = options.mode === "observe"
+      ? "observe"
+      : writeReady
+        ? options.mode
+        : "observe";
+    const writeEnabled = effectiveMode !== "observe" && writeReady;
+    const processEnabled = effectiveMode !== "observe" && session.processToolsAvailable && sandboxNamed;
+    const presenterPolicy = {
+      mode: effectiveMode,
+      filesystem_read: [session.workspaceRoot ?? options.cwd],
+      filesystem_write: writeEnabled ? [session.workspaceRoot ?? options.cwd] : [],
+      filesystem_delete: [],
+      process: processEnabled,
+      network: [],
+      secrets: [],
+      external_write: [],
+      write_tools_available: writeReady,
+      process_tools_available: processEnabled,
+      sandbox: session.sandbox,
+    } as const;
+    renderer.renderSessionBar({
+      cwd: session.workspaceRoot ?? options.cwd,
+      thread: threadId,
+      mode: options.mode,
+      model,
+      ...(session.workspaceTrust === undefined ? {} : { trust: session.workspaceTrust }),
+      transport: connection.kind,
+      writeGrant: writeEnabled ? [session.workspaceRoot ?? options.cwd] : [],
+      sandbox: sandboxNamed,
+    });
+    renderer.renderInspector(presenterPolicy);
+
+    if (options.mode !== "observe" && !writeReady) {
+      renderer.renderDiagnostic({
+        code: "write_pipeline_unavailable",
+        message: "requested write mode is unavailable until the daemon confirms write tools and a named OS sandbox",
+        recoverable: false,
+      });
+      return { exitCode: 1, threadId };
+    }
+
+    // A provider-less daemon is a valid local runtime, but it is not an
+    // interactive prompt. Keep the state visible and fail before `yeux ›`.
+    if (models.length === 0) {
+      renderer.renderDiagnostic({
+        code: "provider_unconfigured",
+        message: "no model provider is configured; configure a provider before starting a turn",
+        recoverable: false,
+      });
+      return { exitCode: 1, threadId };
+    }
 
     let signalCount = 0;
     let forcedClose = false;
@@ -68,7 +209,8 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
 
     try {
       if (options.command === "run") {
-        const result = await session.runTurn(threadId, options.prompt ?? "", options.mode);
+        const result = await session.runTurn(threadId, options.prompt ?? "", effectiveMode);
+        renderer.renderInspector(presenterPolicy);
         return {
           exitCode: exitCodeFor(result),
           threadId,
@@ -81,7 +223,8 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
         const prompt = (await prompter?.command())?.trim() ?? "";
         if (prompt === "/exit" || prompt === "/quit") break;
         if (prompt.length === 0) continue;
-        const result = await session.runTurn(threadId, prompt, options.mode);
+        const result = await session.runTurn(threadId, prompt, effectiveMode);
+        renderer.renderInspector(presenterPolicy);
         exitCode = exitCodeFor(result);
       }
       return { exitCode, threadId };
@@ -107,8 +250,12 @@ class RuntimeSession {
     { readonly resolve: (event: EventEnvelope) => void; readonly reject: (error: Error) => void }
   >();
   #workspaceRoot: string | undefined;
+  #workspaceTrust: string | undefined;
   #activeTurn: { readonly threadId: string; readonly turnId: string } | undefined;
   #interruptPromise: Promise<boolean> | undefined;
+  #writeToolsAvailable = false;
+  #processToolsAvailable = false;
+  #sandbox = "unavailable";
 
   public constructor(
     client: JsonRpcClient,
@@ -138,6 +285,9 @@ class RuntimeSession {
       this.#terminalWaiters.clear();
     });
     this.#client.handleRequest("approval/request", async (params): Promise<ApprovalRequestResult> => {
+      if (isReadOnlyEffects(params.invocation.effects)) {
+        return { approved: true };
+      }
       if (this.#prompter === undefined) {
         return { approved: false };
       }
@@ -166,6 +316,26 @@ class RuntimeSession {
         `Protocol mismatch: server ${result.protocolVersion.major}.${result.protocolVersion.minor}, client ${PROTOCOL_VERSION.major}.${PROTOCOL_VERSION.minor}`,
       );
     }
+    this.#writeToolsAvailable = result.capabilities.write_tools === true;
+    this.#processToolsAvailable = result.capabilities.process_tools === true;
+    this.#sandbox = result.capabilities.sandbox ?? "unavailable";
+  }
+
+  public get writeToolsAvailable(): boolean {
+    return this.#writeToolsAvailable;
+  }
+
+  public get processToolsAvailable(): boolean {
+    return this.#processToolsAvailable;
+  }
+
+  public get sandbox(): string {
+    return this.#sandbox;
+  }
+
+  public async listModels(): Promise<readonly { readonly provider: string; readonly model: string }[]> {
+    const result = await this.#client.command("model/list", {});
+    return result.models;
   }
 
   public async openThread(options: {
@@ -180,6 +350,8 @@ class RuntimeSession {
         workspaceId: resumed.thread.workspace_id,
       });
       this.#workspaceRoot = workspace.workspace.root;
+      this.#workspaceTrust = workspace.workspace.trust;
+      this.#renderer.rememberEvents(resumed.events);
       await this.#client.command("thread/subscribe", {
         threadId: resumed.thread.id,
         afterSeq: resumed.thread.last_seq,
@@ -189,6 +361,7 @@ class RuntimeSession {
 
     const workspace = await this.#client.command("workspace/open", { path: options.cwd });
     this.#workspaceRoot = workspace.workspace.root;
+    this.#workspaceTrust = workspace.workspace.trust;
     const created = await this.#client.command("thread/start", {
       workspaceId: workspace.workspace.id,
     });
@@ -201,6 +374,14 @@ class RuntimeSession {
 
   public get hasActiveTurn(): boolean {
     return this.#activeTurn !== undefined;
+  }
+
+  public get workspaceTrust(): string | undefined {
+    return this.#workspaceTrust;
+  }
+
+  public get workspaceRoot(): string | undefined {
+    return this.#workspaceRoot;
   }
 
   public async interruptActiveTurn(reason?: string): Promise<boolean> {
@@ -237,7 +418,10 @@ class RuntimeSession {
         ? {
             capabilityOverride: {
               mode: "observe" as const,
-              filesystem_read: [this.#workspaceRoot as string],
+              // Workspace tool effects are normalized to workspace-relative
+              // paths; `*` narrows the mode without making an absolute host
+              // path fail every otherwise-safe read.
+              filesystem_read: ["*"],
               filesystem_write: [],
               filesystem_delete: [],
               process: false,

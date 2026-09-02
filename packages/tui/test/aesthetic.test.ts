@@ -5,6 +5,8 @@ import {
   ASCII_GLYPHS,
   DEFAULT_THEME,
   NOCTURNE_ANSI_TOKENS,
+  NOCTURNE_PALETTE,
+  PAPER_PALETTE,
   UNICODE_GLYPHS,
   detectTerminalCapabilities,
   glyph,
@@ -20,8 +22,8 @@ const TRUECOLOR_ENV = {
 } as const;
 
 describe("terminal aesthetics", () => {
-  it("uses Nocturne as the default theme and keeps both glyph sets aligned", () => {
-    expect(DEFAULT_THEME).toBe("nocturne");
+  it("uses Paper as the default theme and keeps both glyph sets aligned", () => {
+    expect(DEFAULT_THEME).toBe("paper");
     expect(Object.keys(ASCII_GLYPHS).sort()).toEqual(Object.keys(UNICODE_GLYPHS).sort());
   });
 
@@ -111,10 +113,10 @@ describe("terminal aesthetics", () => {
 
   it("paints renderer-owned text from the centralized ANSI tokens", () => {
     const token = NOCTURNE_ANSI_TOKENS.focus;
-    expect(paint("signal", "focus", { colorDepth: "truecolor" })).toBe(
+    expect(paint("signal", "focus", { colorDepth: "truecolor" }, "nocturne")).toBe(
       `\u001b[38;2;${token.rgb.join(";")}msignal${ANSI_RESET}`,
     );
-    expect(paint("signal", "focus", { colorDepth: "ansi256" })).toBe(
+    expect(paint("signal", "focus", { colorDepth: "ansi256" }, "nocturne")).toBe(
       `\u001b[38;5;${token.ansi256}msignal${ANSI_RESET}`,
     );
     expect(paint("signal", "focus", { colorDepth: "none" })).toBe("signal");
@@ -123,9 +125,25 @@ describe("terminal aesthetics", () => {
     );
   });
 
+  it("keeps Nocturne seal colours distinct from Paper vermillion", () => {
+    expect(NOCTURNE_PALETTE.approval).toBe("#D17968");
+    expect(NOCTURNE_PALETTE.danger).toBe("#D17968");
+    expect(NOCTURNE_ANSI_TOKENS.approval.rgb).toEqual([209, 121, 104]);
+    expect(PAPER_PALETTE.approval).toBe("#8C3A2C");
+  });
+
   it("uses dark text tokens for the Paper theme in 256-colour terminals", () => {
     expect(paint("ink", "text", { colorDepth: "ansi256" }, "paper")).toBe(
-      `\u001b[38;5;234mink${ANSI_RESET}`,
+      `\u001b[38;5;234m\u001b[48;5;188mink${ANSI_RESET}`,
+    );
+  });
+
+  it("paints a paper background so default dark ink stays readable", () => {
+    expect(paint("signal", "focus", { colorDepth: "truecolor" })).toBe(
+      `\u001b[38;2;49;86;107m\u001b[48;2;216;211;204msignal${ANSI_RESET}`,
+    );
+    expect(paint("signal", "focus", { colorDepth: "truecolor" }, "nocturne")).not.toContain(
+      "48;2;",
     );
   });
 

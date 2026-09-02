@@ -77,40 +77,17 @@ export class TerminalPrompter {
 
   public async approval(params: ApprovalRequestParams): Promise<ApprovalRequestResult> {
     const safe = normalizeApprovalRequest(params);
-    const tool = sanitizeTerminalLine(
-      `${safe.invocation.tool_id}@${safe.invocation.tool_version}`,
-    );
-    const explanation = sanitizeTerminalText(safe.explanation);
-    const invocationId = sanitizeTerminalLine(safe.invocation.invocation_id);
-    const digest = sanitizeTerminalLine(safe.invocation.effect_digest);
-    const safeEffects = sanitizeTerminalText(JSON.stringify(safe.invocation.effects, null, 2));
     const safeArguments = sanitizeTerminalText(
       JSON.stringify(safe.invocation.normalized_arguments, null, 2),
     );
-    const border = glyph("approvalStart", this.#capabilities);
-    const rail = glyph("approvalRail", this.#capabilities);
-    const end = glyph("approvalEnd", this.#capabilities);
-    const lines = framedLines(safeEffects, rail);
-    const header = paint(
-      `${border} ${glyph("approval", this.#capabilities)} APPROVAL REQUIRED · ${tool}`,
-      "approval",
-      this.#capabilities,
-      this.#theme,
-    );
-    const footer = paint(
-      `${end} [a] ALLOW ONCE   [d] DENY (default)   [i] INSPECT`,
-      "approval",
-      this.#capabilities,
-      this.#theme,
-    );
     this.#output.write(
-      `\n${header}\n` +
-      `${framedLines(explanation, rail)}\n` +
-      `${rail} binding ${digest} · invocation ${invocationId}\n` +
-      `${rail} effects\n` +
-      `${lines}\n` +
-      `${footer}\n`,
+      `\n${formatApprovalGate(safe, {
+        capabilities: this.#capabilities,
+        theme: this.#theme,
+      })}\n`,
     );
+
+    const rail = glyph("approvalRail", this.#capabilities);
 
     while (true) {
       const choice = parseApprovalChoice(
@@ -124,10 +101,18 @@ export class TerminalPrompter {
         ),
       );
       if (choice === "inspect") {
-        this.#output.write(
-          `${paint("INSPECT · NORMALIZED ARGUMENTS", "text", this.#capabilities, this.#theme)}\n` +
-          `${framedLines(safeArguments, rail)}\n`,
-        );
+        const unified = unifiedDiffFromApproval(safe);
+        if (unified !== undefined) {
+          this.#output.write(
+            `${paint("INSPECT · UNIFIED DIFF", "text", this.#capabilities, this.#theme)}\n` +
+            `${framedLines(sanitizeTerminalText(unified), rail)}\n`,
+          );
+        } else {
+          this.#output.write(
+            `${paint("INSPECT · NORMALIZED ARGUMENTS", "text", this.#capabilities, this.#theme)}\n` +
+            `${framedLines(safeArguments, rail)}\n`,
+          );
+        }
         continue;
       }
       return { approved: choice === "allow_once" };
@@ -147,7 +132,120 @@ export class TerminalPrompter {
   }
 }
 
+export interface ApprovalGateFormatOptions {
+  readonly capabilities?: TerminalCapabilities;
+  readonly theme?: ThemeName;
+}
+
+/**
+ * The gate is a presenter-only boundary. It is deliberately legible without
+ * colour: a double-line marker, a risk glyph, explicit effects, and a deny
+ * default all survive ASCII and NO_COLOR output.
+ */
+export function formatApprovalGate(
+  params: ApprovalRequestParams,
+  options: ApprovalGateFormatOptions = {},
+): string {
+  const safe = normalizeApprovalRequest(params);
+  const capabilities = options.capabilities ?? detectTerminalCapabilities();
+  const theme = options.theme ?? DEFAULT_THEME;
+  const tool = sanitizeTerminalLine(`${safe.invocation.tool_id}@${safe.invocation.tool_version}`);
+  const explanation = sanitizeTerminalText(safe.explanation);
+  const invocationId = sanitizeTerminalLine(safe.invocation.invocation_id);
+  const digest = sanitizeTerminalLine(safe.invocation.effect_digest);
+  const safeEffects = sanitizeTerminalText(JSON.stringify(safe.invocation.effects, null, 2));
+  const border = glyph("approvalStart", capabilities);
+  const horizontal = glyph("approvalHorizontal", capabilities);
+  const topRight = glyph("approvalTopRight", capabilities);
+  const rail = glyph("approvalRail", capabilities);
+  const end = glyph("approvalEnd", capabilities);
+  const bottomRight = glyph("approvalBottomRight", capabilities);
+  const headerContent = `${glyph("approval", capabilities)} APPROVAL REQUIRED · ${tool}`;
+  const bodyContent = [
+    ...explanation.split("\n").map((line) => `   ${line}`),
+    ` binding ${digest} · invocation ${invocationId}`,
+    " effects",
+    ...safeEffects.split("\n").map((line) => `   ${line}`),
+  ];
+  const footerContent = "[a] ALLOW ONCE   [d] DENY (default)   [i] INSPECT";
+  // Do not re-trim framed lines: sanitizeTerminalLine would eat trailing
+  // padding and can drop the right rail that closes ╔╗ / ╚╝ (ASCII +-+).
+  const topBaseWidth = displayWidth(border) + 1 + displayWidth(headerContent) + 1 + displayWidth(topRight);
+  const footerBaseWidth = displayWidth(end) + 1 + displayWidth(footerContent) + 1 + displayWidth(bottomRight);
+  const bodyBaseWidths = bodyContent.map((line) => displayWidth(rail) + displayWidth(line) + displayWidth(rail));
+  const frameWidth = Math.max(
+    topBaseWidth + 1,
+    footerBaseWidth + 1,
+    ...bodyBaseWidths.map((width) => width + 1),
+  );
+  const topPadding = frameWidth - topBaseWidth;
+  const bottomPadding = frameWidth - footerBaseWidth;
+  const framedBody = bodyContent.map((line) => {
+    const padding = " ".repeat(frameWidth - displayWidth(rail) - displayWidth(line) - displayWidth(rail));
+    return `${rail}${line}${padding}${rail}`;
+  });
+  const lines = [
+    `${border} ${headerContent} ${horizontal.repeat(topPadding)}${topRight}`,
+    ...framedBody,
+    `${end} ${footerContent} ${horizontal.repeat(bottomPadding)}${bottomRight}`,
+  ];
+  return lines
+    .map((line) => paint(line, "approval", capabilities, theme))
+    .join("\n");
+}
+
+function displayWidth(text: string): number {
+  return [...text].length;
+}
+
+export const renderApprovalGate = formatApprovalGate;
+
 export type ApprovalChoice = "allow_once" | "deny" | "inspect";
+
+const KNOWN_EFFECT_KEYS = new Set([
+  "filesystem_read",
+  "filesystem_write",
+  "filesystem_delete",
+  "network",
+  "secrets",
+  "external_write",
+  "external_writes",
+  "process",
+  "processes",
+  "idempotency",
+  "reversibility",
+]);
+
+const SIDE_EFFECT_KEYS = [
+  "filesystem_write",
+  "filesystem_delete",
+  "network",
+  "secrets",
+  "external_write",
+  "external_writes",
+  "process",
+  "processes",
+] as const;
+
+/**
+ * Auto-approve only when every known write channel is empty and no unknown
+ * effect key is present. Unknown keys fail closed so a new side-effect field
+ * cannot skip the gate.
+ */
+export function isReadOnlyEffects(effects: unknown): boolean {
+  if (!isRecord(effects)) return false;
+  const record = effects as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (!KNOWN_EFFECT_KEYS.has(key)) return false;
+  }
+  return SIDE_EFFECT_KEYS.every((key) => !hasEffect(record[key]));
+}
+
+function hasEffect(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "boolean") return value;
+  return value !== undefined && value !== null && value !== "";
+}
 
 export function parseApprovalChoice(input: string): ApprovalChoice {
   switch (input.trim().toLowerCase()) {
@@ -176,6 +274,21 @@ function framedLines(text: string, rail: string): string {
     .split("\n")
     .map((line) => `${rail}   ${line}`)
     .join("\n");
+}
+
+function readUnifiedDiffField(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  for (const key of ["unifiedDiff", "unified_diff"] as const) {
+    const candidate = value[key];
+    if (typeof candidate === "string" && candidate.trim() !== "") return candidate;
+  }
+  return undefined;
+}
+
+function unifiedDiffFromApproval(params: ApprovalRequestParams): string | undefined {
+  const direct = readUnifiedDiffField(params);
+  if (direct !== undefined) return direct;
+  return readUnifiedDiffField(params.invocation);
 }
 
 function normalizeApprovalRequest(params: ApprovalRequestParams): ApprovalRequestParams {

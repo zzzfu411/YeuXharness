@@ -211,6 +211,9 @@ export interface InitializeResult {
     readonly jobs: boolean;
     readonly subagents: boolean;
     readonly plugins: boolean;
+    readonly write_tools?: boolean;
+    readonly process_tools?: boolean;
+    readonly sandbox?: string;
   };
   readonly hostCeiling: RuntimeMode;
 }
@@ -311,6 +314,8 @@ export interface ApprovalRequestParams {
     readonly normalized_arguments: JsonValue;
   } & JsonObject;
   readonly explanation: string;
+  readonly unifiedDiff?: string;
+  readonly unified_diff?: string;
 }
 
 export interface ApprovalRequestResult {

@@ -6,6 +6,7 @@
 //! side effects while rebuilding a projection from the ledger.
 
 pub mod artifact;
+pub mod credentials;
 pub mod descriptors;
 pub mod ledger;
 pub mod process;
@@ -15,6 +16,10 @@ pub mod workspace;
 pub mod workspace_tools;
 
 pub use artifact::{Artifact, ArtifactError, ArtifactStore};
+pub use credentials::{
+    CredentialBroker, CredentialError, CredentialLease, InMemoryCredentialBroker,
+    NoCredentials as NoCredentialBroker,
+};
 pub use descriptors::{
     AgentRecord, DescriptorError, DescriptorKind, DescriptorStore, JobRecord, RegisteredDescriptor,
 };
@@ -26,8 +31,8 @@ pub use ledger::{
 };
 pub use process::{ProcessError, ProcessExecutor, ProcessOutput, ProcessRequest};
 pub use provider::{
-    CredentialSource, NoCredentials, OpenAiCompatibleProvider, ProviderConfig, ProviderError,
-    RuntimeModelProvider,
+    BrokerCredentialSource, CredentialSource, NoCredentials, OpenAiCompatibleProvider,
+    ProviderConfig, ProviderError, RuntimeModelProvider,
 };
 pub use sandbox::{
     SandboxBackend, SandboxCapabilities, SandboxError, SandboxRequirement, SandboxedCommand,

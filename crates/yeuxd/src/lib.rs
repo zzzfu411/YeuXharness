@@ -3,6 +3,8 @@
 #![forbid(unsafe_code)]
 
 mod commands;
+mod grants;
+pub mod pipeline;
 pub mod runner;
 pub mod server;
 pub mod tool_calls;

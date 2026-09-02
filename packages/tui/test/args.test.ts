@@ -22,6 +22,32 @@ describe("parseArgs", () => {
   it("rejects a run without a prompt", () => {
     expect(() => parseArgs(["run"])).toThrow("run requires a prompt");
   });
+
+  it("defaults an unqualified turn to observe so read-only tools do not display build", () => {
+    expect(parseArgs(["run", "-p", "status"], "/workspace").mode).toBe("observe");
+    expect(parseArgs([], "/workspace").mode).toBe("observe");
+  });
+
+  it("parses a daemon-free fixture replay path", () => {
+    expect(parseArgs(["replay", "fixtures/paper-approval-gate.jsonl"], "/workspace/tui"))
+      .toMatchObject({
+        command: "replay",
+        replayPath: "/workspace/tui/fixtures/paper-approval-gate.jsonl",
+      });
+  });
+
+  it("keeps replay mode when JSONL output is requested", () => {
+    expect(parseArgs(["replay", "--jsonl", "fixtures/paper-approval-gate.jsonl"], "/workspace/tui"))
+      .toMatchObject({
+        command: "replay",
+        jsonl: true,
+        replayPath: "/workspace/tui/fixtures/paper-approval-gate.jsonl",
+      });
+  });
+
+  it("still accepts --mode build as a request; the Session Bar must clamp display", () => {
+    expect(parseArgs(["run", "-p", "status", "--mode", "build"], "/workspace").mode).toBe("build");
+  });
 });
 
 describe("parseApprovalChoice", () => {

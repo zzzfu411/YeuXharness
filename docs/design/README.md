@@ -2,9 +2,9 @@
 
 YeuX Harness 的产品美学是 **纸上信号 / Paper Signal**：
 
-> 纸的温度，仪器的纪律。
+> 纸本工作台，仪器只取密度。
 
-它把 `yeuxark.com` 的暖灰纸面、石墨墨色、朱红小印和鱼仔人格，与 `music.yeuxark.com` / KAZAM 的硬边框、错位阴影、双栏仪器感和高密度控制融合为一个本地优先的工作台。**Nocturne（深色）是 TUI、CLI 和网页的默认主题；Paper 是同一系统的浅色切换。**
+它把暖灰纸面、石墨墨色、朱红小印和鱼仔人格，收束为一个本地优先的工作台。**Paper 是 TUI 与 CLI 的默认主题；Nocturne 是同一系统的夜墨切换。**
 
 ## 文件
 
@@ -42,4 +42,4 @@ open docs/design/yeux-harness-concept.html
 
 设计系统只负责呈现，不改变 Rust authority、policy、ledger、replay 或 JSONL 的语义。主题可以改变表面色与密度，但不能重新定义 trust、approval、danger、unknown 的含义；动画也不能改变事件排序或触发任何外部调用。终端位图始终是可选增强，不能成为核心 TTY 或安全决策的依赖。
 
-当前 line renderer 已建立 `Theme`、`TerminalCapabilities`、Unicode/ASCII 资产和结构化 approval。下一步是把它迁移为完整的 Session Bar / Timeline / Approval / Inspector presenter；OpenTUI screen mode 继续保留当前纯文本路径作为 `--plain`、非 TTY 和故障恢复后备。
+当前 line renderer 已建立 `Theme`、`TerminalCapabilities`、Unicode/ASCII 资产和四个纯 presenter：Session Bar、Timeline、Approval Gate、Inspector。OpenTUI screen mode 继续保留当前纯文本路径作为 `--plain`、非 TTY 和故障恢复后备；审批与 unknown 轨迹由 `packages/tui/fixtures/` 中的只读 fixtures 覆盖。

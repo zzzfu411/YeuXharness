@@ -4,7 +4,7 @@
 **状态：v1 设计基线**  
 **适用：CLI、TUI、文档、网站与未来桌面端**
 
-> 纸的温度，仪器的纪律。
+> 纸本工作台，仪器只取密度。
 
 YeuX Harness 不应长成常见的“黑底霓虹 AI 控制台”，也不应把个人主页的纸纹直接贴到终端上。它的核心形象是一件安静、触觉化、但读数精确的本地仪器：会留下墨迹，也会保留每一次事件的序号、来源和边界。
 
@@ -13,7 +13,7 @@ YeuX Harness 不应长成常见的“黑底霓虹 AI 控制台”，也不应把
 | 来源 | 保留 | 不直接复制 |
 | --- | --- | --- |
 | yeuxark.com | 暖灰纸面、石墨墨色、朱红小印、鱼仔、手绘轻微重描、低饱和、大片留白 | 毛笔字体不能进入代码正文；拼贴旋转不能影响数据对齐；纸纹不能降低终端可读性 |
-| music.yeuxark.com / KAZAM | 方正硬边、错位阴影、双栏仪器布局、强活动焦点、密集但直接的控制 | 不采用高饱和彩色按钮阵列；不把 emoji 当作核心图标；不让所有组件都有重边框 |
+| 外部仪器界面 | 方正硬边、错位阴影、双栏仪器布局、强活动焦点、密集但直接的控制 | 不采用高饱和彩色按钮阵列；不把 emoji 当作核心图标；不让所有组件都有重边框 |
 | YeuX Harness 自身 | ledger、seq、causation、replay、approval、sandbox、workspace identity | 安全语义不能被装饰隐藏；动画不能改变事件顺序；品牌不能伪装成模型输出 |
 
 最终融合不是“纸张 + 新粗野主义”的拼贴，而是：
@@ -78,11 +78,11 @@ Paper 继承 yeuxark.com 的暖灰纸色，但把功能色压低饱和度。正�
 
 ### 3.2 Nocturne / 夜墨主题
 
-Nocturne 吸收 KAZAM 的纯黑与藏青，但使用暖白墨色连接个人主页的纸面世界。
+Nocturne 使用夜墨与藏青，并以暖白墨色连接纸面世界。
 
 | Token | 色值 | 角色 |
 | --- | --- | --- |
-| `night.bg` | `#080909` | 主背景，接近墨黑而非蓝黑 |
+| `night.bg` | `#2A2733` | 夜墨背景，保留纸面层次 |
 | `night.surface` | `#101214` | 主面板 |
 | `night.raised` | `#171B1E` | 活动与浮层 |
 | `night.line` | `#3B4145` | 结构线 |
@@ -128,7 +128,7 @@ TUI 不控制用户终端字体，只控制层级：
 
 - 默认圆角为 `0–3px`。这是纸片、设备面板与终端，不是柔软 SaaS 卡片。
 - 基础结构使用 1px/单字符线；高风险审批可使用 2px/双线。
-- KAZAM 式错位阴影仅用于当前焦点、modal、selected tool 和 approval，不施加到每一项。
+- 硬边仪器式错位阴影仅用于当前焦点、modal、selected tool 和 approval，不施加到每一项。
 - Paper 主题允许极轻的噪点、暗角和纸面亮度起伏；内容区域不得出现影响小字号的高频纹理。
 - 手绘抖动只用于鱼仔、品牌分隔线、空状态或一次性入场；表格、代码、路径、digest 与审批边界必须完全笔直。
 - 照片和插图仅用于文档、Welcome 与未来桌面端；核心 TUI 不依赖位图。
@@ -196,7 +196,7 @@ AppShell
 一行完成身份确认：
 
 ```text
-><  YeuX · Harness   workshop/7f2a   BUILD   local/qwen   socket ✓
+><  YeuX · Harness   workshop/7f2a   OBSERVE   local/qwen   socket ✓
 ```
 
 - `workshop/7f2a` 中的短码来自 workspace identity，不是随机装饰。
@@ -235,12 +235,12 @@ YOU  14:32:08
 ### 8.4 Approval Drawer
 
 ```text
-┏ approval · workspace.apply_patch @1
-┃ target    crates/yeux-core/src/approval.rs
-┃ effects   write 1 file · process none · network none
-┃ binding   d42f…91c8 · expires 45s
-┃ reason    apply the reviewed patch
-┗ [a] allow once    [d] deny (default)    [i] inspect
+╔═ approval · workspace.apply_patch @1
+║ target    crates/yeux-core/src/approval.rs
+║ effects   write 1 file · process none · network none
+║ binding   d42f…91c8 · expires 45s
+║ reason    apply the reviewed patch
+╚═ [a] allow once    [d] deny (default)    [i] inspect
 ```
 
 - 默认选择永远是 deny。
@@ -268,7 +268,7 @@ YOU  14:32:08
 v1 建议只提供四套，避免无限主题破坏语义：
 
 1. `paper`：默认图形主题；暖灰纸、墨色、藏青信号、朱红审批。
-2. `nocturne`：默认夜间主题；墨黑、暖白、藏青错位阴影。
+2. `nocturne`：夜间切换；夜墨、暖白、藏青错位阴影。
 3. `mono`：只使用终端前景色、粗细与 glyph。
 4. `high-contrast`：遵循终端背景，显著边框与更少层级色。
 
@@ -322,7 +322,6 @@ v1 建议只提供四套，避免无限主题破坏语义：
 - 个人站视觉源：`/Users/zfu/Documents/develop/win/yeuxpage/design/art-direction.md`
 - 个人站设计 token：`/Users/zfu/Documents/develop/win/yeuxpage/assets/css/paper.css`
 - 个人站鱼仔动效：`/Users/zfu/Documents/develop/win/yeuxpage/assets/js/ink.js`
-- KAZAM 公开仓库：`zzzfu411/kazamusic-web`
 - Harness 当前 TUI：`packages/tui/src/renderer.ts`、`packages/tui/src/prompter.ts`、`packages/tui/src/app.ts`
 
 这些来源提供设计 DNA；YeuX Harness 的产品语义、安全颜色和信息层级以本文件为准。
