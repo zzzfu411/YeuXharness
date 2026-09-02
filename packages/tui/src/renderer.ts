@@ -164,7 +164,7 @@ export class EventRenderer {
         this.#capabilities,
         this.#theme,
       ),
-      paintInk: (chunk) => paint(chunk, "focus", this.#capabilities, this.#theme),
+      paintInk: (chunk) => paint(chunk, "text", this.#capabilities, this.#theme),
       catchUp: () => this.#inFlight > 1,
     });
     this.#write("\n");

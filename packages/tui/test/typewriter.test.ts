@@ -188,7 +188,7 @@ describe("live model typewriter", () => {
     }
   });
 
-  it("paints a graphite vertical caret without a block or bell", async () => {
+  it("paints walking ink and caret in graphite while STREAMING stays focus", async () => {
     let output = "";
     const renderer = new EventRenderer({
       capabilities: LIVE,
@@ -197,6 +197,8 @@ describe("live model typewriter", () => {
       },
     });
     await renderer.render(modelEvent("H"));
+    expect(output).toContain("STREAMING");
+    expect(output).toContain("38;2;49;86;107");
     expect(output).toContain("38;2;27;24;21");
     expect(output).toContain(TYPEWRITER_CARET);
     expect(output).not.toContain("█");
