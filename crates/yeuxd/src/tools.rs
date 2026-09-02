@@ -674,9 +674,9 @@ impl ToolRegistry {
         self.execute_with_control(permit, None)
     }
 
-    /// Async counterpart used by `process.run`. Read and mutation adapters
-    /// retain their synchronous implementation; process execution awaits the
-    /// runtime supervisor without creating a nested Tokio runtime.
+    /// Async counterpart used by `process.run` and `workspace.apply_patch`.
+    /// Those adapters refuse [`Self::execute`] so mutations cannot run
+    /// in-process; they must await the runtime supervisor.
     pub async fn execute_async(
         &self,
         permit: ExecutionPermit,
@@ -2424,8 +2424,8 @@ mod tests {
         assert_eq!(fs::read_to_string(path).unwrap(), "external change\n");
     }
 
-    #[test]
-    fn hidden_mutation_can_only_execute_through_an_execution_permit() {
+    #[tokio::test]
+    async fn hidden_mutation_can_only_execute_through_an_execution_permit() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("hello.txt");
         fs::write(&path, "before\n").unwrap();
@@ -2434,6 +2434,11 @@ mod tests {
         let read = tools
             .execute(WORKSPACE_READ_TOOL_ID, json!({"path": "hello.txt"}))
             .unwrap();
+        let arguments = json!({
+            "path": "hello.txt",
+            "base_revision": read["revision"],
+            "replacement": "after\n"
+        });
         let registry = ToolRegistry::workspace_built_ins_with_config(
             tools,
             BuiltInToolRegistryConfig::read_only().with_hidden_workspace_mutations(),
@@ -2443,11 +2448,7 @@ mod tests {
             .plan(
                 WORKSPACE_APPLY_PATCH_TOOL_ID,
                 WORKSPACE_TOOL_VERSION,
-                json!({
-                    "path": "hello.txt",
-                    "base_revision": read["revision"],
-                    "replacement": "after\n"
-                }),
+                arguments.clone(),
             )
             .unwrap();
         assert_eq!(plan.effects().idempotency, Idempotency::IdempotentWithKey);
@@ -2455,7 +2456,25 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "before\n");
 
         let permit = mint_test_permit(registry.revalidate(plan).unwrap());
-        let output = registry.execute(permit).unwrap();
+        assert!(matches!(
+            registry.execute(permit),
+            Err(ToolRegistryError::ProcessRequiresAsync)
+        ));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "before\n");
+
+        if ProcessExecutor::detect().backend().name() == "unavailable" {
+            return;
+        }
+
+        let plan = registry
+            .plan(
+                WORKSPACE_APPLY_PATCH_TOOL_ID,
+                WORKSPACE_TOOL_VERSION,
+                arguments,
+            )
+            .unwrap();
+        let permit = mint_test_permit(registry.revalidate(plan).unwrap());
+        let output = registry.execute_async(permit).await.unwrap();
         assert_eq!(output.value()["path"], "hello.txt");
         assert_eq!(fs::read_to_string(path).unwrap(), "after\n");
     }
