@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import type { Readable } from "node:stream";
+import { Writable } from "node:stream";
 
 import {
   PROTOCOL_VERSION,
@@ -31,27 +33,55 @@ export interface ReplayOptions {
   readonly ascii?: boolean;
   readonly jsonl?: boolean;
   readonly write?: (text: string) => void;
+  /** Fixture stdin for `Prompter.approval()`; defaults to process.stdin. */
+  readonly input?: Readable;
+}
+
+function writableFromWrite(write: (text: string) => void): Writable {
+  return new Writable({
+    decodeStrings: false,
+    write(chunk, encoding, callback) {
+      const text = typeof chunk === "string"
+        ? chunk
+        : chunk.toString(encoding === "buffer" ? "utf8" : encoding);
+      write(text);
+      callback();
+    },
+  });
 }
 
 /** Replay inert JSONL events without opening a daemon or touching the workspace. */
-export function replayFixture(path: string, options: ReplayOptions = {}): number {
+export async function replayFixture(path: string, options: ReplayOptions = {}): Promise<number> {
   const jsonl = options.jsonl ?? false;
-  const write = options.write ?? ((text: string) => process.stdout.write(text));
+  const write = options.write ?? ((text: string) => {
+    process.stdout.write(text);
+  });
   const capabilities = detectTerminalCapabilities(
     options.ascii === undefined ? {} : { ascii: options.ascii },
   );
   const renderer = new EventRenderer({ jsonl, capabilities, write });
+  const output = writableFromWrite(write);
+  const prompter = jsonl
+    ? undefined
+    : new TerminalPrompter(options.input ?? process.stdin, output, {
+        capabilities,
+        ...(options.ascii === undefined ? {} : { ascii: options.ascii }),
+      });
   const lines = readFileSync(path, "utf8").split(/\r?\n/);
-  for (const line of lines) {
-    if (line.trim().length === 0) continue;
-    const event = JSON.parse(line) as EventEnvelope;
-    renderer.render(event);
-    if (!jsonl) {
-      const approval = approvalRequestForFixtureEvent(event);
-      if (approval !== undefined) write(`${formatApprovalGate(approval, { capabilities })}\n`);
+  try {
+    for (const line of lines) {
+      if (line.trim().length === 0) continue;
+      const event = JSON.parse(line) as EventEnvelope;
+      renderer.render(event);
+      if (prompter !== undefined) {
+        const approval = approvalRequestForFixtureEvent(event);
+        if (approval !== undefined) await prompter.approval(approval);
+      }
     }
+    return 0;
+  } finally {
+    prompter?.close();
   }
-  return 0;
 }
 
 function approvalRequestForFixtureEvent(
