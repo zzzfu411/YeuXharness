@@ -176,8 +176,8 @@ describe("paper presenters", () => {
     expect(output).toContain("[d] DENY (default)");
     expect(output).toContain("[i] INSPECT");
     expect(output).toContain("`- [a] ALLOW ONCE   [d] DENY (default)   [i] INSPECT -+");
-    expect(output).toMatch(/\+- \? APPROVAL REQUIRED[^\n]*\+/);
     expect(output).toContain("approval:");
+    expect(output).toMatch(/\+- \? APPROVAL REQUIRED[^\n]*\+/);
   });
 
   it("keeps unknown visible after the turn fails", () => {
