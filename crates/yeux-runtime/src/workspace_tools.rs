@@ -1997,7 +1997,7 @@ mod tests {
     #[test]
     fn diff_summary_is_stable_for_noop_empty_and_unicode_edits() {
         assert_eq!(
-            WorkspaceDiffSummary::between(b"", b""),
+            WorkspaceDiffSummary::for_path("file", b"", b""),
             WorkspaceDiffSummary {
                 changed: false,
                 previous_bytes: 0,
@@ -2014,7 +2014,8 @@ mod tests {
                 unified_diff: String::from("--- a/file\n+++ b/file\n"),
             }
         );
-        let summary = WorkspaceDiffSummary::between("甲\n乙".as_bytes(), "甲\n丙".as_bytes());
+        let summary =
+            WorkspaceDiffSummary::for_path("file", "甲\n乙".as_bytes(), "甲\n丙".as_bytes());
         assert!(summary.changed);
         assert_eq!(summary.previous_lines, 2);
         assert_eq!(summary.replacement_lines, 2);
@@ -2025,7 +2026,7 @@ mod tests {
 
     #[test]
     fn diff_summary_unified_diff_contains_hunk_markers() {
-        let summary = WorkspaceDiffSummary::between(b"alpha\nbeta\n", b"alpha\ngamma\n");
+        let summary = WorkspaceDiffSummary::for_path("file", b"alpha\nbeta\n", b"alpha\ngamma\n");
         assert!(summary.unified_diff.contains("@@"));
         assert!(summary.unified_diff.contains("-beta"));
         assert!(summary.unified_diff.contains("+gamma"));
