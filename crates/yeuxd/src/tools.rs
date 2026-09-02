@@ -352,28 +352,32 @@ impl ToolRegistry {
             ),
         ];
         if config.register_hidden_workspace_mutations || config.register_hidden_process {
-        let shared_executor = process_executor.unwrap_or_else(|| Arc::new(ProcessExecutor::detect()));
-        if config.register_hidden_workspace_mutations {
-            let spec = workspace_apply_patch_spec();
-            let adapter = Arc::new(WorkspaceMutationAdapter::new(
-                Arc::clone(&tools),
-                Arc::clone(&shared_executor),
-            ));
-            registrations.push(if config.advertise_workspace_mutations {
-                RegisteredTool::advertised(spec, adapter)
-            } else {
-                RegisteredTool::hidden(spec, adapter)
-            });
-        }
-        if config.register_hidden_process {
-            let spec = process_run_spec();
-            let adapter = Arc::new(ProcessAdapter::new(Arc::clone(&tools), Arc::clone(&shared_executor)));
-            registrations.push(if config.advertise_process {
-                RegisteredTool::advertised(spec, adapter)
-            } else {
-                RegisteredTool::hidden(spec, adapter)
-            });
-        }
+            let shared_executor =
+                process_executor.unwrap_or_else(|| Arc::new(ProcessExecutor::detect()));
+            if config.register_hidden_workspace_mutations {
+                let spec = workspace_apply_patch_spec();
+                let adapter = Arc::new(WorkspaceMutationAdapter::new(
+                    Arc::clone(&tools),
+                    Arc::clone(&shared_executor),
+                ));
+                registrations.push(if config.advertise_workspace_mutations {
+                    RegisteredTool::advertised(spec, adapter)
+                } else {
+                    RegisteredTool::hidden(spec, adapter)
+                });
+            }
+            if config.register_hidden_process {
+                let spec = process_run_spec();
+                let adapter = Arc::new(ProcessAdapter::new(
+                    Arc::clone(&tools),
+                    Arc::clone(&shared_executor),
+                ));
+                registrations.push(if config.advertise_process {
+                    RegisteredTool::advertised(spec, adapter)
+                } else {
+                    RegisteredTool::hidden(spec, adapter)
+                });
+            }
         }
         Self::try_new(registrations)
     }
@@ -1195,7 +1199,6 @@ impl SealedToolAdapter for WorkspaceMutationAdapter {
     }
 }
 
-
 async fn sandboxed_apply_patch(
     executor: &ProcessExecutor,
     workspace: &yeux_runtime::Workspace,
@@ -1241,7 +1244,9 @@ async fn sandboxed_apply_patch(
             source: ProcessError::Io(std::io::Error::other("sandboxed apply_patch failed")),
         });
     }
-    let written = workspace.read(path).map_err(|error| WorkspaceMutationAdapter::error(error.into()))?;
+    let written = workspace
+        .read(path)
+        .map_err(|error| WorkspaceMutationAdapter::error(error.into()))?;
     let expected = blake3::hash(replacement.as_bytes()).to_hex().to_string();
     if written.revision != expected {
         return Err(ToolRegistryError::InvalidProcessArguments(

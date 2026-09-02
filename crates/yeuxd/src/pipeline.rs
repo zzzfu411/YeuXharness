@@ -606,11 +606,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let pipeline = InvocationPipeline::new(
-            registry,
-            backend,
-            Arc::new(NoCredentialBroker),
-        );
+        let pipeline = InvocationPipeline::new(registry, backend, Arc::new(NoCredentialBroker));
         let base = blake3::hash(b"before\n").to_hex().to_string();
         let prepared = pipeline
             .prepare(
