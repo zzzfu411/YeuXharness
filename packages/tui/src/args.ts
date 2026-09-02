@@ -26,7 +26,8 @@ export function parseArgs(argv: readonly string[], processCwd = process.cwd()): 
   let socketPath: string | undefined;
   let daemonCommand = process.env.YEUX_DAEMON ?? "yeuxd";
   let threadId: string | undefined;
-  let mode: RuntimeMode = "build";
+  // The bundled tool surface is read-only, so an unqualified turn is observe.
+  let mode: RuntimeMode = "observe";
   const positionals: string[] = [];
 
   const readValue = (index: number, option: string): string => {
@@ -133,7 +134,7 @@ Options:
   -p, --prompt <text>   Prompt for run mode
       --cwd <path>      Workspace root (default: current directory)
       --thread <id>     Resume an existing thread
-      --mode <mode>     observe, build, or operate (default: build)
+      --mode <mode>     observe, build, or operate (default: observe; read-only tools)
       --socket <path>   Prefer this Unix socket, then fall back to stdio
       --daemon <path>   yeuxd executable (default: yeuxd)
       --ascii           Use copy-safe ASCII rails and status glyphs

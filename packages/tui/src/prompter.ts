@@ -77,40 +77,17 @@ export class TerminalPrompter {
 
   public async approval(params: ApprovalRequestParams): Promise<ApprovalRequestResult> {
     const safe = normalizeApprovalRequest(params);
-    const tool = sanitizeTerminalLine(
-      `${safe.invocation.tool_id}@${safe.invocation.tool_version}`,
-    );
-    const explanation = sanitizeTerminalText(safe.explanation);
-    const invocationId = sanitizeTerminalLine(safe.invocation.invocation_id);
-    const digest = sanitizeTerminalLine(safe.invocation.effect_digest);
-    const safeEffects = sanitizeTerminalText(JSON.stringify(safe.invocation.effects, null, 2));
     const safeArguments = sanitizeTerminalText(
       JSON.stringify(safe.invocation.normalized_arguments, null, 2),
     );
-    const border = glyph("approvalStart", this.#capabilities);
-    const rail = glyph("approvalRail", this.#capabilities);
-    const end = glyph("approvalEnd", this.#capabilities);
-    const lines = framedLines(safeEffects, rail);
-    const header = paint(
-      `${border} ${glyph("approval", this.#capabilities)} APPROVAL REQUIRED · ${tool}`,
-      "approval",
-      this.#capabilities,
-      this.#theme,
-    );
-    const footer = paint(
-      `${end} [a] ALLOW ONCE   [d] DENY (default)   [i] INSPECT`,
-      "approval",
-      this.#capabilities,
-      this.#theme,
-    );
     this.#output.write(
-      `\n${header}\n` +
-      `${framedLines(explanation, rail)}\n` +
-      `${rail} binding ${digest} · invocation ${invocationId}\n` +
-      `${rail} effects\n` +
-      `${lines}\n` +
-      `${footer}\n`,
+      `\n${formatApprovalGate(safe, {
+        capabilities: this.#capabilities,
+        theme: this.#theme,
+      })}\n`,
     );
+
+    const rail = glyph("approvalRail", this.#capabilities);
 
     while (true) {
       const choice = parseApprovalChoice(
@@ -147,7 +124,74 @@ export class TerminalPrompter {
   }
 }
 
+export interface ApprovalGateFormatOptions {
+  readonly capabilities?: TerminalCapabilities;
+  readonly theme?: ThemeName;
+}
+
+/**
+ * The gate is a presenter-only boundary. It is deliberately legible without
+ * colour: a double-line marker, a risk glyph, explicit effects, and a deny
+ * default all survive ASCII and NO_COLOR output.
+ */
+export function formatApprovalGate(
+  params: ApprovalRequestParams,
+  options: ApprovalGateFormatOptions = {},
+): string {
+  const safe = normalizeApprovalRequest(params);
+  const capabilities = options.capabilities ?? detectTerminalCapabilities();
+  const theme = options.theme ?? DEFAULT_THEME;
+  const tool = sanitizeTerminalLine(`${safe.invocation.tool_id}@${safe.invocation.tool_version}`);
+  const explanation = sanitizeTerminalText(safe.explanation);
+  const invocationId = sanitizeTerminalLine(safe.invocation.invocation_id);
+  const digest = sanitizeTerminalLine(safe.invocation.effect_digest);
+  const safeEffects = sanitizeTerminalText(JSON.stringify(safe.invocation.effects, null, 2));
+  const border = glyph("approvalStart", capabilities);
+  const rail = glyph("approvalRail", capabilities);
+  const end = glyph("approvalEnd", capabilities);
+  const header = `${border} ${glyph("approval", capabilities)} APPROVAL REQUIRED · ${tool}`;
+  const footer = `${end} [a] ALLOW ONCE   [d] DENY (default)   [i] INSPECT`;
+  const lines = [
+    header,
+    framedLines(explanation, rail),
+    `${rail} binding ${digest} · invocation ${invocationId}`,
+    `${rail} effects`,
+    framedLines(safeEffects, rail),
+    footer,
+  ];
+  return lines
+    .flatMap((line) => line.split("\n"))
+    .map((line) => paint(sanitizeTerminalLine(line), "approval", capabilities, theme))
+    .join("\n");
+}
+
+export const renderApprovalGate = formatApprovalGate;
+
 export type ApprovalChoice = "allow_once" | "deny" | "inspect";
+
+/** Read-only invocations never need to stop the model stream for a human vote. */
+export function isReadOnlyEffects(effects: unknown): boolean {
+  if (!isRecord(effects) || !("filesystem_read" in effects)) return false;
+  const record = effects as Record<string, unknown>;
+  const risky = [
+    "filesystem_write",
+    "filesystem_delete",
+    "network",
+    "secrets",
+    "external_write",
+    "external_writes",
+    "process",
+    "processes",
+  ];
+  if (risky.some((key) => hasEffect(record[key]))) return false;
+  return record.process !== true && !hasEffect(record.processes);
+}
+
+function hasEffect(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === "boolean") return value;
+  return value !== undefined && value !== null && value !== "";
+}
 
 export function parseApprovalChoice(input: string): ApprovalChoice {
   switch (input.trim().toLowerCase()) {

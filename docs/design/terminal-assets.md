@@ -2,7 +2,7 @@
 
 **状态：v1 设计需求（终端优先）**  
 **适用：`yeux` CLI、OpenTUI/TUI、`--plain` 行模式、无头 JSONL 的人类可读诊断**  
-**视觉方向：Nocturne / 黑墨仪器**
+**视觉方向：Paper / 纸本仪器**
 
 > 在黑色终端里保留纸上信号的温度，但让每一个边界、状态和因果关系都像仪器读数一样准确。
 
@@ -12,7 +12,7 @@
 
 YeuX 的终端不是“黑底霓虹 AI 聊天框”，而是一台本地的黑墨工作仪器：
 
-- **黑墨为底，纸白为字**：默认使用接近 `#080909` 的墨黑背景和略带暖色的 `#E2DED5` 主文字，不使用纯白大面积发光。
+- **夜墨为底，纸白为字**：夜墨使用 `#2A2733` 背景和略带暖色的 `#E2DED5` 主文字，不使用纯白大面积发光。
 - **一条时间轨，一份事实源**：Turn、Item、工具和 replay 共享垂直因果轨；`seq`、状态和时间保持稳定列位。
 - **朱红只表示需要判断的边界**：approval、外部写、危险、`unknown` 使用朱红或对应 glyph，不能把朱红当普通品牌按钮色。
 - **焦点像压痕，不像霓虹灯**：当前行用窄边框、反差或轻微错位阴影突出；不对每一行加发光、渐变或持续动画。
@@ -31,7 +31,7 @@ YeuX 的终端不是“黑底霓虹 AI 聊天框”，而是一台本地的黑�
 
 | 层级 | Token | 建议值 | 用途 |
 | --- | --- | --- | --- |
-| 0 | `night.bg` | `#080909` | 主背景、空白区 |
+| 0 | `night.bg` | `#2A2733` | 主背景、空白区 |
 | 1 | `night.surface` | `#101214` | Session、timeline 面板 |
 | 2 | `night.raised` | `#171B1E` | 当前行、抽屉、输入区 |
 | 3 | `night.line` | `#3B4145` | 分隔线、轨道、边框 |
@@ -222,19 +222,19 @@ ASCII 版本：
 120 列以上的首选形式：
 
 ```text
-><  YeuX / HARNESS   workshop/7f2a   BUILD   local/qwen   ↔ SOCKET CONNECTED
+><  YeuX / HARNESS   workshop/7f2a   OBSERVE   local/qwen   ↔ SOCKET CONNECTED
 ```
 
 80–119 列压缩为：
 
 ```text
->< YeuX  workshop/7f2a  BUILD  local/qwen  SOCKET OK
+>< YeuX  workshop/7f2a  OBSERVE  local/qwen  SOCKET OK
 ```
 
 小于 80 列时只保留不会改变权限判断的字段：
 
 ```text
->< BUILD · workshop/7f2a · OBSERVE=no
+>< OBSERVE · workshop/7f2a · READ-ONLY
 ```
 
 `workspace identity`、`trust`、`mode` 和 `approval` 不得因为窄屏被隐藏；provider、transport 和长 digest 可折叠到 Inspector。

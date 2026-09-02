@@ -36,12 +36,12 @@ export interface DetectTerminalCapabilitiesOptions {
   readonly reducedMotion?: boolean;
 }
 
-export const DEFAULT_THEME: ThemeName = "nocturne";
+/** Paper is the presenter surface: warm, quiet, and readable in a pipe. */
+export const DEFAULT_THEME: ThemeName = "paper";
 
 /**
- * Stable, copyable glyphs.  They are intentionally kept to characters that
- * are normally one terminal column wide.  `brandCompact` is the one
- * intentional two-character mark.
+ * Stable, copyable glyphs. Most are one terminal column wide; the brand mark
+ * and double-line approval corners intentionally use two columns.
  */
 export const UNICODE_GLYPHS = Object.freeze({
   brandCompact: "><",
@@ -54,9 +54,12 @@ export const UNICODE_GLYPHS = Object.freeze({
   branch: "├─",
   end: "└─",
   continuation: "│ ",
-  approvalStart: "┏",
-  approvalRail: "┃",
-  approvalEnd: "┗",
+  approvalStart: "╔═",
+  approvalHorizontal: "═",
+  approvalTopRight: "╗",
+  approvalRail: "║",
+  approvalEnd: "╚═",
+  approvalBottomRight: "╝",
   lightDivider: "┄",
   strongDivider: "━",
   beat: "·",
@@ -107,8 +110,11 @@ export const ASCII_GLYPHS = Object.freeze({
   end: "`-",
   continuation: "| ",
   approvalStart: "+-",
+  approvalHorizontal: "-",
+  approvalTopRight: "+",
   approvalRail: "|",
   approvalEnd: "`-",
+  approvalBottomRight: "+",
   lightDivider: "- -",
   strongDivider: "=",
   beat: ".",
@@ -187,7 +193,7 @@ export interface ThemePalette {
 }
 
 export const NOCTURNE_PALETTE: ThemePalette = Object.freeze({
-  background: "#080909",
+  background: "#2A2733",
   surface: "#101214",
   raised: "#171B1E",
   line: "#3B4145",
@@ -196,10 +202,10 @@ export const NOCTURNE_PALETTE: ThemePalette = Object.freeze({
   muted: "#99958D",
   focus: "#6C9AB3",
   focusDeep: "#173A52",
-  approval: "#D17968",
+  approval: "#8C3A2C",
   success: "#79A988",
   warning: "#D0AB61",
-  danger: "#D17968",
+  danger: "#8C3A2C",
 });
 
 export const PAPER_PALETTE: ThemePalette = Object.freeze({
@@ -311,19 +317,18 @@ export interface AnsiRoleToken {
 export const ANSI_RESET = "\u001b[0m";
 
 /**
- * Nocturne is the canonical terminal palette. Keeping its SGR values in one
- * exported table prevents renderers, prompts and future OpenTUI widgets from
- * inventing subtly different safety colours.
+ * The night palette keeps its SGR values in one exported table so renderers,
+ * prompts and future OpenTUI widgets share the same safety colours.
  */
 export const NOCTURNE_ANSI_TOKENS: Readonly<Record<ColorRole, AnsiRoleToken>> =
   Object.freeze({
     muted: { ansi16: "2", ansi256: 245, rgb: [153, 149, 141] },
     text: { ansi16: "0", ansi256: 253, rgb: [226, 222, 213] },
     focus: { ansi16: "36", ansi256: 74, rgb: [108, 154, 179] },
-    approval: { ansi16: "31", ansi256: 174, rgb: [209, 121, 104] },
+    approval: { ansi16: "31", ansi256: 88, rgb: [140, 58, 44] },
     success: { ansi16: "32", ansi256: 108, rgb: [121, 169, 136] },
     warning: { ansi16: "33", ansi256: 179, rgb: [208, 171, 97] },
-    danger: { ansi16: "31", ansi256: 174, rgb: [209, 121, 104] },
+    danger: { ansi16: "31", ansi256: 88, rgb: [140, 58, 44] },
   });
 
 const PAPER_ANSI_256_CODES: Readonly<Record<ColorRole, number>> = Object.freeze({

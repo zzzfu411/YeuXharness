@@ -10,7 +10,7 @@ import {
 
 import type { TuiOptions } from "./args.js";
 import { detectTerminalCapabilities } from "./aesthetic.js";
-import { TerminalPrompter } from "./prompter.js";
+import { isReadOnlyEffects, TerminalPrompter } from "./prompter.js";
 import { EventRenderer } from "./renderer.js";
 import { sanitizeTerminalText } from "./terminal.js";
 import { connectRuntime, type RuntimeConnection } from "./transport.js";
@@ -43,6 +43,40 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
       cwd: options.cwd,
       ...(options.threadId === undefined ? {} : { threadId: options.threadId }),
     });
+    const models = await session.listModels();
+    const model = models[0] === undefined
+      ? "unconfigured"
+      : `${models[0].provider}/${models[0].model}`;
+    renderer.renderSessionBar({
+      cwd: session.workspaceRoot ?? options.cwd,
+      thread: threadId,
+      mode: options.mode,
+      model,
+      ...(session.workspaceTrust === undefined ? {} : { trust: session.workspaceTrust }),
+      transport: connection.kind,
+    });
+    const presenterPolicy = {
+      mode: options.mode,
+      filesystem_read: [session.workspaceRoot ?? options.cwd],
+      filesystem_write: [],
+      filesystem_delete: [],
+      process: false,
+      network: [],
+      secrets: [],
+      external_write: [],
+    } as const;
+    renderer.renderInspector(presenterPolicy);
+
+    // A provider-less daemon is a valid local runtime, but it is not an
+    // interactive prompt. Keep the state visible and fail before `yeux ›`.
+    if (models.length === 0) {
+      renderer.renderDiagnostic({
+        code: "provider_unconfigured",
+        message: "no model provider is configured; configure a provider before starting a turn",
+        recoverable: false,
+      });
+      return { exitCode: 1, threadId };
+    }
 
     let signalCount = 0;
     let forcedClose = false;
@@ -69,6 +103,7 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
     try {
       if (options.command === "run") {
         const result = await session.runTurn(threadId, options.prompt ?? "", options.mode);
+        renderer.renderInspector(presenterPolicy);
         return {
           exitCode: exitCodeFor(result),
           threadId,
@@ -82,6 +117,7 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
         if (prompt === "/exit" || prompt === "/quit") break;
         if (prompt.length === 0) continue;
         const result = await session.runTurn(threadId, prompt, options.mode);
+        renderer.renderInspector(presenterPolicy);
         exitCode = exitCodeFor(result);
       }
       return { exitCode, threadId };
@@ -107,6 +143,7 @@ class RuntimeSession {
     { readonly resolve: (event: EventEnvelope) => void; readonly reject: (error: Error) => void }
   >();
   #workspaceRoot: string | undefined;
+  #workspaceTrust: string | undefined;
   #activeTurn: { readonly threadId: string; readonly turnId: string } | undefined;
   #interruptPromise: Promise<boolean> | undefined;
 
@@ -138,6 +175,9 @@ class RuntimeSession {
       this.#terminalWaiters.clear();
     });
     this.#client.handleRequest("approval/request", async (params): Promise<ApprovalRequestResult> => {
+      if (isReadOnlyEffects(params.invocation.effects)) {
+        return { approved: true };
+      }
       if (this.#prompter === undefined) {
         return { approved: false };
       }
@@ -168,6 +208,11 @@ class RuntimeSession {
     }
   }
 
+  public async listModels(): Promise<readonly { readonly provider: string; readonly model: string }[]> {
+    const result = await this.#client.command("model/list", {});
+    return result.models;
+  }
+
   public async openThread(options: {
     readonly cwd: string;
     readonly threadId?: string;
@@ -180,6 +225,8 @@ class RuntimeSession {
         workspaceId: resumed.thread.workspace_id,
       });
       this.#workspaceRoot = workspace.workspace.root;
+      this.#workspaceTrust = workspace.workspace.trust;
+      this.#renderer.rememberEvents(resumed.events);
       await this.#client.command("thread/subscribe", {
         threadId: resumed.thread.id,
         afterSeq: resumed.thread.last_seq,
@@ -189,6 +236,7 @@ class RuntimeSession {
 
     const workspace = await this.#client.command("workspace/open", { path: options.cwd });
     this.#workspaceRoot = workspace.workspace.root;
+    this.#workspaceTrust = workspace.workspace.trust;
     const created = await this.#client.command("thread/start", {
       workspaceId: workspace.workspace.id,
     });
@@ -201,6 +249,14 @@ class RuntimeSession {
 
   public get hasActiveTurn(): boolean {
     return this.#activeTurn !== undefined;
+  }
+
+  public get workspaceTrust(): string | undefined {
+    return this.#workspaceTrust;
+  }
+
+  public get workspaceRoot(): string | undefined {
+    return this.#workspaceRoot;
   }
 
   public async interruptActiveTurn(reason?: string): Promise<boolean> {
