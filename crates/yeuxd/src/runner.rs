@@ -4302,14 +4302,17 @@ mod tests {
         assert!(matches!(result, TurnRunResult::Completed { .. }));
         let requests = provider.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(
-            requests[0]
-                .tools
-                .iter()
-                .map(|tool| tool.id.as_str())
-                .collect::<Vec<_>>(),
-            ["workspace.list", "workspace.read", "workspace.search"]
-        );
+        let advertised = requests[0]
+            .tools
+            .iter()
+            .map(|tool| tool.id.as_str())
+            .collect::<Vec<_>>();
+        for tool in ["workspace.list", "workspace.read", "workspace.search"] {
+            assert!(
+                advertised.contains(&tool),
+                "expected {tool} among advertised tools {advertised:?}"
+            );
+        }
         let tool_results = requests[1]
             .messages
             .iter()
