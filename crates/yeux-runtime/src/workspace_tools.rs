@@ -794,11 +794,8 @@ impl WorkspaceTools {
         }
         validate_patch_target_utf8(&before.relative_path, &before.bytes)?;
         let path = tool_path(&before.relative_path)?;
-        let diff_summary = WorkspaceDiffSummary::for_path(
-            &path,
-            &before.bytes,
-            arguments.replacement.as_bytes(),
-        );
+        let diff_summary =
+            WorkspaceDiffSummary::for_path(&path, &before.bytes, arguments.replacement.as_bytes());
         debug_assert_eq!(diff_summary, prepared.diff_summary);
 
         // The result is deterministic from the validated base and replacement.
