@@ -12,3 +12,5 @@ Replay the approval fixture, including its rendered 朱印 gate, with:
 `paper-m2-cannot-bypass.jsonl` records the M2 fail-closed boundary: a write
 proposal waits for approval and cannot reach execution when the required OS
 sandbox is unavailable.
+
+`paper-m2-apply-diff.jsonl` is an allowed write with a unified hunk so `[i]`, Inspector, and the completed timeline can show `--- a/src/app.ts` instead of JSON arguments.

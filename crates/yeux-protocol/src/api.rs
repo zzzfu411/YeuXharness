@@ -323,6 +323,8 @@ pub type JobRunResult = JobResult;
 pub struct ApprovalRequestParams {
     pub invocation: PreparedInvocation,
     pub explanation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unified_diff: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { Readable } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -209,5 +209,43 @@ describe("paper presenters", () => {
       },
       events: [],
     }, { capabilities: ASCII_CAPS })).toContain("POLICY · MODE OBSERVE · filesystem_read /tmp/ws · filesystem_write none");
+  });
+
+  it("replays apply_patch unified diffs on inspect, inspector, and completed timeline", async () => {
+    const events = loadFixture("paper-m2-apply-diff.jsonl");
+    const timeline = renderFixture("paper-m2-apply-diff.jsonl");
+    expect(timeline).toContain("TOOL COMPLETED");
+    expect(timeline).toContain("TOOL RESULT");
+    expect(timeline).toContain("--- a/src/app.ts");
+    expect(timeline).toContain("-const old");
+    expect(timeline).toContain("+const next");
+
+    const inspector = formatInspector({ events }, { capabilities: ASCII_CAPS });
+    expect(inspector).toContain("UNIFIED DIFF");
+    expect(inspector).toContain("--- a/src/app.ts");
+    expect(inspector).toContain("-const old");
+    expect(inspector).toContain("+const next");
+
+    let output = "";
+    const input = new PassThrough();
+    const replay = replayFixture(join(fixtureDir, "paper-m2-apply-diff.jsonl"), {
+      ascii: true,
+      input,
+      write: (text) => { output += text; },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    input.write("i\n");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    input.write("d\n");
+    const status = await replay;
+    expect(status).toBe(0);
+    expect(output).toContain("INSPECT · UNIFIED DIFF");
+    expect(output).toContain("--- a/src/app.ts");
+    expect(output).toContain("-const old");
+    expect(output).toContain("+const next");
+    expect(output).toContain("TOOL COMPLETED");
+    expect(output).toContain("[a] ALLOW ONCE");
+    expect(output).toContain("[d] DENY (default)");
+    expect(output).toContain("[i] INSPECT");
   });
 });

@@ -293,9 +293,19 @@ impl InvocationPipeline {
         invocation: &PreparedInvocation,
         explanation: impl Into<String>,
     ) -> ApprovalRequestParams {
+        let unified_diff = self
+            .registry
+            .plan(
+                &invocation.tool_id,
+                &invocation.tool_version,
+                invocation.normalized_arguments.clone(),
+            )
+            .ok()
+            .and_then(|plan| plan.unified_diff());
         ApprovalRequestParams {
             invocation: invocation.clone(),
             explanation: explanation.into(),
+            unified_diff,
         }
     }
 

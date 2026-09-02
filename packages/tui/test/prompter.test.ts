@@ -165,4 +165,43 @@ describe("TerminalPrompter", () => {
     expect(gate).toContain("[d] DENY (default)");
     expect(gate).toContain("[i] INSPECT");
   });
+
+  it("inspects a unified diff when the approval payload includes one", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    output.setEncoding("utf8");
+    let rendered = "";
+    output.on("data", (chunk: string) => {
+      rendered += chunk;
+    });
+    const prompter = new TerminalPrompter(input, output, {
+      isTTY: true,
+      env: { TERM: "dumb", LANG: "en_US.UTF-8" },
+    });
+
+    const resultPromise = prompter.approval({
+      invocation: {
+        invocation_id: "invocation-diff",
+        tool_id: "workspace.apply_patch",
+        tool_version: "1.0",
+        effects: { filesystem_write: [{ path: "src/app.ts" }] },
+        effect_digest: "d42f91c8",
+        normalized_arguments: { path: "src/app.ts" },
+      },
+      explanation: "Write one file",
+      unifiedDiff: "--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n",
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    input.write("i\n");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    input.write("\n");
+
+    await expect(resultPromise).resolves.toEqual({ approved: false });
+    prompter.close();
+    expect(rendered).toContain("INSPECT · UNIFIED DIFF");
+    expect(rendered).toContain("--- a/src/app.ts");
+    expect(rendered).toContain("-old");
+    expect(rendered).toContain("+new");
+    expect(rendered).not.toContain("INSPECT · NORMALIZED ARGUMENTS");
+  });
 });

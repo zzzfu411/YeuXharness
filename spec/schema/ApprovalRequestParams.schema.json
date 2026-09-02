@@ -12,6 +12,12 @@
     },
     "invocation": {
       "$ref": "#/definitions/PreparedInvocation"
+    },
+    "unifiedDiff": {
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "definitions": {

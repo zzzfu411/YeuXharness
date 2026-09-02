@@ -221,8 +221,19 @@ export function formatInspector(
       lines.push(`  ${sequenceLabel(event.seq)} ${glyph("rail", capabilities)} ${singleLine(event.kind)}${summary === undefined ? "" : ` · ${singleLine(summary)}`}`);
     }
   }
+  const diffStart = lines.length;
+  const hunk = latestUnifiedDiff(state.events);
+  if (hunk !== undefined) {
+    lines.push("UNIFIED DIFF");
+    lines.push(...splitDiffLines(hunk).map((line) => `  ${line}`));
+  }
   return lines
-    .map((line, index) => paint(sanitizeTerminalLine(line), index === 0 ? "focus" : "muted", capabilities, theme))
+    .map((line, index) => paint(
+      index > diffStart ? sanitizeTerminalText(line) : sanitizeTerminalLine(line),
+      index === 0 ? "focus" : "muted",
+      capabilities,
+      theme,
+    ))
     .join("\n");
 }
 
@@ -410,7 +421,7 @@ export function formatAestheticEvent(
         true,
       );
     }
-    return timelineLine(
+    const completed = timelineLine(
       seq,
       event,
       glyph("rail", capabilities),
@@ -420,6 +431,30 @@ export function formatAestheticEvent(
       theme,
       true,
     );
+    if (state === "COMPLETED") {
+      const hunk = extractUnifiedDiff(event.payload);
+      if (hunk !== undefined) {
+        return `${completed}\n${formatDiffBlock(hunk, capabilities, theme)}`;
+      }
+    }
+    return completed;
+  }
+
+  if (event.kind === "item/added") {
+    const hunk = extractUnifiedDiff(event.payload);
+    if (hunk !== undefined) {
+      const header = timelineLine(
+        seq,
+        event,
+        glyph("rail", capabilities),
+        "TOOL RESULT",
+        "muted",
+        capabilities,
+        theme,
+        true,
+      );
+      return `${header}\n${formatDiffBlock(hunk, capabilities, theme)}`;
+    }
   }
 
   if (event.kind === "tool/reconciled") {
@@ -500,6 +535,66 @@ export function formatAestheticModelEvent(
 
 export const renderTimelineEvent = formatAestheticEvent;
 export const formatTimelineEvent = formatAestheticEvent;
+
+export function extractUnifiedDiff(
+  value: unknown,
+  seen: Set<object> = new Set(),
+  depth = 0,
+): string | undefined {
+  if (depth > 12) return undefined;
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 32)) {
+      const found = extractUnifiedDiff(item, seen, depth + 1);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (typeof value !== "object" || value === null) return undefined;
+  if (seen.has(value)) return undefined;
+  seen.add(value);
+  const record = value as Record<string, unknown>;
+  for (const key of ["unified_diff", "unifiedDiff"] as const) {
+    const candidate = record[key];
+    if (typeof candidate === "string" && candidate.trim() !== "") {
+      return candidate.length > 256 * 1024 ? candidate.slice(0, 256 * 1024) : candidate;
+    }
+  }
+  let scanned = 0;
+  for (const [, nested] of Object.entries(record)) {
+    if (typeof nested === "string" && nested.length > 64 * 1024) continue;
+    scanned += 1;
+    if (scanned > 32) break;
+    const found = extractUnifiedDiff(nested, seen, depth + 1);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+function latestUnifiedDiff(events: readonly EventEnvelope[]): string | undefined {
+  let found: string | undefined;
+  for (const event of events) {
+    const hunk = extractUnifiedDiff(event.payload);
+    if (hunk !== undefined) found = hunk;
+  }
+  return found;
+}
+
+function splitDiffLines(hunk: string): string[] {
+  const lines = hunk.split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
+}
+
+function formatDiffBlock(
+  hunk: string,
+  capabilities: TerminalCapabilities,
+  theme: ThemeName,
+): string {
+  const rail = glyph("rail", capabilities);
+  return splitDiffLines(hunk)
+    .map((line) => paint(`${rail} ${sanitizeTerminalText(line)}`, "muted", capabilities, theme))
+    .join("\n");
+}
 
 function payloadText(payload: unknown): string | undefined {
   if (typeof payload !== "object" || payload === null) return undefined;

@@ -314,6 +314,8 @@ export interface ApprovalRequestParams {
     readonly normalized_arguments: JsonValue;
   } & JsonObject;
   readonly explanation: string;
+  readonly unifiedDiff?: string;
+  readonly unified_diff?: string;
 }
 
 export interface ApprovalRequestResult {

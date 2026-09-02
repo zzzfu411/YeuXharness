@@ -101,10 +101,18 @@ export class TerminalPrompter {
         ),
       );
       if (choice === "inspect") {
-        this.#output.write(
-          `${paint("INSPECT · NORMALIZED ARGUMENTS", "text", this.#capabilities, this.#theme)}\n` +
-          `${framedLines(safeArguments, rail)}\n`,
-        );
+        const unified = unifiedDiffFromApproval(safe);
+        if (unified !== undefined) {
+          this.#output.write(
+            `${paint("INSPECT · UNIFIED DIFF", "text", this.#capabilities, this.#theme)}\n` +
+            `${framedLines(sanitizeTerminalText(unified), rail)}\n`,
+          );
+        } else {
+          this.#output.write(
+            `${paint("INSPECT · NORMALIZED ARGUMENTS", "text", this.#capabilities, this.#theme)}\n` +
+            `${framedLines(safeArguments, rail)}\n`,
+          );
+        }
         continue;
       }
       return { approved: choice === "allow_once" };
@@ -266,6 +274,21 @@ function framedLines(text: string, rail: string): string {
     .split("\n")
     .map((line) => `${rail}   ${line}`)
     .join("\n");
+}
+
+function readUnifiedDiffField(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  for (const key of ["unifiedDiff", "unified_diff"] as const) {
+    const candidate = value[key];
+    if (typeof candidate === "string" && candidate.trim() !== "") return candidate;
+  }
+  return undefined;
+}
+
+function unifiedDiffFromApproval(params: ApprovalRequestParams): string | undefined {
+  const direct = readUnifiedDiffField(params);
+  if (direct !== undefined) return direct;
+  return readUnifiedDiffField(params.invocation);
 }
 
 function normalizeApprovalRequest(params: ApprovalRequestParams): ApprovalRequestParams {

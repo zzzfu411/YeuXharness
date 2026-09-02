@@ -778,6 +778,20 @@ impl ToolPlan {
     pub fn effects(&self) -> &EffectSet {
         &self.effects
     }
+
+    pub fn unified_diff(&self) -> Option<String> {
+        match &self.payload {
+            PlannedPayload::WorkspaceMutation(prepared) => {
+                let diff = prepared.diff_summary().unified_diff.trim();
+                if diff.is_empty() {
+                    None
+                } else {
+                    Some(prepared.diff_summary().unified_diff.clone())
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Debug for ToolPlan {

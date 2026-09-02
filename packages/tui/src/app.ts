@@ -89,6 +89,11 @@ function approvalRequestForFixtureEvent(
   const payload = event.payload;
   const effects = payload.effects;
   if (!isRecord(effects) || isReadOnlyEffects(effects)) return undefined;
+  const unifiedDiff = typeof payload.unifiedDiff === "string"
+    ? payload.unifiedDiff
+    : typeof payload.unified_diff === "string"
+      ? payload.unified_diff
+      : undefined;
   return {
     invocation: {
       invocation_id: typeof payload.invocation_id === "string" ? payload.invocation_id : event.event_id,
@@ -99,6 +104,7 @@ function approvalRequestForFixtureEvent(
       normalized_arguments: payload.normalized_arguments ?? {},
     },
     explanation: typeof payload.summary === "string" ? payload.summary : "side-effecting tool requires approval",
+    ...(unifiedDiff !== undefined && unifiedDiff.trim() !== "" ? { unifiedDiff } : {}),
   };
 }
 
