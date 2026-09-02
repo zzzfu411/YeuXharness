@@ -57,7 +57,7 @@ export async function replayFixture(path: string, options: ReplayOptions = {}): 
   const capabilities = detectTerminalCapabilities(
     options.ascii === undefined ? {} : { ascii: options.ascii },
   );
-  const renderer = new EventRenderer({ jsonl, capabilities, write });
+  const renderer = new EventRenderer({ jsonl, capabilities, write, typewriter: false });
   const output = writableFromWrite(write);
   const prompter = jsonl
     ? undefined
@@ -70,12 +70,13 @@ export async function replayFixture(path: string, options: ReplayOptions = {}): 
     for (const line of lines) {
       if (line.trim().length === 0) continue;
       const event = JSON.parse(line) as EventEnvelope;
-      renderer.render(event);
+      await renderer.render(event);
       if (prompter !== undefined) {
         const approval = approvalRequestForFixtureEvent(event);
         if (approval !== undefined) await prompter.approval(approval);
       }
     }
+    await renderer.flush();
     return 0;
   } finally {
     prompter?.close();
@@ -139,20 +140,6 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
         ? options.mode
         : "observe";
     const writeEnabled = effectiveMode !== "observe" && writeReady;
-    const processEnabled = effectiveMode !== "observe" && session.processToolsAvailable && sandboxNamed;
-    const presenterPolicy = {
-      mode: effectiveMode,
-      filesystem_read: [session.workspaceRoot ?? options.cwd],
-      filesystem_write: writeEnabled ? [session.workspaceRoot ?? options.cwd] : [],
-      filesystem_delete: [],
-      process: processEnabled,
-      network: [],
-      secrets: [],
-      external_write: [],
-      write_tools_available: writeReady,
-      process_tools_available: processEnabled,
-      sandbox: session.sandbox,
-    } as const;
     renderer.renderSessionBar({
       cwd: session.workspaceRoot ?? options.cwd,
       thread: threadId,
@@ -163,7 +150,6 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
       writeGrant: writeEnabled ? [session.workspaceRoot ?? options.cwd] : [],
       sandbox: sandboxNamed,
     });
-    renderer.renderInspector(presenterPolicy);
 
     if (options.mode !== "observe" && !writeReady) {
       renderer.renderDiagnostic({
@@ -210,7 +196,7 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
     try {
       if (options.command === "run") {
         const result = await session.runTurn(threadId, options.prompt ?? "", effectiveMode);
-        renderer.renderInspector(presenterPolicy);
+        await renderer.flush();
         return {
           exitCode: exitCodeFor(result),
           threadId,
@@ -220,11 +206,12 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
 
       let exitCode = 0;
       while (true) {
+        await renderer.flush();
         const prompt = (await prompter?.command())?.trim() ?? "";
         if (prompt === "/exit" || prompt === "/quit") break;
         if (prompt.length === 0) continue;
         const result = await session.runTurn(threadId, prompt, effectiveMode);
-        renderer.renderInspector(presenterPolicy);
+        await renderer.flush();
         exitCode = exitCodeFor(result);
       }
       return { exitCode, threadId };
@@ -265,7 +252,7 @@ class RuntimeSession {
     this.#client = client;
     this.#renderer = renderer;
     this.#client.onEvent((event) => {
-      this.#renderer.render(event);
+      void this.#renderer.render(event);
       if (event.turn_id !== undefined && isTerminalTurnEvent(event)) {
         const waiter = this.#terminalWaiters.get(event.turn_id);
         if (waiter === undefined) this.#terminalEvents.set(event.turn_id, event);
@@ -285,6 +272,7 @@ class RuntimeSession {
       this.#terminalWaiters.clear();
     });
     this.#client.handleRequest("approval/request", async (params): Promise<ApprovalRequestResult> => {
+      await this.#renderer.flush();
       if (isReadOnlyEffects(params.invocation.effects)) {
         return { approved: true };
       }
@@ -294,6 +282,7 @@ class RuntimeSession {
       return await this.#prompter.approval(params);
     });
     this.#client.handleRequest("user/input", async (params): Promise<UserInputRequestResult> => {
+      await this.#renderer.flush();
       if (this.#prompter === undefined) {
         throw { code: -32010, message: "The JSONL client cannot answer interactive input" };
       }
