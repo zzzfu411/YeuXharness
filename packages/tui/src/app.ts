@@ -40,10 +40,8 @@ export interface ReplayOptions {
 function writableFromWrite(write: (text: string) => void): Writable {
   return new Writable({
     decodeStrings: false,
-    write(chunk, encoding, callback) {
-      const text = typeof chunk === "string"
-        ? chunk
-        : chunk.toString(encoding === "buffer" ? "utf8" : encoding);
+    write(chunk, _encoding, callback) {
+      const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
       write(text);
       callback();
     },

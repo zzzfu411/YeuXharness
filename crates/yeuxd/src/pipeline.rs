@@ -27,8 +27,7 @@ use yeux_runtime::{
 
 use crate::tools::{
     ExecutionPermit, ToolRegistry, ToolRegistryError, PROCESS_RUN_TOOL_ID, PROCESS_TOOL_VERSION,
-    WORKSPACE_APPLY_PATCH_TOOL_ID, WORKSPACE_LIST_TOOL_ID, WORKSPACE_READ_TOOL_ID,
-    WORKSPACE_TOOL_VERSION,
+    WORKSPACE_APPLY_PATCH_TOOL_ID, WORKSPACE_TOOL_VERSION,
 };
 
 pub const DEFAULT_PREPARATION_TTL_SECONDS: i64 = 60;
@@ -238,8 +237,7 @@ impl InvocationPipeline {
         });
         let effective_mode = match decision {
             PolicyDecision::Allow {
-                effective_grant,
-                ..
+                effective_grant, ..
             } => effective_grant.mode,
             PolicyDecision::Deny { reasons, .. } => {
                 return Err(PipelineError::PolicyDenied { reasons });
@@ -366,10 +364,8 @@ impl InvocationPipeline {
         Fut: Future<Output = bool>,
     {
         let invocation = if Self::requires_approval(&invocation) {
-            let request = self.approval_request(
-                &invocation,
-                "side-effecting tool requires approval",
-            );
+            let request =
+                self.approval_request(&invocation, "side-effecting tool requires approval");
             self.approve_once(invocation, gate(request).await)?
         } else {
             invocation
@@ -379,10 +375,7 @@ impl InvocationPipeline {
 
     /// Execute only after exact binding validation and a fresh plan/revalidate
     /// pass. This is the only public path that obtains an execution permit.
-    pub async fn execute(
-        &self,
-        invocation: PreparedInvocation,
-    ) -> Result<Value, PipelineError> {
+    pub async fn execute(&self, invocation: PreparedInvocation) -> Result<Value, PipelineError> {
         self.ensure_issued(&invocation)?;
         if invocation.expires_at < Utc::now() {
             return Err(PipelineError::PreparationExpired);
@@ -395,16 +388,15 @@ impl InvocationPipeline {
         if Self::requires_approval(&invocation) && invocation.approval.is_none() {
             return Err(PipelineError::ApprovalRequired);
         }
-        validate_approval(&invocation, mode, Utc::now())
-            .or_else(|error| {
-                if !Self::requires_approval(&invocation)
-                    && matches!(error, yeux_core::ApprovalError::MissingApproval)
-                {
-                    Ok(())
-                } else {
-                    Err(error)
-                }
-            })?;
+        validate_approval(&invocation, mode, Utc::now()).or_else(|error| {
+            if !Self::requires_approval(&invocation)
+                && matches!(error, yeux_core::ApprovalError::MissingApproval)
+            {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        })?;
         if !invocation.effects.is_read_only() {
             self.sandbox.ensure(sandbox_requirement(
                 !invocation.effects.filesystem_write.is_empty()
@@ -412,13 +404,11 @@ impl InvocationPipeline {
                 !invocation.effects.processes.is_empty(),
             ))?;
         }
-        let plan = self
-            .registry
-            .plan(
-                &invocation.tool_id,
-                &invocation.tool_version,
-                invocation.normalized_arguments.clone(),
-            )?;
+        let plan = self.registry.plan(
+            &invocation.tool_id,
+            &invocation.tool_version,
+            invocation.normalized_arguments.clone(),
+        )?;
         let revalidated = self.registry.revalidate(plan)?;
         if revalidated.workspace_identity() != invocation.workspace_identity_digest {
             return Err(PipelineError::BindingMismatch("workspace_identity_digest"));
@@ -432,7 +422,9 @@ impl InvocationPipeline {
         if digest_value(revalidated.normalized_arguments())
             != invocation.normalized_arguments_digest
         {
-            return Err(PipelineError::BindingMismatch("normalized_arguments_digest"));
+            return Err(PipelineError::BindingMismatch(
+                "normalized_arguments_digest",
+            ));
         }
         if digest_effects(revalidated.effects()) != invocation.effect_digest {
             return Err(PipelineError::BindingMismatch("effect_digest"));
@@ -524,6 +516,8 @@ mod tests {
     use tempfile::tempdir;
     use yeux_runtime::{NoCredentialBroker, Workspace, WorkspaceTools};
 
+    use crate::tools::{WORKSPACE_LIST_TOOL_ID, WORKSPACE_READ_TOOL_ID};
+
     fn grants() -> PipelineGrants {
         let build = CapabilityGrant {
             mode: CapabilityMode::Build,
@@ -589,7 +583,10 @@ mod tests {
             &context(&workspace),
         );
         assert!(matches!(result, Err(PipelineError::Sandbox(_))));
-        assert_eq!(fs::read_to_string(directory.path().join("hello.txt")).unwrap(), "before\n");
+        assert_eq!(
+            fs::read_to_string(directory.path().join("hello.txt")).unwrap(),
+            "before\n"
+        );
     }
 
     #[test]
@@ -628,7 +625,9 @@ mod tests {
         );
         let pipeline = InvocationPipeline::new(
             registry,
-            SandboxBackend::Unavailable { reason: "test".into() },
+            SandboxBackend::Unavailable {
+                reason: "test".into(),
+            },
             Arc::new(NoCredentialBroker),
         );
         assert!(matches!(

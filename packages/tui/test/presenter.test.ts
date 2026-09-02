@@ -82,7 +82,7 @@ describe("paper presenters", () => {
     expect(gate).toContain("|   human review boundary");
     expect(gate).toContain("| binding digest-1 · invocation invocation-gate");
     expect(gate).toContain("`- [a] ALLOW ONCE   [d] DENY (default)   [i] INSPECT");
-    expect(gate).toContain("[i] INSPECT -+");
+    expect(gate).toMatch(/\[i\] INSPECT -+\+$/m);
     expect(gate.split("\n")[0]?.endsWith("+")).toBe(true);
     expect(gate.split("\n").at(-1)?.endsWith("+")).toBe(true);
     expect(gate.split("\n").some((line) => line.startsWith("|") && line.endsWith("|"))).toBe(true);
@@ -175,7 +175,7 @@ describe("paper presenters", () => {
     expect(output).toContain("[a] ALLOW ONCE");
     expect(output).toContain("[d] DENY (default)");
     expect(output).toContain("[i] INSPECT");
-    expect(output).toContain("`- [a] ALLOW ONCE   [d] DENY (default)   [i] INSPECT -+");
+    expect(output).toMatch(/`- \[a\] ALLOW ONCE   \[d\] DENY \(default\)   \[i\] INSPECT -+\+/);
     expect(output).toContain("approval:");
     expect(output).toMatch(/\+- \? APPROVAL REQUIRED[^\n]*\+/);
   });

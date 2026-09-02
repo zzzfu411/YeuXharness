@@ -96,6 +96,7 @@
           "type": "boolean"
         },
         "write_tools": {
+          "description": "True only when the daemon has registered the M2 write pipeline and the required host sandbox is available.",
           "default": false,
           "type": "boolean"
         }

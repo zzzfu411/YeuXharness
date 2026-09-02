@@ -10,8 +10,7 @@
 
 use std::{
     collections::BTreeMap,
-    fmt,
-    fs,
+    fmt, fs,
     future::Future,
     path::{Component, Path},
     pin::Pin,
@@ -28,6 +27,8 @@ use yeux_runtime::{
     workspace_apply_patch_spec, workspace_list_spec, workspace_read_spec, workspace_search_spec,
     PreparedWorkspaceMutation, ProcessError, ProcessExecutor, ProcessRequest,
     WorkspaceSearchControl, WorkspaceToolError, WorkspaceTools,
+};
+pub use yeux_runtime::{
     WORKSPACE_APPLY_PATCH_TOOL_ID, WORKSPACE_LIST_TOOL_ID, WORKSPACE_READ_TOOL_ID,
     WORKSPACE_SEARCH_TOOL_ID, WORKSPACE_TOOL_VERSION,
 };
@@ -316,11 +317,7 @@ impl ToolRegistry {
         config: BuiltInToolRegistryConfig,
     ) -> Result<Self, ToolRegistryError> {
         let tools = Arc::new(tools);
-        Self::workspace_built_ins_with_config_and_process(
-            tools,
-            config,
-            None,
-        )
+        Self::workspace_built_ins_with_config_and_process(tools, config, None)
     }
 
     /// Register built-ins with an optional daemon-owned process executor.
@@ -364,8 +361,7 @@ impl ToolRegistry {
             });
         }
         if config.register_hidden_process {
-            let executor = process_executor
-                .unwrap_or_else(|| Arc::new(ProcessExecutor::detect()));
+            let executor = process_executor.unwrap_or_else(|| Arc::new(ProcessExecutor::detect()));
             let spec = process_run_spec();
             let adapter = Arc::new(ProcessAdapter::new(Arc::clone(&tools), executor));
             registrations.push(if config.advertise_process {
@@ -1177,6 +1173,8 @@ impl SealedToolAdapter for WorkspaceMutationAdapter {
     }
 }
 
+/// Environment and stdin are intentionally absent from the schema. They
+/// are broker/policy capabilities, never provider-controlled fields.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProcessArguments {
@@ -1185,8 +1183,6 @@ struct ProcessArguments {
     arguments: Vec<String>,
     #[serde(default = "default_process_cwd")]
     cwd: String,
-    /// Environment and stdin are intentionally absent from the schema. They
-    /// are broker/policy capabilities, never provider-controlled fields.
 }
 
 fn default_process_cwd() -> String {
@@ -1212,8 +1208,8 @@ impl ProcessAdapter {
         &self,
         arguments: Value,
     ) -> Result<(Value, ProcessRequest, EffectSet), ToolRegistryError> {
-        let parsed: ProcessArguments = serde_json::from_value(arguments)
-            .map_err(|error| Self::invalid(error.to_string()))?;
+        let parsed: ProcessArguments =
+            serde_json::from_value(arguments).map_err(|error| Self::invalid(error.to_string()))?;
         if parsed.executable.is_empty() {
             return Err(Self::invalid("executable must not be empty"));
         }
@@ -1223,11 +1219,7 @@ impl ProcessAdapter {
         if parsed.arguments.len() > 128 {
             return Err(Self::invalid("argument count exceeds 128"));
         }
-        let argument_bytes = parsed
-            .arguments
-            .iter()
-            .map(String::len)
-            .sum::<usize>();
+        let argument_bytes = parsed.arguments.iter().map(String::len).sum::<usize>();
         if argument_bytes > 256 * 1024 {
             return Err(Self::invalid("serialized arguments exceed 262144 bytes"));
         }
@@ -1341,13 +1333,17 @@ impl SealedToolAdapter for ProcessAdapter {
         let (current_arguments, current_request, current_effects) =
             self.parse(normalized_arguments.clone())?;
         if current_arguments != *normalized_arguments || current_effects != *effects {
-            return Err(ToolRegistryError::PlanChanged { field: "process_binding" });
+            return Err(ToolRegistryError::PlanChanged {
+                field: "process_binding",
+            });
         }
         if previous.executable != current_request.executable
             || previous.arguments != current_request.arguments
             || previous.cwd != current_request.cwd
         {
-            return Err(ToolRegistryError::PlanChanged { field: "process_request" });
+            return Err(ToolRegistryError::PlanChanged {
+                field: "process_request",
+            });
         }
         Ok(AdapterRevalidation {
             workspace_identity: self.tools.workspace().identity().to_owned(),
@@ -1714,19 +1710,17 @@ fn verify_effect_subset(spec: &ToolSpec, concrete: &EffectSet) -> Result<(), Too
     let scopes_allowed = scopes_are_subset(&concrete.filesystem_read, &template.filesystem_read)
         && scopes_are_subset(&concrete.filesystem_write, &template.filesystem_write)
         && scopes_are_subset(&concrete.filesystem_delete, &template.filesystem_delete);
-    let entries_allowed = concrete
-        .processes
-        .iter()
-        .all(|effect| template.processes.iter().any(|allowed| {
+    let entries_allowed = concrete.processes.iter().all(|effect| {
+        template.processes.iter().any(|allowed| {
             (allowed.executable == "*" || allowed.executable == effect.executable)
                 && (allowed.argument_digest.is_none()
                     || allowed.argument_digest == effect.argument_digest)
                 && (!effect.may_spawn_children || allowed.may_spawn_children)
-        }))
-        && concrete
-            .network
-            .iter()
-            .all(|effect| template.network.contains(effect))
+        })
+    }) && concrete
+        .network
+        .iter()
+        .all(|effect| template.network.contains(effect))
         && concrete
             .secrets
             .iter()
@@ -1937,10 +1931,13 @@ mod tests {
         .unwrap();
         assert!(registry.is_registered(WORKSPACE_APPLY_PATCH_TOOL_ID, WORKSPACE_TOOL_VERSION));
         assert!(registry.is_registered(PROCESS_RUN_TOOL_ID, PROCESS_TOOL_VERSION));
-        assert!(registry
-            .advertised_specs()
-            .iter()
-            .all(|spec| spec.id != WORKSPACE_APPLY_PATCH_TOOL_ID && spec.id != PROCESS_RUN_TOOL_ID));
+        assert!(
+            registry
+                .advertised_specs()
+                .iter()
+                .all(|spec| spec.id != WORKSPACE_APPLY_PATCH_TOOL_ID
+                    && spec.id != PROCESS_RUN_TOOL_ID)
+        );
     }
 
     #[test]

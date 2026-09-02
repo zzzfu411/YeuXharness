@@ -27,24 +27,23 @@ use yeux_core::{
     digest_value, Clock, IdError, IdGenerator, ModelEventSink, ModelProvider, PortError,
 };
 use yeux_protocol::{
-    ApprovalRequestParams, ApprovalRequestResult, AgentId, CapabilityGrant, CapabilityMode,
-    CausationId, ContentBlock, EffectSet, Event, EventEnvelope, InvocationId, InvocationState, Item,
-    ItemId, ItemKind, MessageRole, ModelEvent, ModelMessage, ModelRequest, ModelRequestId,
+    AgentId, ApprovalRequestParams, ApprovalRequestResult, CapabilityGrant, CapabilityMode,
+    CausationId, ContentBlock, EffectSet, Event, EventEnvelope, InvocationId, InvocationState,
+    Item, ItemId, ItemKind, MessageRole, ModelEvent, ModelMessage, ModelRequest, ModelRequestId,
     StopReason, ThreadId, TokenBudget, ToolSpec, TurnId, TurnState, WorkspaceId, WorkspaceIdentity,
     WorkspaceTrust, PROTOCOL_VERSION,
 };
 use yeux_runtime::{
     CoreProjectionError, EventLedger, LedgerError, LedgerEvent, NewInvocationOutcome,
-    NewInvocationUnknown, NewInvocationUnknownOutcome, NewLedgerEvent, SearchOperationBudget,
-    NoCredentialBroker, ProcessExecutor, SandboxBackend,
-    Workspace as RuntimeWorkspace, WorkspaceSearchControl, WorkspaceTools,
-    WORKSPACE_SEARCH_DEFAULT_OPERATION_BUDGET, WORKSPACE_SEARCH_HARD_OPERATION_LIMIT,
-    WORKSPACE_SEARCH_TOOL_ID,
+    NewInvocationUnknown, NewInvocationUnknownOutcome, NewLedgerEvent, NoCredentialBroker,
+    ProcessExecutor, SandboxBackend, SearchOperationBudget, Workspace as RuntimeWorkspace,
+    WorkspaceSearchControl, WorkspaceTools, WORKSPACE_SEARCH_DEFAULT_OPERATION_BUDGET,
+    WORKSPACE_SEARCH_HARD_OPERATION_LIMIT, WORKSPACE_SEARCH_TOOL_ID,
 };
 
-use crate::tool_calls::{AssembledToolCall, ToolCallAssembler, ToolCallAssemblyError};
 use crate::grants::resolve_grant_layers;
 use crate::pipeline::{InvocationContext, InvocationPipeline, PipelineError, PipelineGrants};
+use crate::tool_calls::{AssembledToolCall, ToolCallAssembler, ToolCallAssemblyError};
 use crate::tools::{BuiltInToolRegistryConfig, ToolRegistry, ToolRegistryError};
 
 /// The daemon transport implements this boundary for interactive approval.
@@ -507,9 +506,7 @@ impl TurnRunner {
                     let config = BuiltInToolRegistryConfig::read_only()
                         .with_hidden_workspace_mutations()
                         .with_hidden_process();
-                    let config = if sandbox_ready
-                        && self.host_ceiling != CapabilityMode::Observe
-                    {
+                    let config = if sandbox_ready && self.host_ceiling != CapabilityMode::Observe {
                         config
                             .with_advertised_workspace_mutations()
                             .with_advertised_process()
@@ -807,13 +804,14 @@ impl TurnRunner {
                     continue;
                 };
                 if !prepared.effects.is_read_only() {
-                    let Some((pipeline, _)) = invocation_pipeline else {
+                    let Some((ref pipeline, _)) = invocation_pipeline else {
                         invocation.preparation_failure = Some(ToolPreparationFailure {
                             output: json!({
                                 "code": "tool_authority_unavailable",
                                 "message": "side-effecting tools require the daemon authority pipeline"
                             }),
-                            reason: "side-effecting tools require the daemon authority pipeline".into(),
+                            reason: "side-effecting tools require the daemon authority pipeline"
+                                .into(),
                         });
                         continue;
                     };
@@ -964,13 +962,14 @@ impl TurnRunner {
                 )?;
                 invocation.started = true;
                 let handle = if let Some(prepared) = invocation.prepared.clone() {
-                    let Some((pipeline, _)) = invocation_pipeline else {
+                    let Some((ref pipeline, _)) = invocation_pipeline else {
                         invocation.preparation_failure = Some(ToolPreparationFailure {
                             output: json!({
                                 "code": "tool_authority_unavailable",
                                 "message": "the daemon authority pipeline disappeared before execution"
                             }),
-                            reason: "the daemon authority pipeline disappeared before execution".into(),
+                            reason: "the daemon authority pipeline disappeared before execution"
+                                .into(),
                         });
                         drop(permit);
                         handles.push(None);
@@ -2566,7 +2565,8 @@ impl RunContext {
             .iter()
             .filter_map(|envelope| match &envelope.event {
                 Event::ItemAdded { item }
-                    if item.turn_id == spec.turn_id && item.kind == ItemKind::UserMessage => {
+                    if item.turn_id == spec.turn_id && item.kind == ItemKind::UserMessage =>
+                {
                     item.content.get("capability_override").cloned()
                 }
                 _ => None,

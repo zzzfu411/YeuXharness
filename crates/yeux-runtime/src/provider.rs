@@ -64,16 +64,18 @@ impl BrokerCredentialSource {
 #[async_trait]
 impl CredentialSource for BrokerCredentialSource {
     async fn bearer_token(&self, handle: &str) -> Result<String, ProviderError> {
-        let lease: CredentialLease = self
-            .broker
-            .resolve(handle)
-            .await
-            .map_err(|error| match error {
-                CredentialError::Unavailable(value) => ProviderError::CredentialUnavailable(value),
-                CredentialError::BrokerUnavailable => {
-                    ProviderError::CredentialUnavailable(handle.to_owned())
-                }
-            })?;
+        let lease: CredentialLease =
+            self.broker
+                .resolve(handle)
+                .await
+                .map_err(|error| match error {
+                    CredentialError::Unavailable(value) => {
+                        ProviderError::CredentialUnavailable(value)
+                    }
+                    CredentialError::BrokerUnavailable => {
+                        ProviderError::CredentialUnavailable(handle.to_owned())
+                    }
+                })?;
         Ok(lease.with_value(str::to_owned))
     }
 }

@@ -19,9 +19,9 @@ use yeux_core::{
     digest_value, Clock, IdError, IdGenerator, ReplayError, SystemClock, UuidV7Generator,
 };
 use yeux_protocol::{
-    method, AgentId, ApprovalRequestParams, ApprovalRequestResult, CapabilityMode,
-    CommandEnvelope, ContentBlock, Event, EventEnvelope, InvocationId, InvocationState, Item,
-    ItemId, ItemKind, ModelDescriptor, NotificationEnvelope, ResponseEnvelope, RpcError, RpcId,
+    method, AgentId, ApprovalRequestParams, ApprovalRequestResult, CapabilityMode, CommandEnvelope,
+    ContentBlock, Event, EventEnvelope, InvocationId, InvocationState, Item, ItemId, ItemKind,
+    ModelDescriptor, NotificationEnvelope, ResponseEnvelope, RpcError, RpcId,
     ServerRequestEnvelope, ThreadId, TurnId, TurnState, JSONRPC_VERSION, PROTOCOL_VERSION,
 };
 use yeux_runtime::{
@@ -187,7 +187,8 @@ impl ApprovalHandler for ConnectionApprovalHandler {
     fn request<'a>(
         &'a self,
         params: ApprovalRequestParams,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ApprovalRequestResult> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ApprovalRequestResult> + Send + 'a>>
+    {
         Box::pin(async move {
             let (response, receiver) = oneshot::channel();
             if self
@@ -376,8 +377,9 @@ impl Daemon {
         let mut state = ConnectionState::default();
         let mut receiver = self.inner.events.subscribe();
         let (approval_requests, mut approval_rx) = mpsc::channel::<ApprovalRequestMessage>(16);
-        let approval_handler: Arc<dyn ApprovalHandler> =
-            Arc::new(ConnectionApprovalHandler { requests: approval_requests });
+        let approval_handler: Arc<dyn ApprovalHandler> = Arc::new(ConnectionApprovalHandler {
+            requests: approval_requests,
+        });
         let mut approval_ids: u64 = 0;
         let mut pending_approvals: HashMap<RpcId, oneshot::Sender<ApprovalRequestResult>> =
             HashMap::new();
@@ -1053,9 +1055,7 @@ fn consume_approval_response(
     true
 }
 
-fn deny_pending_approvals(
-    pending: &mut HashMap<RpcId, oneshot::Sender<ApprovalRequestResult>>,
-) {
+fn deny_pending_approvals(pending: &mut HashMap<RpcId, oneshot::Sender<ApprovalRequestResult>>) {
     for response in pending.drain().map(|(_, response)| response) {
         let _ = response.send(ApprovalRequestResult {
             approved: false,
@@ -1187,7 +1187,7 @@ mod tests {
             &mut pending,
         ));
         assert!(pending.is_empty());
-        assert_eq!(receiver.try_recv().unwrap().approved, false);
+        assert!(!receiver.try_recv().unwrap().approved);
     }
 
     #[derive(Debug)]
