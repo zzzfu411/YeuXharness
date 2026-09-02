@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { EventRenderer, formatEvent } from "../src/renderer.js";
+import { EventRenderer, formatEvent, formatInspector } from "../src/renderer.js";
 
 const event = {
   schema_version: { major: 1, minor: 0 },
@@ -15,6 +15,24 @@ const event = {
 } as const;
 
 describe("EventRenderer", () => {
+  it("shows write and sandbox readiness in the Inspector policy", () => {
+    const rendered = formatInspector({
+      policy: {
+        mode: "observe",
+        filesystem_read: ["/workspace"],
+        filesystem_write: [],
+        process: false,
+        write_tools_available: false,
+        process_tools_available: false,
+        sandbox: "unavailable",
+      },
+      events: [],
+    }, { color: false });
+    expect(rendered).toContain("write_tools none");
+    expect(rendered).toContain("process_tools none");
+    expect(rendered).toContain("sandbox unavailable");
+  });
+
   it("emits one event envelope per line in JSONL mode", () => {
     let output = "";
     const renderer = new EventRenderer({

@@ -1,5 +1,8 @@
+import { readFileSync } from "node:fs";
+
 import {
   PROTOCOL_VERSION,
+  isRecord,
   isRuntimeDiagnosticNotification,
   type ApprovalRequestResult,
   type EventEnvelope,
@@ -10,7 +13,7 @@ import {
 
 import type { TuiOptions } from "./args.js";
 import { detectTerminalCapabilities } from "./aesthetic.js";
-import { isReadOnlyEffects, TerminalPrompter } from "./prompter.js";
+import { formatApprovalGate, isReadOnlyEffects, TerminalPrompter } from "./prompter.js";
 import { EventRenderer } from "./renderer.js";
 import { sanitizeTerminalText } from "./terminal.js";
 import { connectRuntime, type RuntimeConnection } from "./transport.js";
@@ -22,6 +25,53 @@ export interface TuiRunResult {
   readonly exitCode: number;
   readonly threadId: string;
   readonly turnId?: string;
+}
+
+export interface ReplayOptions {
+  readonly ascii?: boolean;
+  readonly jsonl?: boolean;
+  readonly write?: (text: string) => void;
+}
+
+/** Replay inert JSONL events without opening a daemon or touching the workspace. */
+export function replayFixture(path: string, options: ReplayOptions = {}): number {
+  const jsonl = options.jsonl ?? false;
+  const write = options.write ?? ((text: string) => process.stdout.write(text));
+  const capabilities = detectTerminalCapabilities(
+    options.ascii === undefined ? {} : { ascii: options.ascii },
+  );
+  const renderer = new EventRenderer({ jsonl, capabilities, write });
+  const lines = readFileSync(path, "utf8").split(/\r?\n/);
+  for (const line of lines) {
+    if (line.trim().length === 0) continue;
+    const event = JSON.parse(line) as EventEnvelope;
+    renderer.render(event);
+    if (!jsonl) {
+      const approval = approvalRequestForFixtureEvent(event);
+      if (approval !== undefined) write(`${formatApprovalGate(approval, { capabilities })}\n`);
+    }
+  }
+  return 0;
+}
+
+function approvalRequestForFixtureEvent(
+  event: EventEnvelope,
+): Parameters<typeof formatApprovalGate>[0] | undefined {
+  if (event.kind !== "tool/proposed" || !isRecord(event.payload)) return undefined;
+  const payload = event.payload;
+  const effects = payload.effects;
+  if (!isRecord(effects) || isReadOnlyEffects(effects)) return undefined;
+  return {
+    invocation: {
+      invocation_id: typeof payload.invocation_id === "string" ? payload.invocation_id : event.event_id,
+      tool_id: typeof payload.tool_id === "string" ? payload.tool_id : "fixture.approval_boundary",
+      tool_version: typeof payload.tool_version === "string" ? payload.tool_version : "fixture",
+      effects,
+      effect_digest: typeof payload.effect_digest === "string" ? payload.effect_digest : "fixture-effects",
+      normalized_arguments: payload.normalized_arguments ?? {},
+    },
+    explanation: typeof payload.summary === "string" ? payload.summary : "side-effecting tool requires approval",
+  };
 }
 
 export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
@@ -47,30 +97,46 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
     const model = models[0] === undefined
       ? "unconfigured"
       : `${models[0].provider}/${models[0].model}`;
+    const sandboxNamed = session.sandbox.trim().length > 0 && session.sandbox !== "unavailable";
+    const writeReady = session.writeToolsAvailable && sandboxNamed;
+    const effectiveMode: RuntimeMode = options.mode === "observe"
+      ? "observe"
+      : writeReady
+        ? options.mode
+        : "observe";
+    const writeEnabled = effectiveMode !== "observe" && writeReady;
+    const processEnabled = effectiveMode !== "observe" && session.processToolsAvailable && sandboxNamed;
+    const presenterPolicy = {
+      mode: effectiveMode,
+      filesystem_read: [session.workspaceRoot ?? options.cwd],
+      filesystem_write: writeEnabled ? [session.workspaceRoot ?? options.cwd] : [],
+      filesystem_delete: [],
+      process: processEnabled,
+      network: [],
+      secrets: [],
+      external_write: [],
+      write_tools_available: writeReady,
+      process_tools_available: processEnabled,
+      sandbox: session.sandbox,
+    } as const;
     renderer.renderSessionBar({
       cwd: session.workspaceRoot ?? options.cwd,
       thread: threadId,
-      mode: options.mode,
+      mode: effectiveMode,
       model,
       ...(session.workspaceTrust === undefined ? {} : { trust: session.workspaceTrust }),
       transport: connection.kind,
     });
-    // Only claim a write-none grant when this client actually sends the
-    // observe override. `--mode build|operate` still reaches the daemon's
-    // own grant, so the Inspector must not invent empty write scopes.
-    const presenterPolicy = options.mode === "observe"
-      ? {
-          mode: "observe" as const,
-          filesystem_read: [session.workspaceRoot ?? options.cwd],
-          filesystem_write: [],
-          filesystem_delete: [],
-          process: false,
-          network: [],
-          secrets: [],
-          external_write: [],
-        }
-      : undefined;
     renderer.renderInspector(presenterPolicy);
+
+    if (options.mode !== "observe" && !writeReady) {
+      renderer.renderDiagnostic({
+        code: "write_pipeline_unavailable",
+        message: "requested write mode is unavailable until the daemon confirms write tools and a named OS sandbox",
+        recoverable: false,
+      });
+      return { exitCode: 1, threadId };
+    }
 
     // A provider-less daemon is a valid local runtime, but it is not an
     // interactive prompt. Keep the state visible and fail before `yeux ›`.
@@ -107,7 +173,7 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
 
     try {
       if (options.command === "run") {
-        const result = await session.runTurn(threadId, options.prompt ?? "", options.mode);
+        const result = await session.runTurn(threadId, options.prompt ?? "", effectiveMode);
         renderer.renderInspector(presenterPolicy);
         return {
           exitCode: exitCodeFor(result),
@@ -121,7 +187,7 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
         const prompt = (await prompter?.command())?.trim() ?? "";
         if (prompt === "/exit" || prompt === "/quit") break;
         if (prompt.length === 0) continue;
-        const result = await session.runTurn(threadId, prompt, options.mode);
+        const result = await session.runTurn(threadId, prompt, effectiveMode);
         renderer.renderInspector(presenterPolicy);
         exitCode = exitCodeFor(result);
       }
@@ -151,6 +217,9 @@ class RuntimeSession {
   #workspaceTrust: string | undefined;
   #activeTurn: { readonly threadId: string; readonly turnId: string } | undefined;
   #interruptPromise: Promise<boolean> | undefined;
+  #writeToolsAvailable = false;
+  #processToolsAvailable = false;
+  #sandbox = "unavailable";
 
   public constructor(
     client: JsonRpcClient,
@@ -211,6 +280,21 @@ class RuntimeSession {
         `Protocol mismatch: server ${result.protocolVersion.major}.${result.protocolVersion.minor}, client ${PROTOCOL_VERSION.major}.${PROTOCOL_VERSION.minor}`,
       );
     }
+    this.#writeToolsAvailable = result.capabilities.write_tools === true;
+    this.#processToolsAvailable = result.capabilities.process_tools === true;
+    this.#sandbox = result.capabilities.sandbox ?? "unavailable";
+  }
+
+  public get writeToolsAvailable(): boolean {
+    return this.#writeToolsAvailable;
+  }
+
+  public get processToolsAvailable(): boolean {
+    return this.#processToolsAvailable;
+  }
+
+  public get sandbox(): string {
+    return this.#sandbox;
   }
 
   public async listModels(): Promise<readonly { readonly provider: string; readonly model: string }[]> {
@@ -298,7 +382,10 @@ class RuntimeSession {
         ? {
             capabilityOverride: {
               mode: "observe" as const,
-              filesystem_read: [this.#workspaceRoot as string],
+              // Workspace tool effects are normalized to workspace-relative
+              // paths; `*` narrows the mode without making an absolute host
+              // path fail every otherwise-safe read.
+              filesystem_read: ["*"],
               filesystem_write: [],
               filesystem_delete: [],
               process: false,

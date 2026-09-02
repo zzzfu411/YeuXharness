@@ -13,6 +13,9 @@ use yeux_protocol::{
     ProviderCapabilities, StopReason, Usage,
 };
 
+pub use crate::credentials::CredentialBroker;
+use crate::credentials::{CredentialError, CredentialLease};
+
 const MAX_PROVIDER_ERROR_BYTES: usize = 8 * 1024;
 const MAX_SSE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SSE_STREAM_BYTES: usize = 64 * 1024 * 1024;
@@ -37,6 +40,42 @@ pub struct ProviderConfig {
 pub trait CredentialSource: Send + Sync {
     /// Resolve a short-lived bearer token by opaque handle.
     async fn bearer_token(&self, handle: &str) -> Result<String, ProviderError>;
+}
+
+/// Adapter that keeps the broker boundary explicit for provider clients. The
+/// raw bearer token exists only inside the provider HTTP request; it is never
+/// included in a tool argument, effect, event, or debug value.
+pub struct BrokerCredentialSource {
+    broker: Arc<dyn CredentialBroker>,
+}
+
+impl std::fmt::Debug for BrokerCredentialSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("BrokerCredentialSource(REDACTED)")
+    }
+}
+
+impl BrokerCredentialSource {
+    pub fn new(broker: Arc<dyn CredentialBroker>) -> Self {
+        Self { broker }
+    }
+}
+
+#[async_trait]
+impl CredentialSource for BrokerCredentialSource {
+    async fn bearer_token(&self, handle: &str) -> Result<String, ProviderError> {
+        let lease: CredentialLease = self
+            .broker
+            .resolve(handle)
+            .await
+            .map_err(|error| match error {
+                CredentialError::Unavailable(value) => ProviderError::CredentialUnavailable(value),
+                CredentialError::BrokerUnavailable => {
+                    ProviderError::CredentialUnavailable(handle.to_owned())
+                }
+            })?;
+        Ok(lease.with_value(str::to_owned))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -156,6 +195,13 @@ impl OpenAiCompatibleProvider {
 
     pub fn without_credentials(config: ProviderConfig) -> Result<Self, ProviderError> {
         Self::new(config, Arc::new(NoCredentials))
+    }
+
+    pub fn with_credential_broker(
+        config: ProviderConfig,
+        broker: Arc<dyn CredentialBroker>,
+    ) -> Result<Self, ProviderError> {
+        Self::new(config, Arc::new(BrokerCredentialSource::new(broker)))
     }
 
     pub async fn collect(&self, request: ModelRequest) -> Result<Vec<ModelEvent>, ProviderError> {

@@ -147,20 +147,39 @@ export function formatApprovalGate(
   const digest = sanitizeTerminalLine(safe.invocation.effect_digest);
   const safeEffects = sanitizeTerminalText(JSON.stringify(safe.invocation.effects, null, 2));
   const border = glyph("approvalStart", capabilities);
+  const horizontal = glyph("approvalHorizontal", capabilities);
+  const topRight = glyph("approvalTopRight", capabilities);
   const rail = glyph("approvalRail", capabilities);
   const end = glyph("approvalEnd", capabilities);
-  const header = `${border} ${glyph("approval", capabilities)} APPROVAL REQUIRED · ${tool}`;
-  const footer = `${end} [a] ALLOW ONCE   [d] DENY (default)   [i] INSPECT`;
+  const bottomRight = glyph("approvalBottomRight", capabilities);
+  const headerContent = `${glyph("approval", capabilities)} APPROVAL REQUIRED · ${tool}`;
+  const bodyContent = [
+    ...explanation.split("\n").map((line) => `   ${line}`),
+    ` binding ${digest} · invocation ${invocationId}`,
+    " effects",
+    ...safeEffects.split("\n").map((line) => `   ${line}`),
+  ];
+  const footerContent = "[a] ALLOW ONCE   [d] DENY (default)   [i] INSPECT";
+  const topBaseWidth = border.length + 1 + headerContent.length + 1 + topRight.length;
+  const footerBaseWidth = end.length + 1 + footerContent.length + 1 + bottomRight.length;
+  const bodyBaseWidths = bodyContent.map((line) => rail.length + line.length + rail.length);
+  const frameWidth = Math.max(
+    topBaseWidth + 1,
+    footerBaseWidth + 1,
+    ...bodyBaseWidths.map((width) => width + 1),
+  );
+  const topPadding = frameWidth - topBaseWidth;
+  const bottomPadding = frameWidth - footerBaseWidth;
+  const framedBody = bodyContent.map((line) => {
+    const padding = " ".repeat(frameWidth - rail.length - line.length - rail.length);
+    return `${rail}${line}${padding}${rail}`;
+  });
   const lines = [
-    header,
-    framedLines(explanation, rail),
-    `${rail} binding ${digest} · invocation ${invocationId}`,
-    `${rail} effects`,
-    framedLines(safeEffects, rail),
-    footer,
+    `${border} ${headerContent} ${horizontal.repeat(topPadding)}${topRight}`,
+    ...framedBody,
+    `${end} ${footerContent} ${horizontal.repeat(bottomPadding)}${bottomRight}`,
   ];
   return lines
-    .flatMap((line) => line.split("\n"))
     .map((line) => paint(sanitizeTerminalLine(line), "approval", capabilities, theme))
     .join("\n");
 }

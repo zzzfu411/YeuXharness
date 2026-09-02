@@ -12,6 +12,7 @@ import {
   formatInspector,
   formatSessionBar,
 } from "../src/renderer.js";
+import { replayFixture } from "../src/app.js";
 
 const fixtureDir = join(dirname(fileURLToPath(import.meta.url)), "../fixtures");
 
@@ -80,7 +81,25 @@ describe("paper presenters", () => {
     expect(gate).toContain("|   human review boundary");
     expect(gate).toContain("| binding digest-1 · invocation invocation-gate");
     expect(gate).toContain("`- [a] ALLOW ONCE   [d] DENY (default)   [i] INSPECT");
+    expect(gate).toContain("[i] INSPECT -+");
     expect(gate).not.toContain("\u001b");
+  });
+
+  it("closes the Unicode approval gate on the right", () => {
+    const gate = formatApprovalGate({
+      invocation: {
+        invocation_id: "invocation-unicode",
+        tool_id: "fixture.approval_boundary",
+        tool_version: "1.0",
+        effects: { external_writes: [{ system: "fixture", operation: "review" }] },
+        effect_digest: "digest-unicode",
+        normalized_arguments: {},
+      },
+      explanation: "human review boundary",
+    }, { capabilities: { ...ASCII_CAPS, unicode: true } });
+
+    expect(gate).toContain("╗");
+    expect(gate).toContain("╝");
   });
 
   it("replays the approval-gate fixture as a sequenced waiting turn", () => {
@@ -88,6 +107,18 @@ describe("paper presenters", () => {
     expect(output).toContain("0001 | . START TURN fixture-turn-gate");
     expect(output).toContain("0002 +- o TOOL PROPOSED · human review boundary");
     expect(output).toContain("0003 | ? WAITING FOR APPROVAL · approval required; default DENY");
+  });
+
+  it("replay renders the approval-required fixture event through the closed gate", () => {
+    let output = "";
+    const status = replayFixture(join(fixtureDir, "paper-approval-gate.jsonl"), {
+      ascii: true,
+      write: (text) => { output += text; },
+    });
+    expect(status).toBe(0);
+    expect(output).toContain("0003 | ? WAITING FOR APPROVAL · approval required; default DENY");
+    expect(output).toContain("+- ? APPROVAL REQUIRED · fixture.approval_boundary@fixture -+");
+    expect(output).toContain("`- [a] ALLOW ONCE   [d] DENY (default)   [i] INSPECT -+");
   });
 
   it("keeps unknown visible after the turn fails", () => {

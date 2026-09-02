@@ -27,6 +27,23 @@ describe("parseArgs", () => {
     expect(parseArgs(["run", "-p", "status"], "/workspace").mode).toBe("observe");
     expect(parseArgs([], "/workspace").mode).toBe("observe");
   });
+
+  it("parses a daemon-free fixture replay path", () => {
+    expect(parseArgs(["replay", "fixtures/paper-approval-gate.jsonl"], "/workspace/tui"))
+      .toMatchObject({
+        command: "replay",
+        replayPath: "/workspace/tui/fixtures/paper-approval-gate.jsonl",
+      });
+  });
+
+  it("keeps replay mode when JSONL output is requested", () => {
+    expect(parseArgs(["replay", "--jsonl", "fixtures/paper-approval-gate.jsonl"], "/workspace/tui"))
+      .toMatchObject({
+        command: "replay",
+        jsonl: true,
+        replayPath: "/workspace/tui/fixtures/paper-approval-gate.jsonl",
+      });
+  });
 });
 
 describe("parseApprovalChoice", () => {

@@ -2,11 +2,12 @@ import { resolve } from "node:path";
 
 import type { RuntimeMode } from "@yeux/protocol";
 
-export type TuiCommand = "interactive" | "run" | "help" | "version";
+export type TuiCommand = "interactive" | "run" | "replay" | "help" | "version";
 
 export interface TuiOptions {
   readonly command: TuiCommand;
   readonly prompt?: string;
+  readonly replayPath?: string;
   readonly jsonl: boolean;
   /** Force the copy-safe ASCII presentation for terminals with odd width rules. */
   readonly ascii: boolean;
@@ -42,7 +43,7 @@ export function parseArgs(argv: readonly string[], processCwd = process.cwd()): 
     const arg = argv[index];
     if (arg === undefined) continue;
 
-    if (index === 0 && (arg === "run" || arg === "help" || arg === "version")) {
+    if (index === 0 && (arg === "run" || arg === "replay" || arg === "help" || arg === "version")) {
       command = arg;
       continue;
     }
@@ -56,7 +57,7 @@ export function parseArgs(argv: readonly string[], processCwd = process.cwd()): 
     }
     if (arg === "--jsonl") {
       jsonl = true;
-      command = "run";
+      if (command === "interactive") command = "run";
       continue;
     }
     if (arg === "--ascii") {
@@ -105,7 +106,15 @@ export function parseArgs(argv: readonly string[], processCwd = process.cwd()): 
     positionals.push(arg);
   }
 
-  if (prompt === undefined && positionals.length > 0) prompt = positionals.join(" ");
+  let replayPath: string | undefined;
+  if (command === "replay") {
+    if (positionals.length !== 1 || prompt !== undefined) {
+      throw new Error("replay requires exactly one fixture path");
+    }
+    replayPath = resolve(processCwd, positionals[0] as string);
+  } else if (prompt === undefined && positionals.length > 0) {
+    prompt = positionals.join(" ");
+  }
   if (command === "run" && prompt === undefined) {
     throw new Error("run requires a prompt (use -p or positional text)");
   }
@@ -113,6 +122,7 @@ export function parseArgs(argv: readonly string[], processCwd = process.cwd()): 
   return {
     command,
     ...(prompt === undefined ? {} : { prompt }),
+    ...(replayPath === undefined ? {} : { replayPath }),
     jsonl,
     ascii,
     cwd: resolve(processCwd, cwd),
@@ -129,6 +139,7 @@ Usage:
   yeux                         Start an interactive session
   yeux run -p <prompt>         Run one turn
   yeux run -p <prompt> --jsonl Stream event envelopes as JSONL
+  yeux replay <fixture.jsonl> Replay an inert fixture through the presenters
 
 Options:
   -p, --prompt <text>   Prompt for run mode

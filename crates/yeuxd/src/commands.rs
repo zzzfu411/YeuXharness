@@ -18,7 +18,7 @@ use yeux_protocol::{
 };
 use yeux_runtime::{
     descriptors::DescriptorKind, NewCommandReceipt, NewLedgerEvent, RegisteredDescriptor,
-    WorkspaceIdentitySnapshot,
+    SandboxBackend, SandboxRequirement, WorkspaceIdentitySnapshot,
 };
 
 use crate::runner::TurnRunSpec;
@@ -127,6 +127,25 @@ impl Daemon {
                 ),
             ));
         }
+        let sandbox = SandboxBackend::detect();
+        let sandbox_ready = sandbox
+            .ensure(SandboxRequirement {
+                filesystem_isolation: true,
+                process_isolation: true,
+                network_isolation: true,
+                allow_workspace_write: true,
+                allow_network: false,
+            })
+            .is_ok();
+        let provider_tools_ready = self
+            .inner
+            .config
+            .model_provider
+            .as_ref()
+            .is_some_and(|selection| selection.provider.capabilities().tool_calls);
+        let write_tools_ready = sandbox_ready
+            && provider_tools_ready
+            && self.inner.config.host_ceiling != CapabilityMode::Observe;
         encode(InitializeResult {
             protocol_version: PROTOCOL_VERSION,
             server_info: ClientInfo {
@@ -145,6 +164,9 @@ impl Daemon {
                 // plugin-host is an experimental standalone process and is
                 // not connected to the daemon registry/policy/ledger path.
                 plugins: false,
+                write_tools: write_tools_ready,
+                process_tools: write_tools_ready,
+                sandbox: Some(sandbox.name().to_owned()),
             },
             host_ceiling: self.inner.config.host_ceiling,
         })

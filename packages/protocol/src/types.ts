@@ -211,6 +211,9 @@ export interface InitializeResult {
     readonly jobs: boolean;
     readonly subagents: boolean;
     readonly plugins: boolean;
+    readonly write_tools?: boolean;
+    readonly process_tools?: boolean;
+    readonly sandbox?: string;
   };
   readonly hostCeiling: RuntimeMode;
 }

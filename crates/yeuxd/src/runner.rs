@@ -9,6 +9,8 @@
 
 use std::{
     collections::HashMap,
+    future::Future,
+    pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, MutexGuard, Weak,
@@ -25,21 +27,38 @@ use yeux_core::{
     digest_value, Clock, IdError, IdGenerator, ModelEventSink, ModelProvider, PortError,
 };
 use yeux_protocol::{
-    AgentId, CausationId, ContentBlock, EffectSet, Event, EventEnvelope, InvocationId,
-    InvocationState, Item, ItemId, ItemKind, MessageRole, ModelEvent, ModelMessage, ModelRequest,
-    ModelRequestId, StopReason, ThreadId, TokenBudget, ToolSpec, TurnId, TurnState, WorkspaceId,
-    WorkspaceIdentity, PROTOCOL_VERSION,
+    ApprovalRequestParams, ApprovalRequestResult, AgentId, CapabilityGrant, CapabilityMode,
+    CausationId, ContentBlock, EffectSet, Event, EventEnvelope, InvocationId, InvocationState, Item,
+    ItemId, ItemKind, MessageRole, ModelEvent, ModelMessage, ModelRequest, ModelRequestId,
+    StopReason, ThreadId, TokenBudget, ToolSpec, TurnId, TurnState, WorkspaceId, WorkspaceIdentity,
+    WorkspaceTrust, PROTOCOL_VERSION,
 };
 use yeux_runtime::{
     CoreProjectionError, EventLedger, LedgerError, LedgerEvent, NewInvocationOutcome,
     NewInvocationUnknown, NewInvocationUnknownOutcome, NewLedgerEvent, SearchOperationBudget,
+    NoCredentialBroker, ProcessExecutor, SandboxBackend,
     Workspace as RuntimeWorkspace, WorkspaceSearchControl, WorkspaceTools,
     WORKSPACE_SEARCH_DEFAULT_OPERATION_BUDGET, WORKSPACE_SEARCH_HARD_OPERATION_LIMIT,
     WORKSPACE_SEARCH_TOOL_ID,
 };
 
 use crate::tool_calls::{AssembledToolCall, ToolCallAssembler, ToolCallAssemblyError};
-use crate::tools::{ToolRegistry, ToolRegistryError};
+use crate::grants::resolve_grant_layers;
+use crate::pipeline::{InvocationContext, InvocationPipeline, PipelineError, PipelineGrants};
+use crate::tools::{BuiltInToolRegistryConfig, ToolRegistry, ToolRegistryError};
+
+/// The daemon transport implements this boundary for interactive approval.
+/// A missing handler is deny-by-default; it is never treated as approval.
+pub trait ApprovalHandler: Send + Sync {
+    fn request<'a>(
+        &'a self,
+        params: ApprovalRequestParams,
+    ) -> Pin<Box<dyn Future<Output = ApprovalRequestResult> + Send + 'a>>;
+}
+
+fn pipeline_error(error: PipelineError) -> ToolRegistryError {
+    ToolRegistryError::Authority(error.to_string())
+}
 
 const DEFAULT_MAX_MODEL_ROUNDS: usize = 8;
 const DEFAULT_MAX_TOOL_CALLS_PER_TURN: usize = 32;
@@ -256,6 +275,7 @@ pub struct TurnRunner {
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGenerator>,
     provider: Option<ModelProviderConfig>,
+    host_ceiling: CapabilityMode,
     mutation_gate: Arc<Mutex<()>>,
     tool_workers: Arc<Semaphore>,
     workspace_search_gates: Arc<Mutex<WorkspaceSearchGateMap>>,
@@ -279,12 +299,33 @@ impl TurnRunner {
         provider: Option<ModelProviderConfig>,
         mutation_gate: Arc<Mutex<()>>,
     ) -> Self {
+        Self::new_with_host_ceiling(
+            ledger,
+            events,
+            clock,
+            ids,
+            provider,
+            mutation_gate,
+            CapabilityMode::Operate,
+        )
+    }
+
+    pub fn new_with_host_ceiling(
+        ledger: Arc<EventLedger>,
+        events: broadcast::Sender<EventEnvelope>,
+        clock: Arc<dyn Clock>,
+        ids: Arc<dyn IdGenerator>,
+        provider: Option<ModelProviderConfig>,
+        mutation_gate: Arc<Mutex<()>>,
+        host_ceiling: CapabilityMode,
+    ) -> Self {
         Self {
             ledger,
             events,
             clock,
             ids,
             provider,
+            host_ceiling,
             mutation_gate,
             tool_workers: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_TOOL_WORKERS)),
             workspace_search_gates: Arc::new(Mutex::new(HashMap::new())),
@@ -300,11 +341,22 @@ impl TurnRunner {
         spec: TurnRunSpec,
         cancellation: &(dyn CancellationCheck + Send + Sync),
     ) -> Result<TurnRunResult, TurnRunnerError> {
+        self.run_with_approval(spec, cancellation, None).await
+    }
+
+    pub async fn run_with_approval(
+        &self,
+        spec: TurnRunSpec,
+        cancellation: &(dyn CancellationCheck + Send + Sync),
+        approval: Option<Arc<dyn ApprovalHandler>>,
+    ) -> Result<TurnRunResult, TurnRunnerError> {
         // Allocate the request ID at the wrapper boundary so a cancellation
         // race that aborts `run_inner` before it can return a result can still
         // be reported with the same stable ID after settlement.
         let first_request_id = ModelRequestId::from_uuid(self.ids.next_uuid()?);
-        let result = self.run_inner(spec, first_request_id, cancellation).await;
+        let result = self
+            .run_inner(spec, first_request_id, cancellation, approval)
+            .await;
         let settlement = self.settle_interrupted_turn(spec);
         match settlement {
             Ok(TurnSettlement::Unchanged) => result,
@@ -352,6 +404,7 @@ impl TurnRunner {
         spec: TurnRunSpec,
         first_request_id: ModelRequestId,
         cancellation: &(dyn CancellationCheck + Send + Sync),
+        approval: Option<Arc<dyn ApprovalHandler>>,
     ) -> Result<TurnRunResult, TurnRunnerError> {
         let mut context = RunContext::load(self, spec, first_request_id)?;
 
@@ -369,6 +422,14 @@ impl TurnRunner {
             TurnState::BuildingContext,
             None,
         )?;
+        if let Some(error) = context.turn_override_error.take() {
+            return self.fail(
+                &context,
+                TurnState::BuildingContext,
+                "invalid_capability_override",
+                &error,
+            );
+        }
         if cancellation.is_cancelled() {
             self.cancel(&context, TurnState::BuildingContext)?;
             return Ok(TurnRunResult::Cancelled {
@@ -420,7 +481,7 @@ impl TurnRunner {
         // sealed registry.  Keeping registration, normalization and execution
         // behind this boundary prevents the runner from becoming a second
         // authority path as more built-ins are added.
-        let tool_registry = if provider_capabilities.tool_calls {
+        let (tool_registry, invocation_pipeline) = if provider_capabilities.tool_calls {
             match RuntimeWorkspace::open(&context.workspace_root) {
                 Ok(workspace) => {
                     if let Err(error) =
@@ -433,8 +494,50 @@ impl TurnRunner {
                             &error,
                         );
                     }
-                    match ToolRegistry::workspace_built_ins(WorkspaceTools::new(workspace)) {
-                        Ok(registry) => Some(Arc::new(registry)),
+                    let sandbox = SandboxBackend::detect();
+                    let sandbox_ready = sandbox
+                        .ensure(yeux_runtime::SandboxRequirement {
+                            filesystem_isolation: true,
+                            process_isolation: true,
+                            network_isolation: true,
+                            allow_workspace_write: true,
+                            allow_network: false,
+                        })
+                        .is_ok();
+                    let config = BuiltInToolRegistryConfig::read_only()
+                        .with_hidden_workspace_mutations()
+                        .with_hidden_process();
+                    let config = if sandbox_ready
+                        && self.host_ceiling != CapabilityMode::Observe
+                    {
+                        config
+                            .with_advertised_workspace_mutations()
+                            .with_advertised_process()
+                    } else {
+                        config
+                    };
+                    let runtime_tools = Arc::new(WorkspaceTools::new(workspace));
+                    let process_executor = Arc::new(ProcessExecutor::new(sandbox.clone()));
+                    match ToolRegistry::workspace_built_ins_with_config_and_process(
+                        runtime_tools,
+                        config,
+                        Some(process_executor),
+                    ) {
+                        Ok(registry) => {
+                            let registry = Arc::new(registry);
+                            let grants = resolve_grant_layers(
+                                self.host_ceiling,
+                                context.workspace_trust,
+                                None,
+                                context.turn_override.as_ref(),
+                            );
+                            let pipeline = Arc::new(InvocationPipeline::new(
+                                Arc::clone(&registry),
+                                sandbox,
+                                Arc::new(NoCredentialBroker),
+                            ));
+                            (Some(registry), Some((pipeline, grants)))
+                        }
                         Err(error) => {
                             return self.fail(
                                 &context,
@@ -455,7 +558,7 @@ impl TurnRunner {
                 }
             }
         } else {
-            None
+            (None, None)
         };
         let tool_specs = tool_registry
             .as_ref()
@@ -654,6 +757,7 @@ impl TurnRunner {
                 &calls,
                 &tool_specs,
                 tool_registry,
+                invocation_pipeline.as_ref(),
                 sink.content,
             )?;
             self.transition(
@@ -662,7 +766,7 @@ impl TurnRunner {
                 TurnState::Authorizing,
                 None,
             )?;
-            for invocation in &invocations {
+            for invocation in &mut invocations {
                 if invocation.preparation_failure.is_some() {
                     // Keep a preparation failure at Proposed until its
                     // model-visible ToolResult can be committed together with
@@ -671,12 +775,103 @@ impl TurnRunner {
                     // `append_invocation_outcome` is designed to close.
                     continue;
                 }
+                if invocation.effects.is_read_only() {
+                    // Read-only tools intentionally use the existing bound
+                    // registry executor and do not retain a pipeline token.
+                    // They are auto-approved by policy without crossing the
+                    // interactive approval boundary.
+                    self.persist_invocation_transition(
+                        &context,
+                        invocation.invocation_id,
+                        InvocationState::Proposed,
+                        InvocationState::Approved,
+                        Some("structured read-only tool requires no interactive approval".into()),
+                    )?;
+                    self.persist_invocation_transition(
+                        &context,
+                        invocation.invocation_id,
+                        InvocationState::Approved,
+                        InvocationState::Prepared,
+                        None,
+                    )?;
+                    continue;
+                }
+                let Some(prepared) = invocation.prepared.take() else {
+                    invocation.preparation_failure = Some(ToolPreparationFailure {
+                        output: json!({
+                            "code": "tool_authority_unavailable",
+                            "message": "the daemon did not produce a sealed invocation"
+                        }),
+                        reason: "the daemon did not produce a sealed invocation".into(),
+                    });
+                    continue;
+                };
+                if !prepared.effects.is_read_only() {
+                    let Some((pipeline, _)) = invocation_pipeline else {
+                        invocation.preparation_failure = Some(ToolPreparationFailure {
+                            output: json!({
+                                "code": "tool_authority_unavailable",
+                                "message": "side-effecting tools require the daemon authority pipeline"
+                            }),
+                            reason: "side-effecting tools require the daemon authority pipeline".into(),
+                        });
+                        continue;
+                    };
+                    self.transition(
+                        &context,
+                        TurnState::Authorizing,
+                        TurnState::WaitingForApproval,
+                        None,
+                    )?;
+                    let response = if cancellation.is_cancelled() {
+                        ApprovalRequestResult {
+                            approved: false,
+                            approval: None,
+                        }
+                    } else if let Some(handler) = approval.as_ref() {
+                        handler
+                            .request(pipeline.approval_request(
+                                &prepared,
+                                "side-effecting tool requires approval",
+                            ))
+                            .await
+                    } else {
+                        ApprovalRequestResult {
+                            approved: false,
+                            approval: None,
+                        }
+                    };
+                    self.transition(
+                        &context,
+                        TurnState::WaitingForApproval,
+                        TurnState::Authorizing,
+                        None,
+                    )?;
+                    match pipeline.accept_approval_response(
+                        prepared.clone(),
+                        response.approved,
+                        response.approval,
+                    ) {
+                        Ok(approved) => invocation.prepared = Some(approved),
+                        Err(error) => {
+                            let reason = bounded_message(&error.to_string());
+                            invocation.preparation_failure = Some(ToolPreparationFailure {
+                                output: json!({
+                                    "code": error.code(),
+                                    "message": reason.clone(),
+                                }),
+                                reason,
+                            });
+                            continue;
+                        }
+                    }
+                }
                 self.persist_invocation_transition(
                     &context,
                     invocation.invocation_id,
                     InvocationState::Proposed,
                     InvocationState::Approved,
-                    Some("structured read-only tool requires no interactive approval".into()),
+                    Some("daemon approval binding minted".into()),
                 )?;
                 self.persist_invocation_transition(
                     &context,
@@ -768,7 +963,25 @@ impl TurnRunner {
                     None,
                 )?;
                 invocation.started = true;
-                handles.push(Some((
+                let handle = if let Some(prepared) = invocation.prepared.clone() {
+                    let Some((pipeline, _)) = invocation_pipeline else {
+                        invocation.preparation_failure = Some(ToolPreparationFailure {
+                            output: json!({
+                                "code": "tool_authority_unavailable",
+                                "message": "the daemon authority pipeline disappeared before execution"
+                            }),
+                            reason: "the daemon authority pipeline disappeared before execution".into(),
+                        });
+                        drop(permit);
+                        handles.push(None);
+                        continue;
+                    };
+                    let pipeline = Arc::clone(pipeline);
+                    tokio::spawn(async move {
+                        let _permit: OwnedSemaphorePermit = permit;
+                        pipeline.execute(prepared).await.map_err(pipeline_error)
+                    })
+                } else {
                     tokio::task::spawn_blocking(move || {
                         let _permit: OwnedSemaphorePermit = permit;
                         let _workspace_search_permit = workspace_search_gate;
@@ -784,9 +997,9 @@ impl TurnRunner {
                             &expected_effects,
                             Some(&control),
                         )
-                    }),
-                    worker_cancel,
-                )));
+                    })
+                };
+                handles.push(Some((handle, worker_cancel)));
             }
 
             // Keep cancellation handles separately from the JoinHandles.  The
@@ -1175,6 +1388,7 @@ impl TurnRunner {
         calls: &[AssembledToolCall],
         specs: &[ToolSpec],
         tool_registry: &ToolRegistry,
+        invocation_pipeline: Option<&(Arc<InvocationPipeline>, crate::grants::GrantLayers)>,
         mut assistant_content: Vec<ContentBlock>,
     ) -> Result<Vec<PendingToolInvocation>, TurnRunnerError> {
         let mut invocations = Vec::with_capacity(calls.len());
@@ -1203,10 +1417,11 @@ impl TurnRunner {
                         tool_version: tool_version.clone(),
                     })
                 });
-            let (normalized_arguments, effects, preparation_failure) = match planned {
+            let (normalized_arguments, effects, preparation_failure, prepared) = match planned {
                 Ok(plan) => (
                     plan.normalized_arguments().clone(),
                     plan.effects().clone(),
+                    None,
                     None,
                 ),
                 Err(error) => {
@@ -1224,9 +1439,69 @@ impl TurnRunner {
                             }),
                             reason,
                         }),
+                        None,
                     )
                 }
             };
+            let (normalized_arguments, effects, preparation_failure, prepared) =
+                if preparation_failure.is_none() {
+                    if let Some((pipeline, grants)) = invocation_pipeline {
+                        let pipeline_context = InvocationContext {
+                            invocation_id,
+                            workspace_id: context.workspace_id,
+                            workspace_identity_digest: context.workspace_identity.digest.clone(),
+                            thread_id: context.spec.thread_id,
+                            turn_id: context.spec.turn_id,
+                            agent_id: context.agent_id.clone(),
+                            grants: PipelineGrants {
+                                host_ceiling: grants.host_ceiling.clone(),
+                                user_profile: grants.user_profile.clone(),
+                                project_trust: grants.project_trust.clone(),
+                                turn_override: grants.turn_override.clone(),
+                            },
+                            now: self.clock.now(),
+                            preparation_ttl: chrono::Duration::seconds(
+                                crate::pipeline::DEFAULT_PREPARATION_TTL_SECONDS,
+                            ),
+                        };
+                        match pipeline.prepare(
+                            &call.name,
+                            &tool_version,
+                            call.arguments.clone(),
+                            &pipeline_context,
+                        ) {
+                            Ok(prepared) => {
+                                let normalized = prepared.normalized_arguments.clone();
+                                let effects = prepared.effects.clone();
+                                let authority = if effects.is_read_only() {
+                                    None
+                                } else {
+                                    Some(prepared)
+                                };
+                                (normalized, effects, None, authority)
+                            }
+                            Err(error) => {
+                                let reason = bounded_message(&error.to_string());
+                                (
+                                    call.arguments.clone(),
+                                    effects,
+                                    Some(ToolPreparationFailure {
+                                        output: json!({
+                                            "code": error.code(),
+                                            "message": reason.clone(),
+                                        }),
+                                        reason,
+                                    }),
+                                    None,
+                                )
+                            }
+                        }
+                    } else {
+                        (normalized_arguments, effects, preparation_failure, prepared)
+                    }
+                } else {
+                    (normalized_arguments, effects, preparation_failure, prepared)
+                };
             invocations.push(PendingToolInvocation {
                 invocation_id,
                 call: call.clone(),
@@ -1234,6 +1509,7 @@ impl TurnRunner {
                 normalized_arguments,
                 timeout_ms: registration.map_or(5_000, |spec| spec.timeout_ms),
                 effects,
+                prepared,
                 preparation_failure,
                 scheduler_rejected: false,
                 cancelled_before_start: false,
@@ -2220,6 +2496,7 @@ struct PendingToolInvocation {
     normalized_arguments: Value,
     timeout_ms: u64,
     effects: EffectSet,
+    prepared: Option<yeux_protocol::PreparedInvocation>,
     preparation_failure: Option<ToolPreparationFailure>,
     scheduler_rejected: bool,
     cancelled_before_start: bool,
@@ -2237,7 +2514,11 @@ struct RunContext {
     request_id: ModelRequestId,
     agent_id: AgentId,
     workspace_root: String,
+    workspace_id: WorkspaceId,
     workspace_identity: WorkspaceIdentity,
+    workspace_trust: WorkspaceTrust,
+    turn_override: Option<CapabilityGrant>,
+    turn_override_error: Option<String>,
     events: Vec<EventEnvelope>,
 }
 
@@ -2281,12 +2562,34 @@ impl RunContext {
             },
         )?;
         let events = load_lineage_events(runner, &projection, spec.thread_id)?;
+        let turn_override_value = events
+            .iter()
+            .filter_map(|envelope| match &envelope.event {
+                Event::ItemAdded { item }
+                    if item.turn_id == spec.turn_id && item.kind == ItemKind::UserMessage => {
+                    item.content.get("capability_override").cloned()
+                }
+                _ => None,
+            })
+            .next()
+            .filter(|value| !value.is_null());
+        let (turn_override, turn_override_error) = match turn_override_value {
+            Some(value) => match serde_json::from_value::<CapabilityGrant>(value) {
+                Ok(grant) => (Some(grant), None),
+                Err(error) => (None, Some(error.to_string())),
+            },
+            None => (None, None),
+        };
         Ok(Self {
             spec,
             request_id,
             agent_id: turn.agent_id.clone(),
             workspace_root: workspace.root.clone(),
+            workspace_id: workspace.id,
             workspace_identity: workspace.identity.clone(),
+            workspace_trust: workspace.trust,
+            turn_override,
+            turn_override_error,
             events,
         })
     }

@@ -11,19 +11,29 @@
 use std::{
     collections::BTreeMap,
     fmt,
+    fs,
+    future::Future,
     path::{Component, Path},
+    pin::Pin,
     sync::Arc,
 };
 
 use serde_json::{Map, Value};
 use thiserror::Error;
-use yeux_protocol::{ConcurrencyClass, EffectSet, PathScope, ToolSpec};
+use yeux_core::digest_value;
+use yeux_protocol::{
+    ConcurrencyClass, EffectSet, Idempotency, PathScope, ProcessEffect, Reversibility, ToolSpec,
+};
 use yeux_runtime::{
     workspace_apply_patch_spec, workspace_list_spec, workspace_read_spec, workspace_search_spec,
-    PreparedWorkspaceMutation, WorkspaceSearchControl, WorkspaceToolError, WorkspaceTools,
+    PreparedWorkspaceMutation, ProcessError, ProcessExecutor, ProcessRequest,
+    WorkspaceSearchControl, WorkspaceToolError, WorkspaceTools,
     WORKSPACE_APPLY_PATCH_TOOL_ID, WORKSPACE_LIST_TOOL_ID, WORKSPACE_READ_TOOL_ID,
     WORKSPACE_SEARCH_TOOL_ID, WORKSPACE_TOOL_VERSION,
 };
+
+pub const PROCESS_RUN_TOOL_ID: &str = "process.run";
+pub const PROCESS_TOOL_VERSION: &str = "1";
 
 /// Hard daemon ceiling for one sealed registry.
 pub const MAX_REGISTERED_TOOLS: usize = 128;
@@ -50,17 +60,44 @@ const MAX_EFFECT_STRING_BYTES: usize = 4 * 1024;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BuiltInToolRegistryConfig {
     register_hidden_workspace_mutations: bool,
+    register_hidden_process: bool,
+    advertise_workspace_mutations: bool,
+    advertise_process: bool,
 }
 
 impl BuiltInToolRegistryConfig {
     pub const fn read_only() -> Self {
         Self {
             register_hidden_workspace_mutations: false,
+            register_hidden_process: false,
+            advertise_workspace_mutations: false,
+            advertise_process: false,
         }
     }
 
     pub const fn with_hidden_workspace_mutations(mut self) -> Self {
         self.register_hidden_workspace_mutations = true;
+        self
+    }
+
+    pub const fn with_hidden_process(mut self) -> Self {
+        self.register_hidden_process = true;
+        self
+    }
+
+    /// Advertise the mutation adapter to the provider. Callers must only set
+    /// this after the daemon has confirmed the complete policy/sandbox path.
+    pub const fn with_advertised_workspace_mutations(mut self) -> Self {
+        self.register_hidden_workspace_mutations = true;
+        self.advertise_workspace_mutations = true;
+        self
+    }
+
+    /// Advertise the process adapter to the provider. Callers must only set
+    /// this after the daemon has confirmed the complete policy/sandbox path.
+    pub const fn with_advertised_process(mut self) -> Self {
+        self.register_hidden_process = true;
+        self.advertise_process = true;
         self
     }
 }
@@ -150,6 +187,19 @@ pub enum ToolRegistryError {
         #[source]
         source: WorkspaceToolError,
     },
+    #[error("process tool {tool_id}@{tool_version} failed: {source}")]
+    Process {
+        tool_id: String,
+        tool_version: String,
+        #[source]
+        source: ProcessError,
+    },
+    #[error("process tool arguments are invalid: {0}")]
+    InvalidProcessArguments(String),
+    #[error("process tool requires the async execution boundary")]
+    ProcessRequiresAsync,
+    #[error("tool authority pipeline rejected the invocation: {0}")]
+    Authority(String),
 }
 
 impl ToolRegistryError {
@@ -171,6 +221,10 @@ impl ToolRegistryError {
             Self::EffectEscalation { .. } => "tool_registry_effect_escalation",
             Self::AdapterPayloadMismatch { .. } => "tool_registry_adapter_payload_mismatch",
             Self::WorkspaceTool { source, .. } => source.code(),
+            Self::Process { .. } => "process_execution_failed",
+            Self::InvalidProcessArguments(_) => "process_invalid_arguments",
+            Self::ProcessRequiresAsync => "process_async_required",
+            Self::Authority(_) => "tool_authority_rejected",
         }
     }
 
@@ -262,6 +316,21 @@ impl ToolRegistry {
         config: BuiltInToolRegistryConfig,
     ) -> Result<Self, ToolRegistryError> {
         let tools = Arc::new(tools);
+        Self::workspace_built_ins_with_config_and_process(
+            tools,
+            config,
+            None,
+        )
+    }
+
+    /// Register built-ins with an optional daemon-owned process executor.
+    /// `process.run` is never visible in the provider tool list at registration
+    /// time; the M2 pipeline is the only component that can execute it.
+    pub fn workspace_built_ins_with_config_and_process(
+        tools: Arc<WorkspaceTools>,
+        config: BuiltInToolRegistryConfig,
+        process_executor: Option<Arc<ProcessExecutor>>,
+    ) -> Result<Self, ToolRegistryError> {
         let mut registrations = vec![
             RegisteredTool::advertised(
                 workspace_list_spec(),
@@ -286,12 +355,39 @@ impl ToolRegistry {
             ),
         ];
         if config.register_hidden_workspace_mutations {
-            registrations.push(RegisteredTool::hidden(
-                workspace_apply_patch_spec(),
-                Arc::new(WorkspaceMutationAdapter::new(tools)),
-            ));
+            let spec = workspace_apply_patch_spec();
+            let adapter = Arc::new(WorkspaceMutationAdapter::new(Arc::clone(&tools)));
+            registrations.push(if config.advertise_workspace_mutations {
+                RegisteredTool::advertised(spec, adapter)
+            } else {
+                RegisteredTool::hidden(spec, adapter)
+            });
+        }
+        if config.register_hidden_process {
+            let executor = process_executor
+                .unwrap_or_else(|| Arc::new(ProcessExecutor::detect()));
+            let spec = process_run_spec();
+            let adapter = Arc::new(ProcessAdapter::new(Arc::clone(&tools), executor));
+            registrations.push(if config.advertise_process {
+                RegisteredTool::advertised(spec, adapter)
+            } else {
+                RegisteredTool::hidden(spec, adapter)
+            });
         }
         Self::try_new(registrations)
+    }
+
+    pub fn workspace_built_ins_with_process(
+        tools: WorkspaceTools,
+        process_executor: Arc<ProcessExecutor>,
+    ) -> Result<Self, ToolRegistryError> {
+        Self::workspace_built_ins_with_config_and_process(
+            Arc::new(tools),
+            BuiltInToolRegistryConfig::read_only()
+                .with_hidden_workspace_mutations()
+                .with_hidden_process(),
+            Some(process_executor),
+        )
     }
 
     fn try_new(registrations: Vec<RegisteredTool>) -> Result<Self, ToolRegistryError> {
@@ -342,6 +438,11 @@ impl ToolRegistry {
 
     pub fn registered_len(&self) -> usize {
         self.tools.len()
+    }
+
+    pub fn is_registered(&self, tool_id: &str, tool_version: &str) -> bool {
+        self.tools
+            .contains_key(&ToolKey::new(tool_id, tool_version))
     }
 
     pub fn advertised_len(&self) -> usize {
@@ -559,13 +660,47 @@ impl ToolRegistry {
     /// Consume one opaque authority permit and execute its sealed adapter.
     ///
     /// There is intentionally no public constructor for [`ExecutionPermit`].
-    /// The P1 invocation pipeline will mint it only after policy, approval,
-    /// sandbox capability, and revalidation checks have succeeded.
+    /// [`crate::pipeline::InvocationPipeline`] mints it only after policy,
+    /// approval, sandbox capability, and revalidation checks have succeeded.
     pub fn execute(
         &self,
         permit: ExecutionPermit,
     ) -> Result<ToolExecutionOutput, ToolRegistryError> {
         self.execute_with_control(permit, None)
+    }
+
+    /// Async counterpart used by `process.run`. Read and mutation adapters
+    /// retain their synchronous implementation; process execution awaits the
+    /// runtime supervisor without creating a nested Tokio runtime.
+    pub async fn execute_async(
+        &self,
+        permit: ExecutionPermit,
+    ) -> Result<ToolExecutionOutput, ToolRegistryError> {
+        self.execute_async_with_control(permit).await
+    }
+
+    async fn execute_async_with_control(
+        &self,
+        permit: ExecutionPermit,
+    ) -> Result<ToolExecutionOutput, ToolRegistryError> {
+        let ExecutionPermit {
+            registry_seal,
+            key,
+            workspace_identity: _,
+            normalized_arguments,
+            effects,
+            payload,
+        } = permit;
+        if !Arc::ptr_eq(&self.seal, &registry_seal) {
+            return Err(ToolRegistryError::ForeignExecutionPermit);
+        }
+        let registration = self.registration(&key.id, &key.version)?;
+        verify_effect_subset(&registration.spec, &effects)?;
+        let value = registration
+            .adapter
+            .execute_async(normalized_arguments, payload)
+            .await?;
+        Ok(ToolExecutionOutput { value })
     }
 
     fn execute_with_control(
@@ -687,7 +822,7 @@ impl RevalidatedToolPlan {
     /// Reserved for `InvocationPipeline`: this remains private so registry
     /// consumers cannot turn preparation evidence into execution authority.
     #[allow(dead_code)]
-    fn into_execution_permit(self) -> ExecutionPermit {
+    pub(crate) fn into_execution_permit(self) -> ExecutionPermit {
         ExecutionPermit {
             registry_seal: self.registry_seal,
             key: self.key,
@@ -800,6 +935,7 @@ struct AdapterRevalidation {
 enum PlannedPayload {
     WorkspaceRead,
     WorkspaceMutation(Box<PreparedWorkspaceMutation>),
+    Process(Box<ProcessRequest>),
     #[cfg(test)]
     Test,
 }
@@ -807,6 +943,7 @@ enum PlannedPayload {
 enum ExecutionPayload {
     WorkspaceRead,
     WorkspaceMutation(Box<PreparedWorkspaceMutation>),
+    Process(Box<ProcessRequest>),
     #[cfg(test)]
     Test,
 }
@@ -828,6 +965,14 @@ trait SealedToolAdapter: Send + Sync {
         payload: ExecutionPayload,
         control: Option<&WorkspaceSearchControl<'_>>,
     ) -> Result<Value, ToolRegistryError>;
+
+    fn execute_async<'a>(
+        &'a self,
+        normalized_arguments: Value,
+        payload: ExecutionPayload,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, ToolRegistryError>> + Send + 'a>> {
+        Box::pin(async move { self.execute(normalized_arguments, payload, None) })
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1029,6 +1174,278 @@ impl SealedToolAdapter for WorkspaceMutationAdapter {
         self.tools
             .execute_prepared_mutation(&prepared)
             .map_err(Self::error)
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProcessArguments {
+    executable: String,
+    #[serde(default)]
+    arguments: Vec<String>,
+    #[serde(default = "default_process_cwd")]
+    cwd: String,
+    /// Environment and stdin are intentionally absent from the schema. They
+    /// are broker/policy capabilities, never provider-controlled fields.
+}
+
+fn default_process_cwd() -> String {
+    ".".into()
+}
+
+#[derive(Debug)]
+struct ProcessAdapter {
+    tools: Arc<WorkspaceTools>,
+    executor: Arc<ProcessExecutor>,
+}
+
+impl ProcessAdapter {
+    fn new(tools: Arc<WorkspaceTools>, executor: Arc<ProcessExecutor>) -> Self {
+        Self { tools, executor }
+    }
+
+    fn invalid(message: impl Into<String>) -> ToolRegistryError {
+        ToolRegistryError::InvalidProcessArguments(message.into())
+    }
+
+    fn parse(
+        &self,
+        arguments: Value,
+    ) -> Result<(Value, ProcessRequest, EffectSet), ToolRegistryError> {
+        let parsed: ProcessArguments = serde_json::from_value(arguments)
+            .map_err(|error| Self::invalid(error.to_string()))?;
+        if parsed.executable.is_empty() {
+            return Err(Self::invalid("executable must not be empty"));
+        }
+        if !Path::new(&parsed.executable).is_absolute() {
+            return Err(Self::invalid("executable must be absolute"));
+        }
+        if parsed.arguments.len() > 128 {
+            return Err(Self::invalid("argument count exceeds 128"));
+        }
+        let argument_bytes = parsed
+            .arguments
+            .iter()
+            .map(String::len)
+            .sum::<usize>();
+        if argument_bytes > 256 * 1024 {
+            return Err(Self::invalid("serialized arguments exceed 262144 bytes"));
+        }
+        if parsed
+            .arguments
+            .iter()
+            .any(|argument| argument.len() > 64 * 1024)
+        {
+            return Err(Self::invalid("an argument exceeds 65536 bytes"));
+        }
+        let executable = fs::canonicalize(&parsed.executable)
+            .map_err(|error| Self::invalid(format!("executable is unavailable: {error}")))?;
+        if !fs::metadata(&executable)
+            .map_err(|error| Self::invalid(error.to_string()))?
+            .is_file()
+        {
+            return Err(Self::invalid("executable is not a regular file"));
+        }
+        let cwd = self
+            .tools
+            .workspace()
+            .resolve_directory(&parsed.cwd)
+            .map_err(|error| Self::invalid(error.to_string()))?;
+        let relative_cwd = cwd
+            .strip_prefix(self.tools.workspace().root())
+            .map_err(|_| Self::invalid("cwd escapes the workspace"))?;
+        let cwd_value = if relative_cwd.as_os_str().is_empty() {
+            ".".to_owned()
+        } else {
+            relative_cwd.to_string_lossy().into_owned()
+        };
+        let args_value = Value::Array(
+            parsed
+                .arguments
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        );
+        let argument_digest = digest_value(&args_value);
+        let effects = EffectSet {
+            processes: vec![ProcessEffect {
+                executable: executable.to_string_lossy().into_owned(),
+                argument_digest: Some(argument_digest),
+                may_spawn_children: true,
+            }],
+            idempotency: Idempotency::Unknown,
+            reversibility: Reversibility::Unknown,
+            ..EffectSet::default()
+        };
+        let executable_string = executable.to_string_lossy().into_owned();
+        let normalized = serde_json::json!({
+            "executable": executable_string,
+            "arguments": args_value,
+            "cwd": cwd_value,
+        });
+        let mut request = ProcessRequest::new(executable.clone());
+        request.arguments = parsed.arguments;
+        request.cwd = Path::new(normalized["cwd"].as_str().unwrap_or(".")).to_owned();
+        request.timeout = std::time::Duration::from_secs(5 * 60);
+        request.output_limit_bytes = 8 * 1024 * 1024;
+        // The daemon, not the provider, chooses the sandbox profile. Process
+        // requests are always network-disabled and read-only at this adapter.
+        request.sandbox.allow_network = false;
+        request.sandbox.allow_workspace_write = false;
+        Ok((normalized, request, effects))
+    }
+
+    fn process_error(error: ProcessError) -> ToolRegistryError {
+        ToolRegistryError::Process {
+            tool_id: PROCESS_RUN_TOOL_ID.into(),
+            tool_version: PROCESS_TOOL_VERSION.into(),
+            source: error,
+        }
+    }
+}
+
+impl SealedToolAdapter for ProcessAdapter {
+    fn supports(&self, key: &ToolKey) -> bool {
+        key.id == PROCESS_RUN_TOOL_ID && key.version == PROCESS_TOOL_VERSION
+    }
+
+    fn plan(&self, arguments: Value) -> Result<AdapterPlan, ToolRegistryError> {
+        let (normalized_arguments, request, effects) = self.parse(arguments)?;
+        Ok(AdapterPlan {
+            workspace_identity: self.tools.workspace().identity().to_owned(),
+            normalized_arguments,
+            effects,
+            payload: PlannedPayload::Process(Box::new(request)),
+        })
+    }
+
+    fn revalidate(
+        &self,
+        workspace_identity: &str,
+        normalized_arguments: &Value,
+        effects: &EffectSet,
+        payload: PlannedPayload,
+    ) -> Result<AdapterRevalidation, ToolRegistryError> {
+        let PlannedPayload::Process(previous) = payload else {
+            return Err(ToolRegistryError::AdapterPayloadMismatch {
+                tool_id: PROCESS_RUN_TOOL_ID.into(),
+                tool_version: PROCESS_TOOL_VERSION.into(),
+            });
+        };
+        if workspace_identity != self.tools.workspace().identity() {
+            return Err(ToolRegistryError::PlanChanged {
+                field: "workspace_identity",
+            });
+        }
+        let (current_arguments, current_request, current_effects) =
+            self.parse(normalized_arguments.clone())?;
+        if current_arguments != *normalized_arguments || current_effects != *effects {
+            return Err(ToolRegistryError::PlanChanged { field: "process_binding" });
+        }
+        if previous.executable != current_request.executable
+            || previous.arguments != current_request.arguments
+            || previous.cwd != current_request.cwd
+        {
+            return Err(ToolRegistryError::PlanChanged { field: "process_request" });
+        }
+        Ok(AdapterRevalidation {
+            workspace_identity: self.tools.workspace().identity().to_owned(),
+            normalized_arguments: current_arguments,
+            effects: current_effects,
+            payload: ExecutionPayload::Process(Box::new(current_request)),
+        })
+    }
+
+    fn execute(
+        &self,
+        _normalized_arguments: Value,
+        _payload: ExecutionPayload,
+        _control: Option<&WorkspaceSearchControl<'_>>,
+    ) -> Result<Value, ToolRegistryError> {
+        Err(ToolRegistryError::ProcessRequiresAsync)
+    }
+
+    fn execute_async<'a>(
+        &'a self,
+        _normalized_arguments: Value,
+        payload: ExecutionPayload,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, ToolRegistryError>> + Send + 'a>> {
+        let workspace = self.tools.workspace().clone();
+        let executor = Arc::clone(&self.executor);
+        Box::pin(async move {
+            let ExecutionPayload::Process(request) = payload else {
+                return Err(ToolRegistryError::AdapterPayloadMismatch {
+                    tool_id: PROCESS_RUN_TOOL_ID.into(),
+                    tool_version: PROCESS_TOOL_VERSION.into(),
+                });
+            };
+            let output = executor
+                .execute(&workspace, *request)
+                .await
+                .map_err(Self::process_error)?;
+            Ok(process_output(output))
+        })
+    }
+}
+
+fn process_output(output: yeux_runtime::ProcessOutput) -> Value {
+    serde_json::json!({
+        "exit_code": output.exit_code,
+        "stdout": String::from_utf8_lossy(&output.stdout),
+        "stderr": String::from_utf8_lossy(&output.stderr),
+        "stdout_truncated": output.stdout_truncated,
+        "stderr_truncated": output.stderr_truncated,
+        "timed_out": output.timed_out,
+        "duration_ms": output.duration.as_millis(),
+    })
+}
+
+pub fn process_run_spec() -> ToolSpec {
+    ToolSpec {
+        id: PROCESS_RUN_TOOL_ID.into(),
+        version: PROCESS_TOOL_VERSION.into(),
+        description: "Run one absolute executable inside the daemon OS sandbox".into(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["executable"],
+            "properties": {
+                "executable": {"type": "string", "minLength": 1},
+                "arguments": {
+                    "type": "array",
+                    "maxItems": 128,
+                    "items": {"type": "string", "maxLength": 65536}
+                },
+                "cwd": {"type": "string", "default": "."}
+            }
+        }),
+        output_schema: serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "exit_code": {"type": ["integer", "null"]},
+                "stdout": {"type": "string"},
+                "stderr": {"type": "string"},
+                "stdout_truncated": {"type": "boolean"},
+                "stderr_truncated": {"type": "boolean"},
+                "timed_out": {"type": "boolean"},
+                "duration_ms": {"type": "integer"}
+            }
+        }),
+        effect_template: EffectSet {
+            processes: vec![ProcessEffect {
+                executable: "*".into(),
+                argument_digest: None,
+                may_spawn_children: true,
+            }],
+            idempotency: Idempotency::Unknown,
+            reversibility: Reversibility::Unknown,
+            ..EffectSet::default()
+        },
+        concurrency: ConcurrencyClass::SerialProcess,
+        timeout_ms: 5 * 60 * 1_000,
+        inline_output_budget_bytes: 8 * 1024 * 1024,
     }
 }
 
@@ -1300,7 +1717,12 @@ fn verify_effect_subset(spec: &ToolSpec, concrete: &EffectSet) -> Result<(), Too
     let entries_allowed = concrete
         .processes
         .iter()
-        .all(|effect| template.processes.contains(effect))
+        .all(|effect| template.processes.iter().any(|allowed| {
+            (allowed.executable == "*" || allowed.executable == effect.executable)
+                && (allowed.argument_digest.is_none()
+                    || allowed.argument_digest == effect.argument_digest)
+                && (!effect.may_spawn_children || allowed.may_spawn_children)
+        }))
         && concrete
             .network
             .iter()
@@ -1498,6 +1920,48 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(keys, ["alpha@1", "alpha@2", "zeta@1"]);
         assert!(registry.resolve_exact("hidden", "1").is_ok());
+    }
+
+    #[test]
+    fn side_effecting_builtins_are_registered_only_as_hidden_adapters() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("hello.txt"), "hello\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let registry = ToolRegistry::workspace_built_ins_with_config_and_process(
+            Arc::new(WorkspaceTools::new(workspace)),
+            BuiltInToolRegistryConfig::read_only()
+                .with_hidden_workspace_mutations()
+                .with_hidden_process(),
+            Some(Arc::new(ProcessExecutor::detect())),
+        )
+        .unwrap();
+        assert!(registry.is_registered(WORKSPACE_APPLY_PATCH_TOOL_ID, WORKSPACE_TOOL_VERSION));
+        assert!(registry.is_registered(PROCESS_RUN_TOOL_ID, PROCESS_TOOL_VERSION));
+        assert!(registry
+            .advertised_specs()
+            .iter()
+            .all(|spec| spec.id != WORKSPACE_APPLY_PATCH_TOOL_ID && spec.id != PROCESS_RUN_TOOL_ID));
+    }
+
+    #[test]
+    fn read_only_convenience_executor_cannot_bypass_the_side_effect_gate() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("hello.txt"), "hello\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let registry = ToolRegistry::workspace_built_ins_with_config(
+            WorkspaceTools::new(workspace),
+            BuiltInToolRegistryConfig::read_only().with_hidden_workspace_mutations(),
+        )
+        .unwrap();
+        let base = blake3::hash(b"hello\n").to_hex().to_string();
+        let error = registry
+            .execute_read_only(
+                WORKSPACE_APPLY_PATCH_TOOL_ID,
+                WORKSPACE_TOOL_VERSION,
+                json!({"path":"hello.txt", "base_revision":base, "replacement":"changed\n"}),
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), "tool_registry_effect_escalation");
     }
 
     #[test]

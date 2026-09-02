@@ -88,6 +88,16 @@ pub enum SandboxError {
 }
 
 impl SandboxBackend {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::MacOsSeatbelt { .. } => "seatbelt",
+            Self::LinuxBubblewrap { .. } => "bubblewrap",
+            Self::Unavailable { .. } => "unavailable",
+            #[cfg(test)]
+            Self::TestPassthrough => "test",
+        }
+    }
+
     pub fn detect() -> Self {
         #[cfg(target_os = "macos")]
         {

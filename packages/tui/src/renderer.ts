@@ -210,7 +210,10 @@ function formatPolicy(policy: CapabilityGrant | Record<string, unknown>): string
   const network = formatPolicyValue(record.network);
   const secrets = formatPolicyValue(record.secrets);
   const external = formatPolicyValue(record.external_write ?? record.external_writes);
-  return `MODE ${mode} · filesystem_read ${read} · filesystem_write ${write} · filesystem_delete ${remove} · process ${process} · network ${network} · secrets ${secrets} · external_write ${external}`;
+  const writeTools = record.write_tools_available === true ? "yes" : "none";
+  const processTools = record.process_tools_available === true ? "yes" : "none";
+  const sandbox = typeof record.sandbox === "string" ? record.sandbox : "unavailable";
+  return `MODE ${mode} · filesystem_read ${read} · filesystem_write ${write} · filesystem_delete ${remove} · process ${process} · network ${network} · secrets ${secrets} · external_write ${external} · write_tools ${writeTools} · process_tools ${processTools} · sandbox ${sandbox}`;
 }
 
 // Names used by screen-mode callers; keeping aliases avoids a second presenter contract.
