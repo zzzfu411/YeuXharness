@@ -152,6 +152,12 @@ pub(crate) struct DaemonInner {
     _state_lock: File,
 }
 
+impl Drop for DaemonInner {
+    fn drop(&mut self) {
+        let _ = self._state_lock.unlock();
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct CommandOutcome {
     pub(crate) result: Value,
@@ -267,9 +273,16 @@ impl Daemon {
             .truncate(false)
             .open(&lock_path)?;
         set_private_file(&lock_path)?;
-        state_lock
-            .try_lock_exclusive()
-            .map_err(|_| DaemonError::AlreadyRunning(lock_path))?;
+        state_lock.try_lock_exclusive().map_err(|error| {
+            if matches!(
+                error.kind(),
+                io::ErrorKind::AlreadyExists | io::ErrorKind::WouldBlock
+            ) {
+                DaemonError::AlreadyRunning(lock_path)
+            } else {
+                DaemonError::Io(error)
+            }
+        })?;
 
         let database = config.state_dir.join("state.sqlite3");
         let ledger = Arc::new(EventLedger::open(&database)?);
@@ -310,6 +323,27 @@ impl Daemon {
                 _state_lock: state_lock,
             }),
         })
+    }
+
+    /// Re-open a state directory after the previous [`Daemon`] was dropped.
+    ///
+    /// macOS can report `owner.lock` as still held for a short window after the
+    /// last file descriptor is closed, especially when other tests are spawning
+    /// sandboxed children in the same process. Retry only that contention.
+    #[cfg(test)]
+    pub(crate) fn reopen(config: DaemonConfig) -> Result<Self, DaemonError> {
+        let started = std::time::Instant::now();
+        loop {
+            match Self::open(config.clone()) {
+                Ok(daemon) => return Ok(daemon),
+                Err(DaemonError::AlreadyRunning(_))
+                    if started.elapsed() < std::time::Duration::from_millis(750) =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     pub async fn serve_stdio(self) -> Result<(), DaemonError> {
@@ -1778,7 +1812,7 @@ mod tests {
         };
 
         let daemon =
-            Daemon::open(DaemonConfig::in_directory(state_dir.path()).without_turn_execution())
+            Daemon::reopen(DaemonConfig::in_directory(state_dir.path()).without_turn_execution())
                 .unwrap();
         let projection = daemon.projection().unwrap();
         assert_eq!(projection.turns[&orphaned_turn_id].state, TurnState::Failed);
@@ -1922,7 +1956,7 @@ mod tests {
         };
 
         let first_restart =
-            Daemon::open(DaemonConfig::in_directory(state_dir.path()).without_turn_execution())
+            Daemon::reopen(DaemonConfig::in_directory(state_dir.path()).without_turn_execution())
                 .unwrap();
         let projection = first_restart.projection().unwrap();
         assert_eq!(
@@ -2025,7 +2059,7 @@ mod tests {
         let event_count = events.len();
         drop(first_restart);
         let second_restart =
-            Daemon::open(DaemonConfig::in_directory(state_dir.path()).without_turn_execution())
+            Daemon::reopen(DaemonConfig::in_directory(state_dir.path()).without_turn_execution())
                 .unwrap();
         let rebuilt = second_restart.inner.ledger.project_core().unwrap();
         assert_eq!(

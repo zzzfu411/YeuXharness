@@ -1313,7 +1313,7 @@ mod tests {
         drop(connection);
         drop(daemon);
 
-        let reopened = Daemon::open(DaemonConfig::in_directory(state.path())).unwrap();
+        let reopened = Daemon::reopen(DaemonConfig::in_directory(state.path())).unwrap();
         let rebuilt = reopened.projection().unwrap();
         assert_eq!(rebuilt.workspaces, expected.workspaces);
         assert_eq!(rebuilt.items, expected.items);
@@ -1461,7 +1461,7 @@ mod tests {
         drop(connection);
         drop(daemon);
 
-        let reopened = Daemon::open(DaemonConfig::in_directory(state.path())).unwrap();
+        let reopened = Daemon::reopen(DaemonConfig::in_directory(state.path())).unwrap();
         let mut connection = ConnectionState {
             initialized: true,
             ..ConnectionState::default()
@@ -1655,7 +1655,7 @@ mod tests {
 
         drop(connection);
         drop(daemon);
-        let reopened = Daemon::open(DaemonConfig::in_directory(state.path())).unwrap();
+        let reopened = Daemon::reopen(DaemonConfig::in_directory(state.path())).unwrap();
         let mut connection = ConnectionState {
             initialized: true,
             ..ConnectionState::default()
