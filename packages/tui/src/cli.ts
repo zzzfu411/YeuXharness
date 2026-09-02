@@ -24,7 +24,7 @@ async function main(): Promise<number> {
   }
   try {
     if (options.command === "replay") {
-      return replayFixture(options.replayPath as string, {
+      return await replayFixture(options.replayPath as string, {
         ascii: options.ascii,
         jsonl: options.jsonl,
       });

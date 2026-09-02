@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { Readable } from "node:stream";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -109,16 +110,18 @@ describe("paper presenters", () => {
     expect(output).toContain("0003 | ? WAITING FOR APPROVAL · approval required; default DENY");
   });
 
-  it("replay renders the approval-required fixture event through the closed gate", () => {
+  it("replay enters Prompter.approval() for the closed gate", async () => {
     let output = "";
-    const status = replayFixture(join(fixtureDir, "paper-approval-gate.jsonl"), {
+    const status = await replayFixture(join(fixtureDir, "paper-approval-gate.jsonl"), {
       ascii: true,
+      input: Readable.from(["d\n"]),
       write: (text) => { output += text; },
     });
     expect(status).toBe(0);
     expect(output).toContain("0003 | ? WAITING FOR APPROVAL · approval required; default DENY");
     expect(output).toContain("+- ? APPROVAL REQUIRED · fixture.approval_boundary@fixture -+");
     expect(output).toContain("`- [a] ALLOW ONCE   [d] DENY (default)   [i] INSPECT -+");
+    expect(output).toContain("approval:");
   });
 
   it("keeps unknown visible after the turn fails", () => {
