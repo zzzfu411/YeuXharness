@@ -44,6 +44,10 @@ describe("parseArgs", () => {
         replayPath: "/workspace/tui/fixtures/paper-approval-gate.jsonl",
       });
   });
+
+  it("still accepts --mode build as a request; the Session Bar must clamp display", () => {
+    expect(parseArgs(["run", "-p", "status", "--mode", "build"], "/workspace").mode).toBe("build");
+  });
 });
 
 describe("parseApprovalChoice", () => {

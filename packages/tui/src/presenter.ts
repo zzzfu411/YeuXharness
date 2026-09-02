@@ -11,6 +11,7 @@ export {
   renderInspector,
   renderSessionBar,
   renderTimelineEvent,
+  sessionBarModeLabel,
   type InspectorState,
   type PresenterFormatOptions,
   type SessionBarState,

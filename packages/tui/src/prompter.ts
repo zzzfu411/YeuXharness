@@ -160,9 +160,11 @@ export function formatApprovalGate(
     ...safeEffects.split("\n").map((line) => `   ${line}`),
   ];
   const footerContent = "[a] ALLOW ONCE   [d] DENY (default)   [i] INSPECT";
-  const topBaseWidth = border.length + 1 + headerContent.length + 1 + topRight.length;
-  const footerBaseWidth = end.length + 1 + footerContent.length + 1 + bottomRight.length;
-  const bodyBaseWidths = bodyContent.map((line) => rail.length + line.length + rail.length);
+  // Do not re-trim framed lines: sanitizeTerminalLine would eat trailing
+  // padding and can drop the right rail that closes ╔╗ / ╚╝ (ASCII +-+).
+  const topBaseWidth = displayWidth(border) + 1 + displayWidth(headerContent) + 1 + displayWidth(topRight);
+  const footerBaseWidth = displayWidth(end) + 1 + displayWidth(footerContent) + 1 + displayWidth(bottomRight);
+  const bodyBaseWidths = bodyContent.map((line) => displayWidth(rail) + displayWidth(line) + displayWidth(rail));
   const frameWidth = Math.max(
     topBaseWidth + 1,
     footerBaseWidth + 1,
@@ -171,7 +173,7 @@ export function formatApprovalGate(
   const topPadding = frameWidth - topBaseWidth;
   const bottomPadding = frameWidth - footerBaseWidth;
   const framedBody = bodyContent.map((line) => {
-    const padding = " ".repeat(frameWidth - rail.length - line.length - rail.length);
+    const padding = " ".repeat(frameWidth - displayWidth(rail) - displayWidth(line) - displayWidth(rail));
     return `${rail}${line}${padding}${rail}`;
   });
   const lines = [
@@ -180,8 +182,12 @@ export function formatApprovalGate(
     `${end} ${footerContent} ${horizontal.repeat(bottomPadding)}${bottomRight}`,
   ];
   return lines
-    .map((line) => paint(sanitizeTerminalLine(line), "approval", capabilities, theme))
+    .map((line) => paint(line, "approval", capabilities, theme))
     .join("\n");
+}
+
+function displayWidth(text: string): number {
+  return [...text].length;
 }
 
 export const renderApprovalGate = formatApprovalGate;

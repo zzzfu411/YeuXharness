@@ -1,5 +1,4 @@
 import { readFileSync } from "node:fs";
-import { Readable } from "node:stream";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -83,6 +82,9 @@ describe("paper presenters", () => {
     expect(gate).toContain("| binding digest-1 · invocation invocation-gate");
     expect(gate).toContain("`- [a] ALLOW ONCE   [d] DENY (default)   [i] INSPECT");
     expect(gate).toContain("[i] INSPECT -+");
+    expect(gate.split("\n")[0]?.endsWith("+")).toBe(true);
+    expect(gate.split("\n").at(-1)?.endsWith("+")).toBe(true);
+    expect(gate.split("\n").some((line) => line.startsWith("|") && line.endsWith("|"))).toBe(true);
     expect(gate).not.toContain("\u001b");
   });
 
@@ -98,9 +100,58 @@ describe("paper presenters", () => {
       },
       explanation: "human review boundary",
     }, { capabilities: { ...ASCII_CAPS, unicode: true } });
+    const lines = gate.split("\n");
 
-    expect(gate).toContain("╗");
-    expect(gate).toContain("╝");
+    expect(lines[0]?.startsWith("╔")).toBe(true);
+    expect(lines[0]?.endsWith("╗")).toBe(true);
+    expect(lines.at(-1)?.startsWith("╚")).toBe(true);
+    expect(lines.at(-1)?.endsWith("╝")).toBe(true);
+    expect(lines.some((line) => line.startsWith("║") && line.endsWith("║"))).toBe(true);
+    expect(gate).toContain("[a] ALLOW ONCE");
+    expect(gate).toContain("[d] DENY (default)");
+    expect(gate).toContain("[i] INSPECT");
+  });
+
+  it("cannot display MODE BUILD without a write grant and sandbox", () => {
+    const requested = formatSessionBar({
+      cwd: "/tmp/ws",
+      thread: "thread-1",
+      mode: "build",
+      model: "local/qwen",
+    }, { capabilities: ASCII_CAPS });
+    expect(requested).not.toContain("MODE BUILD");
+    expect(requested).toContain("MODE OBSERVE");
+
+    const writeOnly = formatSessionBar({
+      cwd: "/tmp/ws",
+      thread: "thread-1",
+      mode: "build",
+      model: "local/qwen",
+      writeGrant: ["/tmp/ws"],
+      sandbox: false,
+    }, { capabilities: ASCII_CAPS });
+    expect(writeOnly).not.toContain("MODE BUILD");
+
+    const sandboxOnly = formatSessionBar({
+      cwd: "/tmp/ws",
+      thread: "thread-1",
+      mode: "build",
+      model: "local/qwen",
+      writeGrant: [],
+      sandbox: true,
+    }, { capabilities: ASCII_CAPS });
+    expect(sandboxOnly).not.toContain("MODE BUILD");
+
+    const granted = formatSessionBar({
+      cwd: "/tmp/ws",
+      thread: "thread-1",
+      mode: "build",
+      model: "local/qwen",
+      writeGrant: ["/tmp/ws"],
+      sandbox: true,
+    }, { capabilities: ASCII_CAPS });
+    expect(granted).toContain("MODE BUILD");
+    expect(granted).not.toContain("MODE OBSERVE");
   });
 
   it("replays the approval-gate fixture as a sequenced waiting turn", () => {
@@ -110,18 +161,20 @@ describe("paper presenters", () => {
     expect(output).toContain("0003 | ? WAITING FOR APPROVAL · approval required; default DENY");
   });
 
-  it("replay enters Prompter.approval() for the closed gate", async () => {
+  it("replay renders the approval-required fixture event through the closed gate", () => {
     let output = "";
-    const status = await replayFixture(join(fixtureDir, "paper-approval-gate.jsonl"), {
+    const status = replayFixture(join(fixtureDir, "paper-approval-gate.jsonl"), {
       ascii: true,
-      input: Readable.from(["d\n"]),
       write: (text) => { output += text; },
     });
     expect(status).toBe(0);
     expect(output).toContain("0003 | ? WAITING FOR APPROVAL · approval required; default DENY");
     expect(output).toContain("+- ? APPROVAL REQUIRED · fixture.approval_boundary@fixture -+");
+    expect(output).toContain("[a] ALLOW ONCE");
+    expect(output).toContain("[d] DENY (default)");
+    expect(output).toContain("[i] INSPECT");
     expect(output).toContain("`- [a] ALLOW ONCE   [d] DENY (default)   [i] INSPECT -+");
-    expect(output).toContain("approval:");
+    expect(output).toMatch(/\+- \? APPROVAL REQUIRED[^\n]*\+/);
   });
 
   it("keeps unknown visible after the turn fails", () => {

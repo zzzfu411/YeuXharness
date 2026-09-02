@@ -144,6 +144,10 @@ export interface SessionBarState {
   readonly model: string;
   readonly trust?: string;
   readonly transport?: string;
+  /** Non-empty write paths, or true. Required together with sandbox to display BUILD. */
+  readonly writeGrant?: readonly string[] | boolean;
+  /** Named OS sandbox is actually available. Required together with writeGrant to display BUILD. */
+  readonly sandbox?: boolean;
 }
 
 export interface PresenterFormatOptions {
@@ -161,13 +165,35 @@ export function formatSessionBar(
   const required = [
     `CWD ${singleLine(state.cwd)}`,
     `THREAD ${singleLine(state.thread)}`,
-    `MODE ${singleLine(state.mode).toUpperCase()}`,
+    `MODE ${sessionBarModeLabel(state)}`,
     `MODEL ${singleLine(state.model)}`,
   ];
   if (state.trust !== undefined) required.push(`TRUST ${singleLine(state.trust).toUpperCase()}`);
   if (state.transport !== undefined) required.push(`TRANSPORT ${singleLine(state.transport)}`);
   const body = `${glyph("brandCompact", capabilities)}  YeuX / HARNESS   ${required.join("   ")}`;
   return paint(sanitizeTerminalLine(body), "text", capabilities, theme);
+}
+
+/**
+ * Fail closed: MODE BUILD/OPERATE is only shown when a write grant and a
+ * sandbox are both present. `--mode build` may still be requested; the Bar
+ * must not claim BUILD when the client only has list/read/search.
+ */
+export function sessionBarModeLabel(
+  state: Pick<SessionBarState, "mode" | "writeGrant" | "sandbox">,
+): string {
+  const requested = singleLine(String(state.mode)).toUpperCase();
+  if (requested === "BUILD" || requested === "OPERATE") {
+    if (!hasWriteGrant(state.writeGrant) || state.sandbox !== true) {
+      return "OBSERVE";
+    }
+  }
+  return requested;
+}
+
+function hasWriteGrant(writeGrant: SessionBarState["writeGrant"]): boolean {
+  if (writeGrant === true) return true;
+  return Array.isArray(writeGrant) && writeGrant.length > 0;
 }
 
 export interface InspectorState {

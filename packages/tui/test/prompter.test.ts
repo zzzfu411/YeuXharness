@@ -2,7 +2,7 @@ import { PassThrough } from "node:stream";
 
 import { describe, expect, it } from "vitest";
 
-import { isReadOnlyEffects, TerminalPrompter } from "../src/prompter.js";
+import { formatApprovalGate, isReadOnlyEffects, TerminalPrompter } from "../src/prompter.js";
 
 describe("TerminalPrompter", () => {
   it("sanitizes untrusted approval text before writing it", async () => {
@@ -129,5 +129,40 @@ describe("TerminalPrompter", () => {
     expect(rendered).toContain("+- ? APPROVAL REQUIRED · workspace.apply_patch@1.0");
     expect(rendered).toContain("INSPECT · NORMALIZED ARGUMENTS");
     expect(rendered).toContain('"patch": "safe"');
+    expect(rendered).toContain("[a] ALLOW ONCE");
+    expect(rendered).toContain("[d] DENY (default)");
+    expect(rendered).toContain("[i] INSPECT");
+  });
+
+  it("draws a closed vermillion box using ╗ and ╝", () => {
+    const gate = formatApprovalGate({
+      invocation: {
+        invocation_id: "invocation-box",
+        tool_id: "workspace.apply_patch",
+        tool_version: "1.0",
+        effects: { filesystem_write: [{ path: "src/app.ts" }] },
+        effect_digest: "d42f91c8",
+        normalized_arguments: { patch: "safe" },
+      },
+      explanation: "Write one file",
+    }, {
+      capabilities: {
+        isTTY: true,
+        columns: 80,
+        colorDepth: "none",
+        unicode: true,
+        plain: true,
+        reducedMotion: true,
+      },
+    });
+    const lines = gate.split("\n");
+    expect(lines[0]?.startsWith("╔")).toBe(true);
+    expect(lines[0]?.endsWith("╗")).toBe(true);
+    expect(lines.at(-1)?.startsWith("╚")).toBe(true);
+    expect(lines.at(-1)?.endsWith("╝")).toBe(true);
+    expect(lines.some((line) => line.startsWith("║") && line.endsWith("║"))).toBe(true);
+    expect(gate).toContain("[a] ALLOW ONCE");
+    expect(gate).toContain("[d] DENY (default)");
+    expect(gate).toContain("[i] INSPECT");
   });
 });
