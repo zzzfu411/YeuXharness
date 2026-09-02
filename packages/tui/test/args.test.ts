@@ -22,6 +22,11 @@ describe("parseArgs", () => {
   it("rejects a run without a prompt", () => {
     expect(() => parseArgs(["run"])).toThrow("run requires a prompt");
   });
+
+  it("defaults an unqualified turn to observe so read-only tools do not display build", () => {
+    expect(parseArgs(["run", "-p", "status"], "/workspace").mode).toBe("observe");
+    expect(parseArgs([], "/workspace").mode).toBe("observe");
+  });
 });
 
 describe("parseApprovalChoice", () => {

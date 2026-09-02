@@ -202,10 +202,10 @@ export const NOCTURNE_PALETTE: ThemePalette = Object.freeze({
   muted: "#99958D",
   focus: "#6C9AB3",
   focusDeep: "#173A52",
-  approval: "#8C3A2C",
+  approval: "#D17968",
   success: "#79A988",
   warning: "#D0AB61",
-  danger: "#8C3A2C",
+  danger: "#D17968",
 });
 
 export const PAPER_PALETTE: ThemePalette = Object.freeze({
@@ -325,10 +325,10 @@ export const NOCTURNE_ANSI_TOKENS: Readonly<Record<ColorRole, AnsiRoleToken>> =
     muted: { ansi16: "2", ansi256: 245, rgb: [153, 149, 141] },
     text: { ansi16: "0", ansi256: 253, rgb: [226, 222, 213] },
     focus: { ansi16: "36", ansi256: 74, rgb: [108, 154, 179] },
-    approval: { ansi16: "31", ansi256: 88, rgb: [140, 58, 44] },
+    approval: { ansi16: "31", ansi256: 174, rgb: [209, 121, 104] },
     success: { ansi16: "32", ansi256: 108, rgb: [121, 169, 136] },
     warning: { ansi16: "33", ansi256: 179, rgb: [208, 171, 97] },
-    danger: { ansi16: "31", ansi256: 88, rgb: [140, 58, 44] },
+    danger: { ansi16: "31", ansi256: 174, rgb: [209, 121, 104] },
   });
 
 const PAPER_ANSI_256_CODES: Readonly<Record<ColorRole, number>> = Object.freeze({
@@ -340,6 +340,9 @@ const PAPER_ANSI_256_CODES: Readonly<Record<ColorRole, number>> = Object.freeze(
   warning: 94,
   danger: 88,
 });
+
+/** Closest xterm cube index to paper `#D8D3CC` so dark ink stays readable. */
+const PAPER_ANSI_256_BACKGROUND = 188;
 
 /** Paint only renderer-owned text; callers must sanitize untrusted text first. */
 export function paint(
@@ -355,6 +358,12 @@ export function paint(
 function ansiPrefix(role: ColorRole, depth: ColorDepth, theme: ThemeName): string {
   if (theme === "mono") return "";
 
+  const foreground = foregroundPrefix(role, depth, theme);
+  if (foreground.length === 0 || theme !== "paper") return foreground;
+  return `${foreground}${paperBackgroundPrefix(depth)}`;
+}
+
+function foregroundPrefix(role: ColorRole, depth: ColorDepth, theme: ThemeName): string {
   switch (depth) {
     case "truecolor": {
       const [r, g, b] = rgbForRole(role, theme);
@@ -364,6 +373,21 @@ function ansiPrefix(role: ColorRole, depth: ColorDepth, theme: ThemeName): strin
       return `\u001b[38;5;${ansi256ForRole(role, theme)}m`;
     case "ansi16":
       return `\u001b[${NOCTURNE_ANSI_TOKENS[role].ansi16}m`;
+    case "none":
+      return "";
+  }
+}
+
+function paperBackgroundPrefix(depth: ColorDepth): string {
+  switch (depth) {
+    case "truecolor": {
+      const [r, g, b] = hexToRgb(PAPER_PALETTE.background);
+      return `\u001b[48;2;${r};${g};${b}m`;
+    }
+    case "ansi256":
+      return `\u001b[48;5;${PAPER_ANSI_256_BACKGROUND}m`;
+    case "ansi16":
+      return "\u001b[47m";
     case "none":
       return "";
   }

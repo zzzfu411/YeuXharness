@@ -169,22 +169,43 @@ export const renderApprovalGate = formatApprovalGate;
 
 export type ApprovalChoice = "allow_once" | "deny" | "inspect";
 
-/** Read-only invocations never need to stop the model stream for a human vote. */
+const KNOWN_EFFECT_KEYS = new Set([
+  "filesystem_read",
+  "filesystem_write",
+  "filesystem_delete",
+  "network",
+  "secrets",
+  "external_write",
+  "external_writes",
+  "process",
+  "processes",
+  "idempotency",
+  "reversibility",
+]);
+
+const SIDE_EFFECT_KEYS = [
+  "filesystem_write",
+  "filesystem_delete",
+  "network",
+  "secrets",
+  "external_write",
+  "external_writes",
+  "process",
+  "processes",
+] as const;
+
+/**
+ * Auto-approve only when every known write channel is empty and no unknown
+ * effect key is present. Unknown keys fail closed so a new side-effect field
+ * cannot skip the gate.
+ */
 export function isReadOnlyEffects(effects: unknown): boolean {
-  if (!isRecord(effects) || !("filesystem_read" in effects)) return false;
+  if (!isRecord(effects)) return false;
   const record = effects as Record<string, unknown>;
-  const risky = [
-    "filesystem_write",
-    "filesystem_delete",
-    "network",
-    "secrets",
-    "external_write",
-    "external_writes",
-    "process",
-    "processes",
-  ];
-  if (risky.some((key) => hasEffect(record[key]))) return false;
-  return record.process !== true && !hasEffect(record.processes);
+  for (const key of Object.keys(record)) {
+    if (!KNOWN_EFFECT_KEYS.has(key)) return false;
+  }
+  return SIDE_EFFECT_KEYS.every((key) => !hasEffect(record[key]));
 }
 
 function hasEffect(value: unknown): boolean {

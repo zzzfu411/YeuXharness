@@ -55,16 +55,21 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
       ...(session.workspaceTrust === undefined ? {} : { trust: session.workspaceTrust }),
       transport: connection.kind,
     });
-    const presenterPolicy = {
-      mode: options.mode,
-      filesystem_read: [session.workspaceRoot ?? options.cwd],
-      filesystem_write: [],
-      filesystem_delete: [],
-      process: false,
-      network: [],
-      secrets: [],
-      external_write: [],
-    } as const;
+    // Only claim a write-none grant when this client actually sends the
+    // observe override. `--mode build|operate` still reaches the daemon's
+    // own grant, so the Inspector must not invent empty write scopes.
+    const presenterPolicy = options.mode === "observe"
+      ? {
+          mode: "observe" as const,
+          filesystem_read: [session.workspaceRoot ?? options.cwd],
+          filesystem_write: [],
+          filesystem_delete: [],
+          process: false,
+          network: [],
+          secrets: [],
+          external_write: [],
+        }
+      : undefined;
     renderer.renderInspector(presenterPolicy);
 
     // A provider-less daemon is a valid local runtime, but it is not an

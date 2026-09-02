@@ -235,12 +235,12 @@ YOU  14:32:08
 ### 8.4 Approval Drawer
 
 ```text
-┏ approval · workspace.apply_patch @1
-┃ target    crates/yeux-core/src/approval.rs
-┃ effects   write 1 file · process none · network none
-┃ binding   d42f…91c8 · expires 45s
-┃ reason    apply the reviewed patch
-┗ [a] allow once    [d] deny (default)    [i] inspect
+╔═ approval · workspace.apply_patch @1
+║ target    crates/yeux-core/src/approval.rs
+║ effects   write 1 file · process none · network none
+║ binding   d42f…91c8 · expires 45s
+║ reason    apply the reviewed patch
+╚═ [a] allow once    [d] deny (default)    [i] inspect
 ```
 
 - 默认选择永远是 deny。

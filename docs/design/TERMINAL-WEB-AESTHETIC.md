@@ -87,11 +87,11 @@ ledger、replay 或 JSON-RPC 的语义。
 审批面板是视觉上最明确的边界，默认焦点在 deny：
 
 ```text
-┏ APPROVAL REQUIRED · workspace.apply_patch@1
-┃ ! WRITE 1 FILE · PROCESS none · NETWORK none
-┃ target  crates/yeux-core/src/approval.rs
-┃ binding d42f…91c8 · expires 45s · default DENY
-┗ [a] ALLOW ONCE   [d] DENY   [i] INSPECT
+╔═ APPROVAL REQUIRED · workspace.apply_patch@1
+║ ! WRITE 1 FILE · PROCESS none · NETWORK none
+║ target  crates/yeux-core/src/approval.rs
+║ binding d42f…91c8 · expires 45s · default DENY
+╚═ [a] ALLOW ONCE   [d] DENY   [i] INSPECT
 ```
 
 网页中同一信息进入右侧 drawer；Allow/Deny 必须是可聚焦按钮，effect、binding digest、

@@ -32,7 +32,7 @@ describe("EventRenderer", () => {
     expect(formatEvent(event, false)).toBe("[ok] completed");
   });
 
-  it("uses the Nocturne timeline tokens by default in a rich terminal", () => {
+  it("uses the Paper timeline tokens by default in a rich terminal", () => {
     let output = "";
     const renderer = new EventRenderer({
       env: {
@@ -49,8 +49,10 @@ describe("EventRenderer", () => {
 
     renderer.render(event);
 
-    expect(renderer.theme).toBe("nocturne");
-    expect(output).toBe("\u001b[38;2;121;169;136m0001 │ ✓ COMPLETED\u001b[0m\n");
+    expect(renderer.theme).toBe("paper");
+    expect(output).toBe(
+      "\u001b[38;2;53;95;67m\u001b[48;2;216;211;204m0001 │ ✓ COMPLETED\u001b[0m\n",
+    );
   });
 
   it("falls back to an uncoloured ASCII timeline for TERM=dumb", () => {
@@ -108,6 +110,7 @@ describe("EventRenderer", () => {
     const renderer = new EventRenderer({
       jsonl: false,
       color: false,
+      ascii: true,
       write: (text) => {
         output += text;
       },
@@ -128,7 +131,9 @@ describe("EventRenderer", () => {
       recoverable: true,
     });
 
-    expect(output).toBe("answerdone\n[diagnostic:gap] retry\n");
+    expect(output).toBe("0001 | ~ STREAMING · answerdone\n[diagnostic:gap] retry\n");
+    expect(output).not.toContain("\u001b");
+    expect(output).not.toContain("\u0007");
   });
 
   it("preserves untrusted payload text verbatim in JSONL mode", () => {

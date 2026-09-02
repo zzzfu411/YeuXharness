@@ -64,11 +64,11 @@ EXAMPLES (Unicode)
   0186 │ ≈ STREAMING  Replay reads events only…
   0189 └─✓ COMPLETED                       1.8k tok · 6.4s
 
-  ┏ APPROVAL REQUIRED · workspace.apply_patch@1
-  ┃ ! WRITE 1 FILE · PROCESS none · NETWORK none
-  ┃ target  crates/yeux-core/src/approval.rs
-  ┃ binding d42f…91c8 · expires 45s · default DENY
-  ┗ [a] ALLOW ONCE   [d] DENY   [i] INSPECT
+  ╔═ APPROVAL REQUIRED · workspace.apply_patch@1
+  ║ ! WRITE 1 FILE · PROCESS none · NETWORK none
+  ║ target  crates/yeux-core/src/approval.rs
+  ║ binding d42f…91c8 · expires 45s · default DENY
+  ╚═ [a] ALLOW ONCE   [d] DENY   [i] INSPECT
 
   ⟲ REPLAY READ-ONLY · seq 0180–0189 · ZERO EXTERNAL CALLS
 

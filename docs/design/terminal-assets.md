@@ -164,11 +164,11 @@ Effect glyph 与状态 glyph 不能互相替代。例如 `▶ EXECUTING` 只表�
 推荐的深色审批面板：
 
 ```text
-┏ APPROVAL REQUIRED · workspace.apply_patch@1
-┃ ! WRITE 1 FILE · PROCESS none · NETWORK none
-┃ target  crates/yeux-core/src/approval.rs
-┃ binding d42f…91c8 · expires 45s · default DENY
-┗ [a] ALLOW ONCE   [d] DENY   [i] INSPECT
+╔═ APPROVAL REQUIRED · workspace.apply_patch@1
+║ ! WRITE 1 FILE · PROCESS none · NETWORK none
+║ target  crates/yeux-core/src/approval.rs
+║ binding d42f…91c8 · expires 45s · default DENY
+╚═ [a] ALLOW ONCE   [d] DENY   [i] INSPECT
 ```
 
 ASCII 版本：
