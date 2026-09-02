@@ -589,6 +589,49 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn mutation_applies_inside_sandbox_wrap() {
+        let backend = SandboxBackend::detect();
+        if matches!(backend, SandboxBackend::Unavailable { .. }) {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("hello.txt"), "before\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let registry = Arc::new(
+            ToolRegistry::workspace_built_ins_with_config(
+                WorkspaceTools::new(workspace.clone()),
+                crate::tools::BuiltInToolRegistryConfig::read_only()
+                    .with_hidden_workspace_mutations(),
+            )
+            .unwrap(),
+        );
+        let pipeline = InvocationPipeline::new(
+            registry,
+            backend,
+            Arc::new(NoCredentialBroker),
+        );
+        let base = blake3::hash(b"before\n").to_hex().to_string();
+        let prepared = pipeline
+            .prepare(
+                WORKSPACE_APPLY_PATCH_TOOL_ID,
+                WORKSPACE_TOOL_VERSION,
+                serde_json::json!({
+                    "path": "hello.txt",
+                    "base_revision": base,
+                    "replacement": "after\n"
+                }),
+                &context(&workspace),
+            )
+            .unwrap();
+        let prepared = pipeline.approve_once(prepared, true).unwrap();
+        pipeline.execute(prepared).await.unwrap();
+        assert_eq!(
+            fs::read_to_string(directory.path().join("hello.txt")).unwrap(),
+            "after\n"
+        );
+    }
+
     #[test]
     fn approval_binding_is_daemon_minted_and_client_binding_is_rejected() {
         let invocation = PreparedInvocation {

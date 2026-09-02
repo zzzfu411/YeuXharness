@@ -12,7 +12,7 @@ use std::{
     collections::BTreeMap,
     fmt, fs,
     future::Future,
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
     pin::Pin,
     sync::Arc,
 };
@@ -25,7 +25,7 @@ use yeux_protocol::{
 };
 use yeux_runtime::{
     workspace_apply_patch_spec, workspace_list_spec, workspace_read_spec, workspace_search_spec,
-    PreparedWorkspaceMutation, ProcessError, ProcessExecutor, ProcessRequest,
+    PreparedWorkspaceMutation, ProcessError, ProcessExecutor, ProcessRequest, SandboxRequirement,
     WorkspaceSearchControl, WorkspaceToolError, WorkspaceTools,
 };
 pub use yeux_runtime::{
@@ -351,9 +351,14 @@ impl ToolRegistry {
                 )),
             ),
         ];
+        if config.register_hidden_workspace_mutations || config.register_hidden_process {
+        let shared_executor = process_executor.unwrap_or_else(|| Arc::new(ProcessExecutor::detect()));
         if config.register_hidden_workspace_mutations {
             let spec = workspace_apply_patch_spec();
-            let adapter = Arc::new(WorkspaceMutationAdapter::new(Arc::clone(&tools)));
+            let adapter = Arc::new(WorkspaceMutationAdapter::new(
+                Arc::clone(&tools),
+                Arc::clone(&shared_executor),
+            ));
             registrations.push(if config.advertise_workspace_mutations {
                 RegisteredTool::advertised(spec, adapter)
             } else {
@@ -361,14 +366,14 @@ impl ToolRegistry {
             });
         }
         if config.register_hidden_process {
-            let executor = process_executor.unwrap_or_else(|| Arc::new(ProcessExecutor::detect()));
             let spec = process_run_spec();
-            let adapter = Arc::new(ProcessAdapter::new(Arc::clone(&tools), executor));
+            let adapter = Arc::new(ProcessAdapter::new(Arc::clone(&tools), Arc::clone(&shared_executor)));
             registrations.push(if config.advertise_process {
                 RegisteredTool::advertised(spec, adapter)
             } else {
                 RegisteredTool::hidden(spec, adapter)
             });
+        }
         }
         Self::try_new(registrations)
     }
@@ -1086,11 +1091,12 @@ impl SealedToolAdapter for WorkspaceReadAdapter {
 #[derive(Debug)]
 struct WorkspaceMutationAdapter {
     tools: Arc<WorkspaceTools>,
+    executor: Arc<ProcessExecutor>,
 }
 
 impl WorkspaceMutationAdapter {
-    fn new(tools: Arc<WorkspaceTools>) -> Self {
-        Self { tools }
+    fn new(tools: Arc<WorkspaceTools>, executor: Arc<ProcessExecutor>) -> Self {
+        Self { tools, executor }
     }
 
     fn error(source: WorkspaceToolError) -> ToolRegistryError {
@@ -1161,16 +1167,110 @@ impl SealedToolAdapter for WorkspaceMutationAdapter {
         payload: ExecutionPayload,
         _control: Option<&WorkspaceSearchControl<'_>>,
     ) -> Result<Value, ToolRegistryError> {
-        let ExecutionPayload::WorkspaceMutation(prepared) = payload else {
+        let ExecutionPayload::WorkspaceMutation(_) = payload else {
             return Err(ToolRegistryError::AdapterPayloadMismatch {
                 tool_id: WORKSPACE_APPLY_PATCH_TOOL_ID.to_owned(),
                 tool_version: WORKSPACE_TOOL_VERSION.to_owned(),
             });
         };
-        self.tools
-            .execute_prepared_mutation(&prepared)
-            .map_err(Self::error)
+        Err(ToolRegistryError::ProcessRequiresAsync)
     }
+
+    fn execute_async<'a>(
+        &'a self,
+        _normalized_arguments: Value,
+        payload: ExecutionPayload,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, ToolRegistryError>> + Send + 'a>> {
+        let workspace = self.tools.workspace().clone();
+        let executor = Arc::clone(&self.executor);
+        Box::pin(async move {
+            let ExecutionPayload::WorkspaceMutation(prepared) = payload else {
+                return Err(ToolRegistryError::AdapterPayloadMismatch {
+                    tool_id: WORKSPACE_APPLY_PATCH_TOOL_ID.to_owned(),
+                    tool_version: WORKSPACE_TOOL_VERSION.to_owned(),
+                });
+            };
+            sandboxed_apply_patch(&executor, &workspace, *prepared).await
+        })
+    }
+}
+
+
+async fn sandboxed_apply_patch(
+    executor: &ProcessExecutor,
+    workspace: &yeux_runtime::Workspace,
+    prepared: PreparedWorkspaceMutation,
+) -> Result<Value, ToolRegistryError> {
+    let arguments = prepared.normalized_arguments();
+    let path = arguments
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ToolRegistryError::InvalidProcessArguments("mutation path".into()))?;
+    let replacement = arguments
+        .get("replacement")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ToolRegistryError::InvalidProcessArguments("mutation replacement".into()))?;
+    let previous_revision = arguments
+        .get("base_revision")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ToolRegistryError::InvalidProcessArguments("mutation revision".into()))?;
+    let writer = mutation_writer_executable()?;
+    let mut request = ProcessRequest::new(writer);
+    request.arguments = vec![path.to_owned()];
+    request.cwd = PathBuf::from(".");
+    request.stdin = Some(replacement.as_bytes().to_vec());
+    request.sandbox = SandboxRequirement {
+        filesystem_isolation: true,
+        process_isolation: true,
+        network_isolation: true,
+        allow_workspace_write: true,
+        allow_network: false,
+    };
+    let output = executor
+        .execute(workspace, request)
+        .await
+        .map_err(|source| ToolRegistryError::Process {
+            tool_id: WORKSPACE_APPLY_PATCH_TOOL_ID.to_owned(),
+            tool_version: WORKSPACE_TOOL_VERSION.to_owned(),
+            source,
+        })?;
+    if output.timed_out || output.exit_code != Some(0) {
+        return Err(ToolRegistryError::Process {
+            tool_id: WORKSPACE_APPLY_PATCH_TOOL_ID.to_owned(),
+            tool_version: WORKSPACE_TOOL_VERSION.to_owned(),
+            source: ProcessError::Io(std::io::Error::other("sandboxed apply_patch failed")),
+        });
+    }
+    let written = workspace.read(path).map_err(|error| WorkspaceMutationAdapter::error(error.into()))?;
+    let expected = blake3::hash(replacement.as_bytes()).to_hex().to_string();
+    if written.revision != expected {
+        return Err(ToolRegistryError::InvalidProcessArguments(
+            "sandboxed apply_patch did not publish the approved bytes".into(),
+        ));
+    }
+    Ok(serde_json::json!({
+        "path": path,
+        "previous_revision": previous_revision,
+        "revision": expected,
+        "bytes_written": replacement.len(),
+        "diff_summary": prepared.diff_summary(),
+    }))
+}
+
+fn mutation_writer_executable() -> Result<PathBuf, ToolRegistryError> {
+    for candidate in ["/usr/bin/tee", "/bin/tee"] {
+        let path = PathBuf::from(candidate);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    Err(ToolRegistryError::Process {
+        tool_id: WORKSPACE_APPLY_PATCH_TOOL_ID.to_owned(),
+        tool_version: WORKSPACE_TOOL_VERSION.to_owned(),
+        source: ProcessError::Sandbox(yeux_runtime::SandboxError::Unavailable(
+            "tee is required to apply a mutation inside the OS sandbox".into(),
+        )),
+    })
 }
 
 /// Environment and stdin are intentionally absent from the schema. They
