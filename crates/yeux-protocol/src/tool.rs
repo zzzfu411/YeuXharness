@@ -200,14 +200,19 @@ impl InvocationReconciliationOutcome {
 
 /// Durable evidence explaining how an unknown invocation was reconciled.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct InvocationReconciliationEvidence {
     /// Stable identifier for the reconciliation mechanism, such as an
     /// executor receipt lookup or an operator review workflow.
     pub source: String,
     /// Bounded human-readable conclusion. Large receipts belong in the
-    /// artifact store and are referenced by `artifact_uri`.
+    /// artifact store and are referenced by `artifactUri`.
     pub summary: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "artifactUri",
+        alias = "artifact_uri",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub artifact_uri: Option<String>,
 }
 

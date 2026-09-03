@@ -117,6 +117,24 @@ export type TurnState =
   | "cancelled"
   | "failed";
 
+export type InvocationState =
+  | "proposed"
+  | "approved"
+  | "prepared"
+  | "started"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "unknown";
+
+export type InvocationReconciliationOutcome = "completed" | "failed";
+
+export interface InvocationReconciliationEvidence {
+  readonly source: string;
+  readonly summary: string;
+  readonly artifactUri?: string;
+}
+
 export interface WorkspaceIdentity {
   readonly canonical_root: string;
   readonly digest: string;
@@ -295,6 +313,20 @@ export interface AcceptedResult {
   readonly accepted: boolean;
 }
 
+export interface InvocationReconcileParams {
+  readonly threadId: string;
+  readonly invocationId: string;
+  readonly outcome: InvocationReconciliationOutcome;
+  readonly evidence: InvocationReconciliationEvidence;
+}
+
+export interface InvocationReconcileResult {
+  readonly threadId: string;
+  readonly invocationId: string;
+  readonly state: InvocationState;
+  readonly evidence: InvocationReconciliationEvidence;
+}
+
 export interface RuntimeDiagnosticNotification {
   readonly code: string;
   readonly message: string;
@@ -377,6 +409,10 @@ export interface RuntimeCommandMap {
   readonly "turn/interrupt": {
     readonly params: TurnInterruptParams;
     readonly result: AcceptedResult;
+  };
+  readonly "invocation/reconcile": {
+    readonly params: InvocationReconcileParams;
+    readonly result: InvocationReconcileResult;
   };
   readonly "model/list": {
     readonly params: { readonly provider?: string };

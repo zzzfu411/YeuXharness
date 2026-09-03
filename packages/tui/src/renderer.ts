@@ -1,6 +1,7 @@
 import type {
   CapabilityGrant,
   EventEnvelope,
+  InvocationReconcileResult,
   RuntimeDiagnosticNotification,
   RuntimeMode,
 } from "@yeux/protocol";
@@ -187,6 +188,27 @@ export class EventRenderer {
       : ` (expected seq ${diagnostic.expected_seq}, received ${diagnostic.actual_seq ?? "unknown"})`;
     const text = `[diagnostic:${diagnostic.code}] ${diagnostic.message}${sequence}`;
     this.#write(`${paintTerminalText(text, "warning", this.#capabilities, this.#theme)}\n`);
+  }
+
+  /**
+   * Render a control-plane result that is not itself an event envelope.
+   * Keeping this shape explicit makes JSONL reconciliation output
+   * distinguishable from replayed event records while preserving the same
+   * stream for scripts and operators.
+   */
+  public renderReconciliationResult(result: InvocationReconcileResult): void {
+    if (this.#jsonl) {
+      this.#write(`${JSON.stringify({
+        jsonrpc: "2.0",
+        method: "runtime/reconciliation",
+        params: result,
+      })}\n`);
+      return;
+    }
+
+    const summary = sanitizeTerminalLine(result.evidence.summary).replace(/[\r\n]+/g, " ");
+    const text = `[reconciled] invocation ${result.invocationId} → ${result.state} · ${summary}`;
+    this.#write(`${paintTerminalText(text, "success", this.#capabilities, this.#theme)}\n`);
   }
 
   /** Emit the identity block once a thread and provider have been resolved. */

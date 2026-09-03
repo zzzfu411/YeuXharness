@@ -3,7 +3,8 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use clap::Parser;
 use yeux_protocol::{ProviderCapabilities, TokenBudget};
 use yeux_runtime::{
-    OpenAiCompatibleProvider, ProviderConfig, WORKSPACE_SEARCH_DEFAULT_OPERATION_BUDGET,
+    CredentialBroker, NoCredentialBroker, OpenAiCompatibleProvider, ProviderConfig,
+    WORKSPACE_SEARCH_DEFAULT_OPERATION_BUDGET,
 };
 use yeuxd::{
     runner::{AgentLoopLimits, ModelProviderConfig},
@@ -37,6 +38,12 @@ struct Cli {
     /// Model name sent to the configured provider.
     #[arg(long, env = "YEUX_MODEL", value_name = "MODEL")]
     model: Option<String>,
+
+    /// Opaque handle resolved by an embedding credential broker. This is an
+    /// identifier only, never a token; the standalone daemon has no secret
+    /// store and fails closed when a handle cannot be resolved.
+    #[arg(long, env = "YEUX_PROVIDER_CREDENTIAL_HANDLE", value_name = "HANDLE")]
+    provider_credential_handle: Option<String>,
 
     /// Maximum input-token budget advertised to the provider.
     #[arg(long, default_value_t = 65_536)]
@@ -76,9 +83,22 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let mut config = DaemonConfig::new(cli.state_dir)?;
+    // Keep the broker object in-process. The CLI intentionally does not read
+    // raw tokens from arguments or environment variables; hosts embedding the
+    // daemon can replace this fail-closed broker through DaemonConfig.
+    let credential_broker: Arc<dyn CredentialBroker> = Arc::new(NoCredentialBroker);
+    let mut config =
+        DaemonConfig::new(cli.state_dir)?.with_credential_broker(Arc::clone(&credential_broker));
     if cli.no_execute_turns {
         config = config.without_turn_execution();
+    }
+    if cli.provider_credential_handle.is_some()
+        && (cli.provider_base_url.is_none() || cli.model.is_none())
+    {
+        return Err(
+            "--provider-credential-handle requires --provider-base-url and --model; supply an opaque handle, not a token"
+                .into(),
+        );
     }
     match (cli.provider_base_url, cli.model) {
         (Some(base_url), Some(model)) => {
@@ -88,14 +108,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 max_context_tokens: cli.max_input_tokens,
                 ..ProviderCapabilities::default()
             };
-            let provider = OpenAiCompatibleProvider::without_credentials(ProviderConfig {
-                provider_id: cli.provider_id,
-                base_url,
-                credential_handle: None,
-                organization: None,
-                timeout: Duration::from_secs(120),
-                capabilities,
-            })?;
+            let provider = OpenAiCompatibleProvider::with_credential_broker(
+                ProviderConfig {
+                    provider_id: cli.provider_id,
+                    base_url,
+                    credential_handle: cli.provider_credential_handle,
+                    organization: None,
+                    timeout: Duration::from_secs(120),
+                    capabilities,
+                },
+                Arc::clone(&credential_broker),
+            )?;
             config = config.with_model_provider(
                 ModelProviderConfig::new(
                     Arc::new(provider),

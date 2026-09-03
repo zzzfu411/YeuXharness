@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InvocationReconcileParams",
+  "description": "Explicitly resolve an invocation whose external outcome could not be proven after execution started. This request is evidence-only: it must not cause the daemon to execute or retry the original tool invocation. The current daemon accepts only `operator_review` evidence; machine-verified receipt sources require a separate authority path.",
+  "type": "object",
+  "required": [
+    "evidence",
+    "invocationId",
+    "outcome",
+    "threadId"
+  ],
+  "properties": {
+    "evidence": {
+      "$ref": "#/definitions/InvocationReconciliationEvidence"
+    },
+    "invocationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "outcome": {
+      "$ref": "#/definitions/InvocationReconciliationOutcome"
+    },
+    "threadId": {
+      "type": "string",
+      "format": "uuid"
+    }
+  },
+  "definitions": {
+    "InvocationReconciliationEvidence": {
+      "description": "Durable evidence explaining how an unknown invocation was reconciled.",
+      "type": "object",
+      "required": [
+        "source",
+        "summary"
+      ],
+      "properties": {
+        "artifactUri": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "Stable identifier for the reconciliation mechanism, such as an executor receipt lookup or an operator review workflow.",
+          "type": "string"
+        },
+        "summary": {
+          "description": "Bounded human-readable conclusion. Large receipts belong in the artifact store and are referenced by `artifactUri`.",
+          "type": "string"
+        }
+      }
+    },
+    "InvocationReconciliationOutcome": {
+      "description": "A conclusion reached without executing an invocation again after its outcome became unknown.\n\nCancellation is intentionally absent: once execution may have produced a side effect, reconciliation must determine whether that effect completed or failed. It cannot retroactively claim that the invocation was cancelled.",
+      "type": "string",
+      "enum": [
+        "completed",
+        "failed"
+      ]
+    }
+  }
+}

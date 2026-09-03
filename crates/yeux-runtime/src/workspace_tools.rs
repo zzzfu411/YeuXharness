@@ -554,6 +554,7 @@ impl WorkspaceToolError {
                 ApplyPatchError::Io(_) => "workspace_io",
                 ApplyPatchError::StaleRevision { .. } => "workspace_stale_revision",
                 ApplyPatchError::Persist(_) => "workspace_publish_failed",
+                ApplyPatchError::DurabilityUncertain { .. } => "workspace_durability_unknown",
             },
             Self::InvalidPathEncoding(_) => "workspace_path_not_utf8",
             Self::FileCountLimit { .. } => "workspace_file_count_limit",

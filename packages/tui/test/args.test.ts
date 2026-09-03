@@ -48,6 +48,45 @@ describe("parseArgs", () => {
   it("still accepts --mode build as a request; the Session Bar must clamp display", () => {
     expect(parseArgs(["run", "-p", "status", "--mode", "build"], "/workspace").mode).toBe("build");
   });
+
+  it("parses the operator-only reconciliation command", () => {
+    expect(
+      parseArgs([
+        "reconcile",
+        "--thread",
+        "thread-1",
+        "--invocation",
+        "invocation-1",
+        "--outcome",
+        "completed",
+        "--summary",
+        "verified in the provider receipt",
+        "--artifact-uri",
+        "artifact://blake3/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "--jsonl",
+      ], "/workspace"),
+    ).toMatchObject({
+      command: "reconcile",
+      threadId: "thread-1",
+      invocationId: "invocation-1",
+      reconciliationOutcome: "completed",
+      reconciliationSummary: "verified in the provider receipt",
+      artifactUri: "artifact://blake3/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      jsonl: true,
+    });
+  });
+
+  it("requires bounded reconciliation evidence fields", () => {
+    expect(() => parseArgs(["reconcile", "--thread", "t", "--invocation", "i"])).toThrow(
+      "reconcile requires --outcome completed|failed",
+    );
+    expect(() => parseArgs([
+      "reconcile", "--thread", "t", "--invocation", "i", "--outcome", "completed", "--summary", "   ",
+    ])).toThrow("reconcile requires a non-empty --summary");
+    expect(() => parseArgs([
+      "reconcile", "--thread", "t", "--invocation", "i", "--outcome", "completed", "--summary", "ok", "--artifact-uri", "file:///tmp/x",
+    ])).toThrow("--artifact-uri must use the artifact:// scheme");
+  });
 });
 
 describe("parseApprovalChoice", () => {

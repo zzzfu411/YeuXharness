@@ -12,7 +12,7 @@ use std::{
     collections::BTreeMap,
     fmt, fs,
     future::Future,
-    path::{Component, Path, PathBuf},
+    path::{Component, Path},
     pin::Pin,
     sync::Arc,
 };
@@ -25,7 +25,7 @@ use yeux_protocol::{
 };
 use yeux_runtime::{
     workspace_apply_patch_spec, workspace_list_spec, workspace_read_spec, workspace_search_spec,
-    PreparedWorkspaceMutation, ProcessError, ProcessExecutor, ProcessRequest, SandboxRequirement,
+    ApplyPatchError, PreparedWorkspaceMutation, ProcessError, ProcessExecutor, ProcessRequest,
     WorkspaceSearchControl, WorkspaceToolError, WorkspaceTools,
 };
 pub use yeux_runtime::{
@@ -201,6 +201,8 @@ pub enum ToolRegistryError {
     ProcessRequiresAsync,
     #[error("tool authority pipeline rejected the invocation: {0}")]
     Authority(String),
+    #[error("tool crossed the execution boundary but its outcome is unproven: {0}")]
+    OutcomeUnknown(String),
 }
 
 impl ToolRegistryError {
@@ -226,6 +228,7 @@ impl ToolRegistryError {
             Self::InvalidProcessArguments(_) => "process_invalid_arguments",
             Self::ProcessRequiresAsync => "process_async_required",
             Self::Authority(_) => "tool_authority_rejected",
+            Self::OutcomeUnknown(_) => "tool_outcome_unknown",
         }
     }
 
@@ -238,6 +241,13 @@ impl ToolRegistryError {
             Self::UnknownTool { .. } => "workspace_unknown_tool",
             _ => self.code(),
         }
+    }
+
+    /// Whether retrying this tool without reconciliation could duplicate a
+    /// side effect. This classification is preserved through the pipeline and
+    /// runner instead of being flattened into a generic execution error.
+    pub const fn outcome_unknown(&self) -> bool {
+        matches!(self, Self::OutcomeUnknown(_))
     }
 }
 
@@ -356,10 +366,10 @@ impl ToolRegistry {
                 process_executor.unwrap_or_else(|| Arc::new(ProcessExecutor::detect()));
             if config.register_hidden_workspace_mutations {
                 let spec = workspace_apply_patch_spec();
-                let adapter = Arc::new(WorkspaceMutationAdapter::new(
-                    Arc::clone(&tools),
-                    Arc::clone(&shared_executor),
-                ));
+                // Mutations must use the structured revision-bound executor;
+                // routing them through a generic process writer would bypass
+                // the prepared file identity/CAS checks.
+                let adapter = Arc::new(WorkspaceMutationAdapter::new(Arc::clone(&tools)));
                 registrations.push(if config.advertise_workspace_mutations {
                     RegisteredTool::advertised(spec, adapter)
                 } else {
@@ -1160,12 +1170,11 @@ impl SealedToolAdapter for WorkspaceReadAdapter {
 #[derive(Debug)]
 struct WorkspaceMutationAdapter {
     tools: Arc<WorkspaceTools>,
-    executor: Arc<ProcessExecutor>,
 }
 
 impl WorkspaceMutationAdapter {
-    fn new(tools: Arc<WorkspaceTools>, executor: Arc<ProcessExecutor>) -> Self {
-        Self { tools, executor }
+    fn new(tools: Arc<WorkspaceTools>) -> Self {
+        Self { tools }
     }
 
     fn error(source: WorkspaceToolError) -> ToolRegistryError {
@@ -1173,6 +1182,17 @@ impl WorkspaceMutationAdapter {
             tool_id: WORKSPACE_APPLY_PATCH_TOOL_ID.to_owned(),
             tool_version: WORKSPACE_TOOL_VERSION.to_owned(),
             source,
+        }
+    }
+
+    fn execution_error(source: WorkspaceToolError) -> ToolRegistryError {
+        if matches!(
+            &source,
+            WorkspaceToolError::ApplyPatch(ApplyPatchError::DurabilityUncertain { .. })
+        ) {
+            ToolRegistryError::OutcomeUnknown(source.to_string())
+        } else {
+            Self::error(source)
         }
     }
 }
@@ -1255,8 +1275,7 @@ impl SealedToolAdapter for WorkspaceMutationAdapter {
         _normalized_arguments: Value,
         payload: ExecutionPayload,
     ) -> Pin<Box<dyn Future<Output = Result<Value, ToolRegistryError>> + Send + 'a>> {
-        let workspace = self.tools.workspace().clone();
-        let executor = Arc::clone(&self.executor);
+        let tools = Arc::clone(&self.tools);
         Box::pin(async move {
             let ExecutionPayload::WorkspaceMutation(prepared) = payload else {
                 return Err(ToolRegistryError::AdapterPayloadMismatch {
@@ -1264,95 +1283,20 @@ impl SealedToolAdapter for WorkspaceMutationAdapter {
                     tool_version: WORKSPACE_TOOL_VERSION.to_owned(),
                 });
             };
-            sandboxed_apply_patch(&executor, &workspace, *prepared).await
+            // Revalidation and publication stay inside WorkspaceTools.  The
+            // bounded synchronous operation runs off the Tokio worker; if the
+            // await is cancelled, the closure may finish in the background and
+            // the invocation authority must record Unknown/reconciliation.
+            tokio::task::spawn_blocking(move || tools.execute_prepared_mutation(&prepared))
+                .await
+                .map_err(|error| {
+                    ToolRegistryError::OutcomeUnknown(format!(
+                        "workspace mutation worker failed after dispatch: {error}"
+                    ))
+                })?
+                .map_err(Self::execution_error)
         })
     }
-}
-
-async fn sandboxed_apply_patch(
-    executor: &ProcessExecutor,
-    workspace: &yeux_runtime::Workspace,
-    prepared: PreparedWorkspaceMutation,
-) -> Result<Value, ToolRegistryError> {
-    let arguments = prepared.normalized_arguments();
-    let path = arguments
-        .get("path")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ToolRegistryError::InvalidProcessArguments("mutation path".into()))?;
-    let replacement = arguments
-        .get("replacement")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ToolRegistryError::InvalidProcessArguments("mutation replacement".into()))?;
-    let previous_revision = arguments
-        .get("base_revision")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ToolRegistryError::InvalidProcessArguments("mutation revision".into()))?;
-    workspace
-        .revalidate_revision(prepared.base_revision())
-        .map_err(|source| ToolRegistryError::Process {
-            tool_id: WORKSPACE_APPLY_PATCH_TOOL_ID.to_owned(),
-            tool_version: WORKSPACE_TOOL_VERSION.to_owned(),
-            source: ProcessError::Workspace(source),
-        })?;
-    let writer = mutation_writer_executable()?;
-    let mut request = ProcessRequest::new(writer);
-    request.arguments = vec![path.to_owned()];
-    request.cwd = PathBuf::from(".");
-    request.stdin = Some(replacement.as_bytes().to_vec());
-    request.sandbox = SandboxRequirement {
-        filesystem_isolation: true,
-        process_isolation: true,
-        network_isolation: true,
-        allow_workspace_write: true,
-        allow_network: false,
-    };
-    let output = executor
-        .execute(workspace, request)
-        .await
-        .map_err(|source| ToolRegistryError::Process {
-            tool_id: WORKSPACE_APPLY_PATCH_TOOL_ID.to_owned(),
-            tool_version: WORKSPACE_TOOL_VERSION.to_owned(),
-            source,
-        })?;
-    if output.timed_out || output.exit_code != Some(0) {
-        return Err(ToolRegistryError::Process {
-            tool_id: WORKSPACE_APPLY_PATCH_TOOL_ID.to_owned(),
-            tool_version: WORKSPACE_TOOL_VERSION.to_owned(),
-            source: ProcessError::Io(std::io::Error::other("sandboxed apply_patch failed")),
-        });
-    }
-    let written = workspace
-        .read(path)
-        .map_err(|error| WorkspaceMutationAdapter::error(error.into()))?;
-    let expected = blake3::hash(replacement.as_bytes()).to_hex().to_string();
-    if written.revision != expected {
-        return Err(ToolRegistryError::InvalidProcessArguments(
-            "sandboxed apply_patch did not publish the approved bytes".into(),
-        ));
-    }
-    Ok(serde_json::json!({
-        "path": path,
-        "previous_revision": previous_revision,
-        "revision": expected,
-        "bytes_written": replacement.len(),
-        "diff_summary": prepared.diff_summary(),
-    }))
-}
-
-fn mutation_writer_executable() -> Result<PathBuf, ToolRegistryError> {
-    for candidate in ["/usr/bin/tee", "/bin/tee"] {
-        let path = PathBuf::from(candidate);
-        if path.is_file() {
-            return Ok(path);
-        }
-    }
-    Err(ToolRegistryError::Process {
-        tool_id: WORKSPACE_APPLY_PATCH_TOOL_ID.to_owned(),
-        tool_version: WORKSPACE_TOOL_VERSION.to_owned(),
-        source: ProcessError::Sandbox(yeux_runtime::SandboxError::Unavailable(
-            "tee is required to apply a mutation inside the OS sandbox".into(),
-        )),
-    })
 }
 
 /// Environment and stdin are intentionally absent from the schema. They
@@ -1443,6 +1387,18 @@ impl ProcessAdapter {
         );
         let argument_digest = digest_value(&args_value);
         let effects = EffectSet {
+            // An arbitrary executable can open any path below the workspace;
+            // its arguments are not a sound static description of the files
+            // it will read.  Model that authority explicitly so a narrowed
+            // filesystem grant cannot accidentally turn into a whole-tree
+            // read through process.run.  The sandbox currently mounts this
+            // scope read-only, and policy therefore requires an explicit
+            // workspace-root read grant before the process is approved.
+            filesystem_read: vec![PathScope {
+                path: ".".into(),
+                recursive: true,
+                resolved: true,
+            }],
             processes: vec![ProcessEffect {
                 executable: executable.to_string_lossy().into_owned(),
                 argument_digest: Some(argument_digest),
@@ -1471,10 +1427,21 @@ impl ProcessAdapter {
     }
 
     fn process_error(error: ProcessError) -> ToolRegistryError {
-        ToolRegistryError::Process {
-            tool_id: PROCESS_RUN_TOOL_ID.into(),
-            tool_version: PROCESS_TOOL_VERSION.into(),
-            source: error,
+        if matches!(
+            &error,
+            ProcessError::Io(_)
+                | ProcessError::Join(_)
+                | ProcessError::OutputDrainTimeout
+                | ProcessError::ProcessGroupUnavailable
+                | ProcessError::DescendantsMaySurvive
+        ) {
+            ToolRegistryError::OutcomeUnknown(error.to_string())
+        } else {
+            ToolRegistryError::Process {
+                tool_id: PROCESS_RUN_TOOL_ID.into(),
+                tool_version: PROCESS_TOOL_VERSION.into(),
+                source: error,
+            }
         }
     }
 }
@@ -1612,6 +1579,11 @@ pub fn process_run_spec() -> ToolSpec {
             }
         }),
         effect_template: EffectSet {
+            filesystem_read: vec![PathScope {
+                path: ".".into(),
+                recursive: true,
+                resolved: false,
+            }],
             processes: vec![ProcessEffect {
                 executable: "*".into(),
                 argument_digest: None,
@@ -2050,6 +2022,31 @@ mod tests {
     }
 
     #[test]
+    fn post_dispatch_uncertainty_has_a_stable_non_retryable_classification() {
+        let process = ProcessAdapter::process_error(ProcessError::DescendantsMaySurvive);
+        assert!(process.outcome_unknown());
+        assert_eq!(process.code(), "tool_outcome_unknown");
+
+        let mutation = WorkspaceMutationAdapter::execution_error(WorkspaceToolError::ApplyPatch(
+            ApplyPatchError::DurabilityUncertain {
+                path: Path::new("src/lib.rs").to_owned(),
+                source: std::io::Error::other("injected fsync failure"),
+            },
+        ));
+        assert!(mutation.outcome_unknown());
+        assert_eq!(mutation.provider_code(), "tool_outcome_unknown");
+
+        let preflight = ProcessAdapter::process_error(ProcessError::OutputLimitExceeded);
+        assert!(!preflight.outcome_unknown());
+        assert_eq!(preflight.code(), "process_execution_failed");
+
+        let spawn_failure = ProcessAdapter::process_error(ProcessError::Spawn(
+            std::io::Error::other("exec denied"),
+        ));
+        assert!(!spawn_failure.outcome_unknown());
+    }
+
+    #[test]
     fn registration_count_is_bounded() {
         let registrations = (0..=MAX_REGISTERED_TOOLS)
             .map(|index| test_registration(&format!("tool.{index}"), "1", true))
@@ -2328,6 +2325,44 @@ mod tests {
     }
 
     #[test]
+    fn process_plan_declares_workspace_root_read_scope() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("hello.txt"), "hello\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let registry = ToolRegistry::workspace_built_ins_with_config_and_process(
+            Arc::new(WorkspaceTools::new(workspace)),
+            BuiltInToolRegistryConfig::read_only().with_hidden_process(),
+            Some(Arc::new(ProcessExecutor::new(
+                yeux_runtime::SandboxBackend::Unavailable {
+                    reason: "plan-only test".into(),
+                },
+            ))),
+        )
+        .unwrap();
+        let executable = ["/bin/true", "/usr/bin/true"]
+            .into_iter()
+            .find(|path| fs::metadata(path).is_ok_and(|metadata| metadata.is_file()))
+            .expect("test host has a trusted true executable");
+        let plan = registry
+            .plan(
+                PROCESS_RUN_TOOL_ID,
+                PROCESS_TOOL_VERSION,
+                json!({"executable": executable}),
+            )
+            .unwrap();
+        assert_eq!(plan.effects().filesystem_read.len(), 1);
+        assert_eq!(plan.effects().filesystem_read[0].path, ".");
+        assert!(plan.effects().filesystem_read[0].recursive);
+        assert!(plan.effects().filesystem_read[0].resolved);
+        let spec = registry
+            .resolve_exact(PROCESS_RUN_TOOL_ID, PROCESS_TOOL_VERSION)
+            .unwrap();
+        assert_eq!(spec.effect_template.filesystem_read.len(), 1);
+        assert_eq!(spec.effect_template.filesystem_read[0].path, ".");
+        assert!(spec.effect_template.filesystem_read[0].recursive);
+    }
+
+    #[test]
     fn read_plan_replaces_provider_path_alias_with_resolved_effect_path() {
         let (_directory, registry) = workspace_registry();
         let plan = registry
@@ -2578,10 +2613,6 @@ mod tests {
             Err(ToolRegistryError::ProcessRequiresAsync)
         ));
         assert_eq!(fs::read_to_string(&path).unwrap(), "before\n");
-
-        if ProcessExecutor::detect().backend().name() == "unavailable" {
-            return;
-        }
 
         let plan = registry
             .plan(

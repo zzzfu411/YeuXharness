@@ -15,7 +15,9 @@ pub mod sandbox;
 pub mod workspace;
 pub mod workspace_tools;
 
-pub use artifact::{Artifact, ArtifactError, ArtifactStore};
+pub use artifact::{
+    digest_from_uri, uri_for_digest, Artifact, ArtifactError, ArtifactStore, MAX_ARTIFACT_URI_BYTES,
+};
 pub use credentials::{
     CredentialBroker, CredentialError, CredentialLease, InMemoryCredentialBroker,
     NoCredentials as NoCredentialBroker,
@@ -32,7 +34,7 @@ pub use ledger::{
 pub use process::{ProcessError, ProcessExecutor, ProcessOutput, ProcessRequest};
 pub use provider::{
     BrokerCredentialSource, CredentialSource, NoCredentials, OpenAiCompatibleProvider,
-    ProviderConfig, ProviderError, RuntimeModelProvider,
+    ProviderConfig, ProviderError, RuntimeModelProvider, MAX_CREDENTIAL_HANDLE_BYTES,
 };
 pub use sandbox::{
     SandboxBackend, SandboxCapabilities, SandboxError, SandboxRequirement, SandboxedCommand,

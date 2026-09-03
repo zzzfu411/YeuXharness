@@ -8,6 +8,41 @@ permissions:
   contents: read
 
 jobs:
+  diff:
+    name: Diff hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The range check below must be able to resolve the event's base
+          # commit.  No package or third-party audit tool is needed here.
+          fetch-depth: 0
+      - name: Check committed diff
+        shell: bash
+        env:
+          EVENT_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          zero_sha="0000000000000000000000000000000000000000"
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            git diff --check "origin/${GITHUB_BASE_REF}"...HEAD
+          elif [[ -n "${EVENT_BEFORE:-}" && "$EVENT_BEFORE" != "$zero_sha" ]]; then
+            if git cat-file -e "$EVENT_BEFORE^{commit}" 2>/dev/null; then
+              git diff --check "$EVENT_BEFORE" "$GITHUB_SHA"
+            elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+              # A force-push can leave the event's old commit unreachable
+              # from the checkout; still check the commit that is present.
+              git diff --check HEAD^ HEAD
+            else
+              git diff-tree --check --root --no-commit-id -r HEAD
+            fi
+          elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            git diff --check HEAD^ HEAD
+          else
+            # A repository with a single commit has no parent range.
+            git diff-tree --check --root --no-commit-id -r HEAD
+          fi
+
   rust:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -20,10 +55,32 @@ jobs:
           toolchain: 1.98.0
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Validate Cargo lockfile and metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s Cargo.lock
+          cargo metadata --locked --no-deps --format-version 1 > "$RUNNER_TEMP/cargo-metadata.json"
+          test -s "$RUNNER_TEMP/cargo-metadata.json"
+          # Every cargo invocation in this workflow is locked; this catches
+          # accidental lockfile rewrites by future tooling.
+          git diff --exit-code -- Cargo.lock
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo run -p yeux-protocol --example export_schemas -- --check
-      - run: cargo test --workspace --all-targets
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Check generated JSON schemas
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --locked -p yeux-protocol --example export_schemas -- --check
+          git diff --exit-code -- spec/schema
+          if [[ -n "$(git status --porcelain --untracked-files=all -- spec/schema)" ]]; then
+            echo "generated schema files are missing from the commit"
+            git status --short --untracked-files=all -- spec/schema
+            exit 1
+          fi
+      - run: cargo test --locked --workspace --all-targets
+      - name: Release build gate
+        run: cargo build --locked --workspace --release
 
   typescript:
     runs-on: ubuntu-latest
@@ -36,7 +93,62 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
+      - name: Validate pnpm lockfile and install
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s pnpm-lock.yaml
+          pnpm install --frozen-lockfile
+          git diff --exit-code -- pnpm-lock.yaml
+      - name: Validate package metadata
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const packageDirs = fs.readdirSync("packages", { withFileTypes: true })
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => path.join("packages", entry.name, "package.json"))
+            .filter((manifest) => fs.existsSync(manifest));
+          const manifests = ["package.json", ...packageDirs];
+          const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:[-+][0-9A-Za-z.-]+)?$/;
+
+          for (const manifest of manifests) {
+            const value = JSON.parse(fs.readFileSync(manifest, "utf8"));
+            if (typeof value.name !== "string" || value.name.length === 0) {
+              throw new Error(`${manifest}: missing package name`);
+            }
+            if (typeof value.version !== "string" || !semver.test(value.version)) {
+              throw new Error(`${manifest}: invalid package version`);
+            }
+          }
+
+          const root = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          if (root.private !== true) {
+            throw new Error("root package must remain private until a release package is explicitly defined");
+          }
+          if (root.packageManager !== "pnpm@9.15.9") {
+            throw new Error(`packageManager drift: ${root.packageManager}`);
+          }
+          for (const manifest of packageDirs) {
+            const value = JSON.parse(fs.readFileSync(manifest, "utf8"));
+            if (value.private !== true) {
+              throw new Error(`${manifest}: publish visibility must be explicitly reviewed before release`);
+            }
+          }
+          NODE
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      - name: Release package smoke gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_output="$RUNNER_TEMP/yeux-packages"
+          mkdir -p "$package_output"
+          for package_dir in packages/*; do
+            if [[ -f "$package_dir/package.json" ]]; then
+              pnpm --dir "$package_dir" pack --pack-destination "$package_output"
+            fi
+          done

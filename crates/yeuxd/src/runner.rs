@@ -34,11 +34,12 @@ use yeux_protocol::{
     WorkspaceTrust, PROTOCOL_VERSION,
 };
 use yeux_runtime::{
-    CoreProjectionError, EventLedger, LedgerError, LedgerEvent, NewInvocationOutcome,
-    NewInvocationUnknown, NewInvocationUnknownOutcome, NewLedgerEvent, NoCredentialBroker,
-    ProcessExecutor, SandboxBackend, SearchOperationBudget, Workspace as RuntimeWorkspace,
-    WorkspaceSearchControl, WorkspaceTools, WORKSPACE_SEARCH_DEFAULT_OPERATION_BUDGET,
-    WORKSPACE_SEARCH_HARD_OPERATION_LIMIT, WORKSPACE_SEARCH_TOOL_ID,
+    CoreProjectionError, CredentialBroker, EventLedger, LedgerError, LedgerEvent,
+    NewInvocationOutcome, NewInvocationUnknown, NewInvocationUnknownOutcome, NewLedgerEvent,
+    NoCredentialBroker, ProcessExecutor, SandboxBackend, SearchOperationBudget,
+    Workspace as RuntimeWorkspace, WorkspaceSearchControl, WorkspaceTools,
+    WORKSPACE_SEARCH_DEFAULT_OPERATION_BUDGET, WORKSPACE_SEARCH_HARD_OPERATION_LIMIT,
+    WORKSPACE_SEARCH_TOOL_ID,
 };
 
 use crate::grants::resolve_grant_layers;
@@ -56,7 +57,11 @@ pub trait ApprovalHandler: Send + Sync {
 }
 
 fn pipeline_error(error: PipelineError) -> ToolRegistryError {
-    ToolRegistryError::Authority(error.to_string())
+    if error.outcome_unknown() {
+        ToolRegistryError::OutcomeUnknown(error.to_string())
+    } else {
+        ToolRegistryError::Authority(error.to_string())
+    }
 }
 
 const DEFAULT_MAX_MODEL_ROUNDS: usize = 8;
@@ -274,6 +279,7 @@ pub struct TurnRunner {
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGenerator>,
     provider: Option<ModelProviderConfig>,
+    credentials: Arc<dyn CredentialBroker>,
     host_ceiling: CapabilityMode,
     mutation_gate: Arc<Mutex<()>>,
     tool_workers: Arc<Semaphore>,
@@ -318,12 +324,39 @@ impl TurnRunner {
         mutation_gate: Arc<Mutex<()>>,
         host_ceiling: CapabilityMode,
     ) -> Self {
+        Self::new_with_host_ceiling_and_credentials(
+            ledger,
+            events,
+            clock,
+            ids,
+            provider,
+            mutation_gate,
+            host_ceiling,
+            Arc::new(NoCredentialBroker),
+        )
+    }
+
+    /// Construct a runner with the daemon-owned credential authority. The
+    /// broker is passed only to runtime invocation/provider adapters; it is
+    /// never part of a model request or a tool execution argument.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_host_ceiling_and_credentials(
+        ledger: Arc<EventLedger>,
+        events: broadcast::Sender<EventEnvelope>,
+        clock: Arc<dyn Clock>,
+        ids: Arc<dyn IdGenerator>,
+        provider: Option<ModelProviderConfig>,
+        mutation_gate: Arc<Mutex<()>>,
+        host_ceiling: CapabilityMode,
+        credentials: Arc<dyn CredentialBroker>,
+    ) -> Self {
         Self {
             ledger,
             events,
             clock,
             ids,
             provider,
+            credentials,
             host_ceiling,
             mutation_gate,
             tool_workers: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_TOOL_WORKERS)),
@@ -494,25 +527,46 @@ impl TurnRunner {
                         );
                     }
                     let sandbox = SandboxBackend::detect();
-                    let sandbox_ready = sandbox
+                    // Workspace mutations execute through the structured
+                    // revision-bound WorkspaceTools path and therefore need
+                    // filesystem/network policy evidence, but not the strict
+                    // process-tree capability required by arbitrary
+                    // process.run.  Keep the two advertisements independent:
+                    // macOS Seatbelt may safely support the former while its
+                    // lack of a job/PID supervisor keeps the latter closed.
+                    let write_sandbox_ready = sandbox
+                        .ensure(yeux_runtime::SandboxRequirement {
+                            filesystem_isolation: true,
+                            process_isolation: false,
+                            network_isolation: true,
+                            allow_workspace_write: true,
+                            allow_network: false,
+                        })
+                        .is_ok();
+                    let process_sandbox_ready = sandbox
                         .ensure(yeux_runtime::SandboxRequirement {
                             filesystem_isolation: true,
                             process_isolation: true,
                             network_isolation: true,
-                            allow_workspace_write: true,
+                            allow_workspace_write: false,
                             allow_network: false,
                         })
                         .is_ok();
                     let config = BuiltInToolRegistryConfig::read_only()
                         .with_hidden_workspace_mutations()
                         .with_hidden_process();
-                    let config = if sandbox_ready && self.host_ceiling != CapabilityMode::Observe {
-                        config
-                            .with_advertised_workspace_mutations()
-                            .with_advertised_process()
-                    } else {
-                        config
-                    };
+                    let config =
+                        if write_sandbox_ready && self.host_ceiling != CapabilityMode::Observe {
+                            config.with_advertised_workspace_mutations()
+                        } else {
+                            config
+                        };
+                    let config =
+                        if process_sandbox_ready && self.host_ceiling != CapabilityMode::Observe {
+                            config.with_advertised_process()
+                        } else {
+                            config
+                        };
                     let runtime_tools = Arc::new(WorkspaceTools::new(workspace));
                     let process_executor = Arc::new(ProcessExecutor::new(sandbox.clone()));
                     match ToolRegistry::workspace_built_ins_with_config_and_process(
@@ -531,7 +585,7 @@ impl TurnRunner {
                             let pipeline = Arc::new(InvocationPipeline::new(
                                 Arc::clone(&registry),
                                 sandbox,
-                                Arc::new(NoCredentialBroker),
+                                Arc::clone(&self.credentials),
                             ));
                             (Some(registry), Some((pipeline, grants)))
                         }
@@ -1146,16 +1200,11 @@ impl TurnRunner {
                             InvocationState::Started,
                             None,
                         ),
-                        ToolWorkerWait::Completed(Ok(Err(error))) => (
-                            json!({
-                                "code": error.provider_code(),
-                                "message": bounded_message(&error.to_string()),
-                            }),
-                            true,
-                            Some(InvocationState::Failed),
-                            InvocationState::Started,
-                            Some(bounded_message(&error.to_string())),
-                        ),
+                        ToolWorkerWait::Completed(Ok(Err(error))) => {
+                            let classified = classify_tool_execution_error(&error);
+                            unknown = classified.2.is_none();
+                            classified
+                        }
                         ToolWorkerWait::Completed(Err(error)) => {
                             // A JoinError only proves that Tokio could not
                             // return the closure's value.  The closure may
@@ -1225,18 +1274,26 @@ impl TurnRunner {
                         "code": "agent_loop_tool_result_limit",
                         "message": "the turn exceeded its total tool-result byte budget"
                     });
-                    // The invocation that crossed the aggregate budget is
-                    // failed regardless of whether it was already started:
-                    // Proposed/Prepared failures must not be left dangling
-                    // when the turn is terminated below.
+                    // The aggregate result budget controls what can be fed
+                    // back to the provider; it does not rewrite the outcome
+                    // of an invocation that already returned. In particular,
+                    // a successful side effect must remain Completed so a
+                    // later operator/model cannot mistake it for a safe retry.
+                    let budget_terminal_state = terminal_state
+                        .expect("unknown outcomes are handled before result budgeting");
+                    let budget_reason = if budget_terminal_state == InvocationState::Completed {
+                        "tool completed but its result exceeded the turn byte budget"
+                    } else {
+                        "tool failed and its result exceeded the turn byte budget"
+                    };
                     self.persist_invocation_outcome(
                         &context,
                         invocation,
-                        InvocationState::Failed,
+                        budget_terminal_state,
                         from_state,
                         budget_output.clone(),
-                        true,
-                        Some("turn tool-result byte budget exceeded".into()),
+                        budget_terminal_state != InvocationState::Completed,
+                        Some(budget_reason.into()),
                     )?;
 
                     // Resolve every later invocation before making the parent
@@ -3066,6 +3123,31 @@ fn classify_tool_worker_join_error(
     )
 }
 
+/// Preserve the execution adapter's certainty classification. Errors that can
+/// only occur after a side effect may have happened must remain non-terminal;
+/// pre-execution validation and policy errors are safe terminal failures.
+fn classify_tool_execution_error(
+    error: &ToolRegistryError,
+) -> (
+    Value,
+    bool,
+    Option<InvocationState>,
+    InvocationState,
+    Option<String>,
+) {
+    let message = bounded_message(&error.to_string());
+    (
+        json!({
+            "code": error.provider_code(),
+            "message": message.clone(),
+        }),
+        true,
+        (!error.outcome_unknown()).then_some(InvocationState::Failed),
+        InvocationState::Started,
+        Some(message),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -3385,6 +3467,26 @@ mod tests {
         assert_eq!(output["code"], "tool_outcome_unknown");
         assert!(output["message"].as_str().unwrap().len() <= 4_096);
         assert!(reason.unwrap().len() <= 4_096);
+    }
+
+    #[test]
+    fn execution_uncertainty_is_not_flattened_into_terminal_failure() {
+        let unknown = pipeline_error(PipelineError::Tool(ToolRegistryError::OutcomeUnknown(
+            "descendants may survive".into(),
+        )));
+        assert!(unknown.outcome_unknown());
+        let (output, is_error, terminal_state, from_state, reason) =
+            classify_tool_execution_error(&unknown);
+        assert!(is_error);
+        assert_eq!(terminal_state, None);
+        assert_eq!(from_state, InvocationState::Started);
+        assert_eq!(output["code"], "tool_outcome_unknown");
+        assert!(reason.unwrap().contains("descendants may survive"));
+
+        let failed = ToolRegistryError::InvalidProcessArguments("bad cwd".into());
+        let (output, _, terminal_state, _, _) = classify_tool_execution_error(&failed);
+        assert_eq!(terminal_state, Some(InvocationState::Failed));
+        assert_eq!(output["code"], "process_invalid_arguments");
     }
 
     #[test]
@@ -4559,14 +4661,32 @@ mod tests {
         ));
         let projection = fixture.ledger.project_core().unwrap();
         assert_eq!(projection.invocations.len(), 2);
-        // The invocation whose result crossed the aggregate budget is a
-        // durable Failed outcome; sibling workers that were already started
-        // but whose result was intentionally not awaited are conservatively
-        // Unknown rather than being misreported as Failed.
+        // The invocation whose successful result crossed the aggregate budget
+        // remains durably Completed. Sibling workers that were already
+        // started but whose result was intentionally not awaited are
+        // conservatively Unknown rather than being misreported as Failed.
         assert!(projection.invocations.values().all(|invocation| matches!(
             invocation.state,
-            InvocationState::Failed | InvocationState::Unknown
+            InvocationState::Completed | InvocationState::Unknown
         )));
+        let completed = projection
+            .invocations
+            .values()
+            .find(|invocation| invocation.state == InvocationState::Completed)
+            .expect("the integrated successful result remains completed");
+        let completed_result = projection
+            .items
+            .values()
+            .find(|item| {
+                item.kind == ItemKind::ToolResult
+                    && item.content["invocation_id"] == completed.invocation_id.to_string()
+            })
+            .expect("the completed invocation keeps an atomic tool result");
+        assert_eq!(completed_result.content["content"][0]["is_error"], false);
+        assert_eq!(
+            completed_result.content["content"][0]["content"]["code"],
+            "agent_loop_tool_result_limit"
+        );
         assert_eq!(projection.turns[&fixture.turn_id].state, TurnState::Failed);
     }
 

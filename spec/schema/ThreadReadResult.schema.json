@@ -951,7 +951,7 @@
         "summary"
       ],
       "properties": {
-        "artifact_uri": {
+        "artifactUri": {
           "type": [
             "string",
             "null"
@@ -962,7 +962,7 @@
           "type": "string"
         },
         "summary": {
-          "description": "Bounded human-readable conclusion. Large receipts belong in the artifact store and are referenced by `artifact_uri`.",
+          "description": "Bounded human-readable conclusion. Large receipts belong in the artifact store and are referenced by `artifactUri`.",
           "type": "string"
         }
       }

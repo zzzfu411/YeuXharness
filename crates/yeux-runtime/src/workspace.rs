@@ -1,4 +1,13 @@
 //! Workspace path confinement and revision-checked atomic edits.
+//!
+//! Unix mutation paths are anchored to an opened workspace directory and use
+//! component-wise `openat` plus `renameat`.  This closes path-based
+//! intermediate-directory/symlink redirection and keeps temporary-file cleanup
+//! in the originally opened parent.  POSIX does not expose a compare-and-swap
+//! rename keyed by an inode or digest, so a non-cooperating process can still
+//! replace the final target name between the last validation and `renameat`.
+//! The implementation treats that as a documented residual boundary rather
+//! than claiming a stronger guarantee than the platform provides.
 
 #![allow(clippy::result_large_err)]
 
@@ -7,17 +16,50 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 use serde::{Deserialize, Serialize};
+#[cfg(not(unix))]
 use tempfile::NamedTempFile;
 use walkdir::WalkDir;
 
-#[derive(Debug, Clone)]
+#[cfg(unix)]
+use {
+    rustix::{
+        fs::{openat, renameat, unlinkat, AtFlags, Mode, OFlags},
+        io::Errno,
+    },
+    std::ffi::{OsStr, OsString},
+};
+
+/// An opened workspace root and the shared mutation gate used by all clones.
+///
+/// The root descriptor is deliberately retained for the lifetime of the
+/// workspace.  Operations which can have side effects resolve every path
+/// component relative to this descriptor instead of reopening an absolute
+/// path after a `canonicalize` check.
+#[derive(Debug)]
 pub struct Workspace {
     root: PathBuf,
     identity: String,
     root_identity: WorkspaceIdentitySnapshot,
+    mutation_gate: Arc<Mutex<()>>,
+    #[cfg(unix)]
+    root_dir: Arc<File>,
+}
+
+impl Clone for Workspace {
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            identity: self.identity.clone(),
+            root_identity: self.root_identity.clone(),
+            mutation_gate: Arc::clone(&self.mutation_gate),
+            #[cfg(unix)]
+            root_dir: Arc::clone(&self.root_dir),
+        }
+    }
 }
 
 /// A point-in-time identity for the canonical workspace root.
@@ -178,6 +220,12 @@ pub enum ApplyPatchError {
     },
     #[error("failed to atomically publish replacement: {0}")]
     Persist(#[from] tempfile::PersistError),
+    #[error("replacement for {path} was published but directory durability is unproven: {source}")]
+    DurabilityUncertain {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 pub type WorkspaceResult<T> = std::result::Result<T, WorkspaceError>;
@@ -189,12 +237,42 @@ impl Workspace {
         if !root.is_dir() {
             return Err(WorkspaceError::NotDirectory(root));
         }
+        #[cfg(unix)]
+        let (root_dir, root_identity) = {
+            // Open the canonical root with O_DIRECTORY|O_NOFOLLOW and derive
+            // the identity from that descriptor.  A path-level stat taken
+            // before/after this call could otherwise describe a different
+            // directory if a concurrent actor replaced the root.
+            let root_dir = open_directory_nofollow(&root).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    WorkspaceError::NotFound(root.clone())
+                } else {
+                    WorkspaceError::Io(error)
+                }
+            })?;
+            let descriptor_identity = workspace_identity_snapshot_for_descriptor(&root, &root_dir)?;
+            // Confirm that the canonical path still names the descriptor we
+            // opened.  If it changed during open, fail closed instead of
+            // silently binding the workspace to a detached tree.
+            let path_identity = workspace_identity_snapshot_for_canonical_root(&root)?;
+            if path_identity != descriptor_identity {
+                return Err(WorkspaceError::WorkspaceIdentityChanged {
+                    expected: descriptor_identity,
+                    actual: path_identity,
+                });
+            }
+            (root_dir, descriptor_identity)
+        };
+        #[cfg(not(unix))]
         let root_identity = workspace_identity_snapshot_for_canonical_root(&root)?;
         let identity = root_identity.digest.clone();
         Ok(Self {
             root,
             identity,
             root_identity,
+            mutation_gate: Arc::new(Mutex::new(())),
+            #[cfg(unix)]
+            root_dir: Arc::new(root_dir),
         })
     }
 
@@ -229,7 +307,24 @@ impl Workspace {
                 WorkspaceError::Io(error)
             }
         })?;
-        workspace_identity_snapshot_for_canonical_root(&canonical)
+        #[cfg(unix)]
+        {
+            // Resolve and stat the live path through one no-follow directory
+            // descriptor.  This makes the identity sample atomic with
+            // respect to replacement of the final root component.
+            let descriptor = open_directory_nofollow(&canonical).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    WorkspaceError::NotFound(self.root.clone())
+                } else {
+                    WorkspaceError::Io(error)
+                }
+            })?;
+            workspace_identity_snapshot_for_descriptor(&canonical, &descriptor)
+        }
+        #[cfg(not(unix))]
+        {
+            workspace_identity_snapshot_for_canonical_root(&canonical)
+        }
     }
 
     /// Revalidate that the path still names the exact root opened by this
@@ -385,14 +480,36 @@ impl Workspace {
         if !directory.is_dir() {
             return Err(WorkspaceError::NotDirectory(relative));
         }
+        #[cfg(unix)]
+        if !relative.as_os_str().is_empty() {
+            // Validate every directory component through the anchored root
+            // descriptor.  This is intentionally a second open after the
+            // canonical path check: the returned path is only a descriptive
+            // value, while callers that perform I/O should retain/use the fd.
+            self.open_secure_directory(&relative)?;
+        }
         self.revalidate_identity()?;
         Ok(directory)
     }
 
     pub fn read(&self, relative: impl AsRef<Path>) -> WorkspaceResult<RevisionedFile> {
         let relative = validate_relative(relative.as_ref())?;
-        let absolute = self.resolve_existing(&relative)?;
-        let (mut file, metadata) = open_regular_single_link(&absolute, &relative)?;
+        #[cfg(unix)]
+        let (mut file, metadata) = {
+            // Canonicalize only to preserve the public alias semantics (a
+            // read may name an in-workspace symlink), then reopen the
+            // canonical spelling component-by-component from the root fd.
+            // The descriptor, not the path, is what supplies the bytes.
+            let absolute = self.resolve_existing(&relative)?;
+            let canonical_relative = self.canonical_relative(&absolute)?;
+            let opened = self.open_secure_regular(&canonical_relative)?;
+            (opened.file, opened.metadata)
+        };
+        #[cfg(not(unix))]
+        let (mut file, metadata) = {
+            let absolute = self.resolve_existing(&relative)?;
+            open_regular_single_link(&absolute, &relative)?
+        };
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         ensure_file_identity_unchanged(&file, &metadata, &relative)?;
@@ -414,8 +531,18 @@ impl Workspace {
         limit: u64,
     ) -> WorkspaceResult<RevisionedFile> {
         let relative = validate_relative(relative.as_ref())?;
-        let absolute = self.resolve_existing(&relative)?;
-        let (mut file, metadata) = open_regular_single_link(&absolute, &relative)?;
+        #[cfg(unix)]
+        let (mut file, metadata) = {
+            let absolute = self.resolve_existing(&relative)?;
+            let canonical_relative = self.canonical_relative(&absolute)?;
+            let opened = self.open_secure_regular(&canonical_relative)?;
+            (opened.file, opened.metadata)
+        };
+        #[cfg(not(unix))]
+        let (mut file, metadata) = {
+            let absolute = self.resolve_existing(&relative)?;
+            open_regular_single_link(&absolute, &relative)?
+        };
         if metadata.len() > limit {
             return Err(WorkspaceError::ReadLimitExceeded {
                 path: relative,
@@ -466,8 +593,21 @@ impl Workspace {
         limit: u64,
     ) -> WorkspaceResult<(RevisionedFile, FileRevisionSnapshot)> {
         let relative = validate_relative(relative.as_ref())?;
-        let absolute = self.resolve_expected(&relative)?;
-        let (mut file, metadata) = open_regular_single_link(&absolute, &relative)?;
+        #[cfg(unix)]
+        let (mut file, metadata) = {
+            // `resolve_expected` performs the canonical direct-path check and
+            // a no-follow walk.  Open once more through the root descriptor
+            // and retain that descriptor for the actual read so an
+            // intermediate directory swap cannot redirect the operation.
+            self.resolve_expected(&relative)?;
+            let opened = self.open_secure_regular(&relative)?;
+            (opened.file, opened.metadata)
+        };
+        #[cfg(not(unix))]
+        let (mut file, metadata) = {
+            let absolute = self.resolve_expected(&relative)?;
+            open_regular_single_link(&absolute, &relative)?
+        };
         let identity = file_identity(&metadata);
         if metadata.len() > limit {
             return Err(WorkspaceError::ReadLimitExceeded {
@@ -516,11 +656,11 @@ impl Workspace {
     ) -> WorkspaceResult<(PathBuf, u64)> {
         let relative = validate_relative(relative.as_ref())?;
         let absolute = self.resolve_existing(&relative)?;
+        let canonical_relative = self.canonical_relative(&absolute)?;
+        #[cfg(unix)]
+        let metadata = self.open_secure_regular(&canonical_relative)?.metadata;
+        #[cfg(not(unix))]
         let (_, metadata) = open_regular_single_link(&absolute, &relative)?;
-        let canonical_relative = absolute
-            .strip_prefix(&self.root)
-            .expect("resolve_existing enforces workspace containment")
-            .to_owned();
         Ok((canonical_relative, metadata.len()))
     }
 
@@ -535,7 +675,12 @@ impl Workspace {
     ///
     /// The replacement is first durably written to the same directory. The base
     /// hash is checked again from one validated file descriptor immediately before
-    /// the atomic rename. Full dirfd-relative publication is still an M2 boundary.
+    /// an anchored, directory-relative atomic rename.  On Unix, all path
+    /// components are opened with `O_NOFOLLOW` from the retained root fd.
+    /// There is no portable inode/hash compare-and-swap rename: a hostile actor
+    /// can still replace the final name after the last check, so callers must
+    /// treat the operation as object-bound rather than an unqualified external
+    /// CAS.
     pub fn apply_patch(
         &self,
         relative: impl AsRef<Path>,
@@ -568,62 +713,183 @@ impl Workspace {
         replacement: &[u8],
         require_resolved_path: bool,
     ) -> ApplyResult<ApplyPatchResult> {
+        // Serialize mutations made through clones of one Workspace.  This
+        // gives the prepare/check/publish sequence deterministic semantics for
+        // cooperating callers; the descriptor-relative publication below is
+        // still required for callers in other processes.
+        let _mutation_guard = self
+            .mutation_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
         // Keep the mutation bound to the root captured at Workspace::open.
         // `resolve_existing` repeats this check, but the explicit boundary is
         // intentional: future changes must not accidentally resolve a path
         // before the live identity guard.
         self.revalidate_identity()?;
-        let absolute = if require_resolved_path {
-            self.resolve_expected(&relative)?
-        } else {
-            self.resolve_existing(&relative)?
-        };
-        let (mut original, metadata) = open_regular_single_link(&absolute, &relative)?;
-        let original_identity = file_identity(&metadata);
-        let first_revision = digest_open_file(&mut original)?;
-        ensure_file_identity_unchanged(&original, &metadata, &relative)?;
+
+        #[cfg(unix)]
+        {
+            // `apply_patch` historically accepted an in-workspace symlink
+            // alias.  Resolve that alias once, then use its canonical direct
+            // spelling for every descriptor operation.  The prepared variant
+            // requires the spelling to be direct and therefore rejects the
+            // alias in `resolve_expected`.
+            let operation_relative = if require_resolved_path {
+                self.resolve_expected(&relative)?;
+                relative.clone()
+            } else {
+                let absolute = self.resolve_existing(&relative)?;
+                self.canonical_relative(&absolute)?
+            };
+            self.apply_patch_dirfd(&relative, &operation_relative, base_revision, replacement)
+        }
+
+        #[cfg(not(unix))]
+        {
+            let absolute = if require_resolved_path {
+                self.resolve_expected(&relative)?
+            } else {
+                self.resolve_existing(&relative)?
+            };
+            let (mut original, metadata) = open_regular_single_link(&absolute, &relative)?;
+            let first_revision = digest_open_file(&mut original)?;
+            ensure_file_identity_unchanged(&original, &metadata, &relative)?;
+            if first_revision != base_revision {
+                return Err(ApplyPatchError::StaleRevision {
+                    path: relative,
+                    expected: base_revision.to_owned(),
+                    actual: first_revision,
+                });
+            }
+            let parent = absolute
+                .parent()
+                .expect("a workspace-contained file always has a parent");
+            let mut temporary = NamedTempFile::new_in(parent)?;
+            temporary.write_all(replacement)?;
+            temporary
+                .as_file()
+                .set_permissions(metadata.permissions())?;
+            temporary.as_file().sync_all()?;
+            self.revalidate_identity()?;
+            let current_absolute = if require_resolved_path {
+                self.resolve_expected(&relative)?
+            } else {
+                self.resolve_existing(&relative)?
+            };
+            if current_absolute != absolute {
+                return Err(WorkspaceError::ResolvedPathChanged {
+                    expected: relative.clone(),
+                    actual: current_absolute,
+                }
+                .into());
+            }
+            let (mut current, current_metadata) =
+                open_regular_single_link(&current_absolute, &relative)?;
+            let first_identity = file_identity(&metadata);
+            let current_identity = file_identity(&current_metadata);
+            if !same_file_object(first_identity, current_identity) {
+                return Err(WorkspaceError::FileIdentityChanged {
+                    path: relative.clone(),
+                    expected_device: first_identity.device,
+                    expected_inode: first_identity.inode,
+                    actual_device: current_identity.device,
+                    actual_inode: current_identity.inode,
+                }
+                .into());
+            }
+            let current_revision = digest_open_file(&mut current)?;
+            ensure_file_identity_unchanged(&current, &current_metadata, &relative)?;
+            if current_revision != base_revision {
+                return Err(ApplyPatchError::StaleRevision {
+                    path: relative.clone(),
+                    expected: base_revision.to_owned(),
+                    actual: current_revision,
+                });
+            }
+            self.revalidate_identity()?;
+            temporary.persist(&absolute)?;
+            sync_directory(parent).map_err(|source| ApplyPatchError::DurabilityUncertain {
+                path: relative.clone(),
+                source,
+            })?;
+            Ok(ApplyPatchResult {
+                relative_path: relative,
+                previous_revision: base_revision.to_owned(),
+                revision: digest(replacement),
+                bytes_written: replacement.len() as u64,
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    fn apply_patch_dirfd(
+        &self,
+        result_relative: &Path,
+        operation_relative: &Path,
+        base_revision: &str,
+        replacement: &[u8],
+    ) -> ApplyResult<ApplyPatchResult> {
+        self.apply_patch_dirfd_observed(
+            result_relative,
+            operation_relative,
+            base_revision,
+            replacement,
+            |_| {},
+        )
+    }
+
+    /// Descriptor-relative patch implementation.  `observer` is intentionally
+    /// private and is used by race/crash tests to mutate the namespace at
+    /// transaction boundaries without adding a production hook surface.
+    #[cfg(unix)]
+    fn apply_patch_dirfd_observed<F>(
+        &self,
+        result_relative: &Path,
+        operation_relative: &Path,
+        base_revision: &str,
+        replacement: &[u8],
+        mut observer: F,
+    ) -> ApplyResult<ApplyPatchResult>
+    where
+        F: FnMut(PatchStage),
+    {
+        let mut opened = self.open_secure_regular(operation_relative)?;
+        let original_identity = file_identity(&opened.metadata);
+        let first_revision = digest_open_file(&mut opened.file)?;
+        ensure_file_identity_unchanged(&opened.file, &opened.metadata, operation_relative)?;
         if first_revision != base_revision {
             return Err(ApplyPatchError::StaleRevision {
-                path: relative,
+                path: result_relative.to_owned(),
                 expected: base_revision.to_owned(),
                 actual: first_revision,
             });
         }
+        observer(PatchStage::TargetValidated);
 
-        let parent = absolute
-            .parent()
-            .expect("a workspace-contained file always has a parent");
-        let mut temporary = NamedTempFile::new_in(parent)?;
+        let mut temporary = DirectoryTempFile::create(&opened.parent)?;
         temporary.write_all(replacement)?;
         temporary
-            .as_file()
-            .set_permissions(metadata.permissions())?;
-        temporary.as_file().sync_all()?;
+            .file()
+            .set_permissions(opened.metadata.permissions())?;
+        temporary.sync_all()?;
+        observer(PatchStage::ReplacementSynced);
 
-        // Revalidate both the root and the canonical target before publication.
-        // This rejects a same-byte replacement with a different device/inode.
-        // A dirfd-relative rename is still required to make the final
-        // check-to-rename interval race-free on a hostile shared filesystem;
-        // see docs/ARCHITECTURE.md for this remaining boundary.
+        // The parent descriptor is held from the component walk through the
+        // rename.  A replacement of an intermediate directory or a symlink
+        // insertion therefore cannot redirect this publication to a different
+        // pathname.  We still revalidate the root and target identity before
+        // the rename; POSIX has no primitive for “rename iff this inode/hash is
+        // still at the name”, so an independent hostile writer can race the
+        // final name replacement (see the module docs and tests).
         self.revalidate_identity()?;
-        let current_absolute = if require_resolved_path {
-            self.resolve_expected(&relative)?
-        } else {
-            self.resolve_existing(&relative)?
-        };
-        if current_absolute != absolute {
-            return Err(WorkspaceError::ResolvedPathChanged {
-                expected: relative.clone(),
-                actual: current_absolute,
-            }
-            .into());
-        }
+        self.verify_parent_descriptor(operation_relative, &opened.parent)?;
         let (mut current, current_metadata) =
-            open_regular_single_link(&current_absolute, &relative)?;
+            open_regular_at(&opened.parent, &opened.name, operation_relative)?;
         let current_identity = file_identity(&current_metadata);
         if !same_file_object(original_identity, current_identity) {
             return Err(WorkspaceError::FileIdentityChanged {
-                path: relative.clone(),
+                path: result_relative.to_owned(),
                 expected_device: original_identity.device,
                 expected_inode: original_identity.inode,
                 actual_device: current_identity.device,
@@ -632,24 +898,26 @@ impl Workspace {
             .into());
         }
         let current_revision = digest_open_file(&mut current)?;
-        ensure_file_identity_unchanged(&current, &current_metadata, &relative)?;
+        ensure_file_identity_unchanged(&current, &current_metadata, operation_relative)?;
         if current_revision != base_revision {
             return Err(ApplyPatchError::StaleRevision {
-                path: relative.clone(),
+                path: result_relative.to_owned(),
                 expected: base_revision.to_owned(),
                 actual: current_revision,
             });
         }
 
-        // Repeat the root check immediately before the path-based publish.
-        // This is the strongest portable guard available in this module; the
-        // remaining tiny rename window is deliberately documented rather than
-        // overstated as a complete CAS.
+        observer(PatchStage::BeforePublish);
         self.revalidate_identity()?;
-        temporary.persist(&absolute)?;
-        sync_directory(parent)?;
+        temporary.publish(&opened.name)?;
+        sync_directory_fd(&opened.parent).map_err(|source| {
+            ApplyPatchError::DurabilityUncertain {
+                path: result_relative.to_owned(),
+                source,
+            }
+        })?;
         Ok(ApplyPatchResult {
-            relative_path: relative,
+            relative_path: result_relative.to_owned(),
             previous_revision: base_revision.to_owned(),
             revision: digest(replacement),
             bytes_written: replacement.len() as u64,
@@ -728,31 +996,142 @@ impl Workspace {
         Ok(canonical)
     }
 
+    fn canonical_relative(&self, absolute: &Path) -> WorkspaceResult<PathBuf> {
+        let relative = absolute
+            .strip_prefix(&self.root)
+            .map_err(|_| WorkspaceError::OutsideWorkspace {
+                root: self.root.clone(),
+                path: absolute.to_owned(),
+            })?
+            .to_owned();
+        validate_relative(&relative)
+    }
+
     fn resolve_expected(&self, relative: &Path) -> WorkspaceResult<PathBuf> {
         let canonical = self.resolve_existing(relative)?;
-        let actual = canonical
-            .strip_prefix(&self.root)
-            .expect("resolve_existing enforces workspace containment")
-            .to_owned();
+        let actual = self.canonical_relative(&canonical)?;
         if actual != relative {
             return Err(WorkspaceError::ResolvedPathChanged {
                 expected: relative.to_owned(),
                 actual,
             });
         }
+        #[cfg(unix)]
+        {
+            // Canonicalization above preserves the existing error taxonomy
+            // for aliases, while this walk closes the intermediate-component
+            // TOCTOU window.  No descriptor returned here is used for the
+            // eventual side effect; callers reopen and retain the parent fd
+            // for that transaction.
+            self.open_secure_regular(relative).map(|_| ())?;
+        }
         Ok(canonical)
+    }
+
+    #[cfg(unix)]
+    fn open_secure_regular(&self, relative: &Path) -> WorkspaceResult<OpenedRelative> {
+        self.revalidate_identity()?;
+        let opened = open_relative_nofollow(&self.root_dir, relative)
+            .map_err(|error| self.map_secure_path_error(relative, error))?;
+        let metadata = opened.file.metadata()?;
+        if !metadata.is_file() {
+            return Err(WorkspaceError::NotAFile(relative.to_owned()));
+        }
+        ensure_single_link(&metadata, relative)?;
+        self.revalidate_identity()?;
+        Ok(OpenedRelative { metadata, ..opened })
+    }
+
+    #[cfg(unix)]
+    fn open_secure_directory(&self, relative: &Path) -> WorkspaceResult<File> {
+        self.revalidate_identity()?;
+        let directory = open_directory_relative_nofollow(&self.root_dir, relative)
+            .map_err(|error| self.map_secure_path_error(relative, error))?;
+        let metadata = directory.metadata()?;
+        if !metadata.is_dir() {
+            return Err(WorkspaceError::NotDirectory(relative.to_owned()));
+        }
+        self.revalidate_identity()?;
+        Ok(directory)
+    }
+
+    #[cfg(unix)]
+    fn verify_parent_descriptor(
+        &self,
+        relative: &Path,
+        expected_parent: &File,
+    ) -> WorkspaceResult<()> {
+        let parent_relative = relative.parent().unwrap_or_else(|| Path::new(""));
+        let live_parent = open_directory_relative_nofollow(&self.root_dir, parent_relative)
+            .map_err(|error| self.map_secure_path_error(parent_relative, error))?;
+        let expected_identity = file_identity(&expected_parent.metadata()?);
+        let actual_identity = file_identity(&live_parent.metadata()?);
+        if !same_file_object(expected_identity, actual_identity) {
+            return Err(WorkspaceError::FileIdentityChanged {
+                path: relative.to_owned(),
+                expected_device: expected_identity.device,
+                expected_inode: expected_identity.inode,
+                actual_device: actual_identity.device,
+                actual_inode: actual_identity.inode,
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn map_secure_path_error(&self, relative: &Path, error: std::io::Error) -> WorkspaceError {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return WorkspaceError::NotFound(relative.to_owned());
+        }
+        // O_NOFOLLOW reports ELOOP on some Unix implementations and
+        // ENOTDIR on others when a symlink (or a non-directory) appears in an
+        // intermediate component. Preserve the public path-change/escape
+        // taxonomy by taking a best-effort diagnostic canonicalization. The
+        // diagnostic result is never used to perform the operation.
+        if error.raw_os_error() == Some(Errno::LOOP.raw_os_error())
+            || error.kind() == std::io::ErrorKind::NotADirectory
+        {
+            let candidate = self.root.join(relative);
+            if let Ok(canonical) = fs::canonicalize(&candidate) {
+                if !canonical.starts_with(&self.root) {
+                    return WorkspaceError::OutsideWorkspace {
+                        root: self.root.clone(),
+                        path: canonical,
+                    };
+                }
+                if let Ok(actual) = self.canonical_relative(&canonical) {
+                    return WorkspaceError::ResolvedPathChanged {
+                        expected: relative.to_owned(),
+                        actual,
+                    };
+                }
+            }
+            return WorkspaceError::ResolvedPathChanged {
+                expected: relative.to_owned(),
+                actual: relative.to_owned(),
+            };
+        }
+        WorkspaceError::Io(error)
     }
 
     fn revision_snapshot_at(
         &self,
-        absolute: &Path,
+        _absolute: &Path,
         relative: &Path,
     ) -> WorkspaceResult<FileRevisionSnapshot> {
         // `absolute` is resolved by a caller after a live root check.  Keep a
         // second check here because this helper is also used by public
         // revalidation APIs and should remain safe if the call graph changes.
         self.revalidate_identity()?;
-        let (mut file, metadata) = open_regular_single_link(absolute, relative)?;
+        #[cfg(unix)]
+        let (mut file, metadata) = {
+            // Ignore the path after validation and obtain the bytes and
+            // identity from one root-dirfd-relative descriptor.
+            let opened = self.open_secure_regular(relative)?;
+            (opened.file, opened.metadata)
+        };
+        #[cfg(not(unix))]
+        let (mut file, metadata) = open_regular_single_link(_absolute, relative)?;
         let identity = file_identity(&metadata);
         let revision = digest_open_file(&mut file)?;
         ensure_file_identity_unchanged(&file, &metadata, relative)?;
@@ -825,6 +1204,9 @@ struct FileIdentity {
     inode: Option<u64>,
     byte_length: u64,
     mode: Option<u32>,
+    link_count: Option<u64>,
+    modified: Option<(i64, u32)>,
+    changed: Option<(i64, u32)>,
 }
 
 fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
@@ -836,6 +1218,9 @@ fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
             inode: Some(metadata.ino()),
             byte_length: metadata.len(),
             mode: Some(metadata.mode()),
+            link_count: Some(metadata.nlink()),
+            modified: Some((metadata.mtime(), metadata.mtime_nsec() as u32)),
+            changed: Some((metadata.ctime(), metadata.ctime_nsec() as u32)),
         }
     }
     #[cfg(not(unix))]
@@ -845,6 +1230,9 @@ fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
             inode: None,
             byte_length: metadata.len(),
             mode: None,
+            link_count: None,
+            modified: None,
+            changed: None,
         }
     }
 }
@@ -872,9 +1260,17 @@ fn ensure_file_identity_unchanged(
     let after_identity = file_identity(&after);
     if !same_file_object(before_identity, after_identity)
         || before_identity.byte_length != after_identity.byte_length
+        || before_identity.link_count != after_identity.link_count
+        || before_identity.modified != after_identity.modified
+        || before_identity.changed != after_identity.changed
     {
         return Err(WorkspaceError::FileChangedDuringRead(relative.to_owned()));
     }
+    // A hard link can be added while the descriptor is being read.  Check the
+    // post-read metadata as well as the initial metadata so the caller never
+    // returns bytes from an object that became externally reachable during the
+    // operation.
+    ensure_single_link(&after, relative)?;
     Ok(())
 }
 
@@ -892,6 +1288,7 @@ fn revision_snapshot_from_parts(
     }
 }
 
+#[cfg(not(unix))]
 fn open_regular_single_link(
     absolute: &Path,
     display_path: &Path,
@@ -905,21 +1302,9 @@ fn open_regular_single_link(
     Ok((file, metadata))
 }
 
+#[cfg(not(unix))]
 fn open_readonly_nofollow(path: &Path) -> std::io::Result<File> {
-    #[cfg(unix)]
-    {
-        use rustix::fs::{open, Mode, OFlags};
-        let descriptor = open(
-            path,
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-            Mode::empty(),
-        )?;
-        Ok(descriptor.into())
-    }
-    #[cfg(not(unix))]
-    {
-        File::open(path)
-    }
+    File::open(path)
 }
 
 fn ensure_single_link(metadata: &fs::Metadata, path: &Path) -> WorkspaceResult<()> {
@@ -978,16 +1363,231 @@ fn directory_identity(metadata: &fs::Metadata) -> (Option<u64>, Option<u64>) {
     }
 }
 
+#[cfg(not(unix))]
 fn sync_directory(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        File::open(path)?.sync_all()
+    let _ = path;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct OpenedRelative {
+    parent: File,
+    name: OsString,
+    file: File,
+    metadata: fs::Metadata,
+}
+
+/// Internal transaction points used only by deterministic race tests.  The
+/// production path always supplies a no-op observer.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatchStage {
+    TargetValidated,
+    ReplacementSynced,
+    BeforePublish,
+}
+
+/// A temporary file created relative to a pinned parent directory.
+///
+/// `NamedTempFile::new_in(parent_path)` is intentionally not used on Unix:
+/// the parent path can be renamed or replaced after it has been checked.  An
+/// O_EXCL `openat` keeps creation and cleanup in the same directory object that
+/// will receive the final `renameat`.
+#[cfg(unix)]
+#[derive(Debug)]
+struct DirectoryTempFile {
+    parent: File,
+    name: OsString,
+    file: File,
+    published: bool,
+}
+
+#[cfg(unix)]
+impl DirectoryTempFile {
+    fn create(parent: &File) -> std::io::Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let parent = parent.try_clone()?;
+        let mode = Mode::from_raw_mode(0o600);
+        for _ in 0..64 {
+            let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let name = OsString::from(format!(".yeux-tmp-{}-{}", std::process::id(), sequence));
+            match openat(
+                &parent,
+                &name,
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+                mode,
+            ) {
+                Ok(descriptor) => {
+                    return Ok(Self {
+                        parent,
+                        name,
+                        file: descriptor.into(),
+                        published: false,
+                    });
+                }
+                Err(error) if error == Errno::EXIST => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "unable to allocate a unique workspace temporary name",
+        ))
     }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
+
+    fn file(&self) -> &File {
+        &self.file
+    }
+
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.file.write_all(bytes)
+    }
+
+    fn sync_all(&self) -> std::io::Result<()> {
+        self.file.sync_all()
+    }
+
+    fn publish(mut self, target: &OsStr) -> std::io::Result<()> {
+        renameat(&self.parent, &self.name, &self.parent, target)?;
+        self.published = true;
         Ok(())
     }
+}
+
+#[cfg(unix)]
+impl Drop for DirectoryTempFile {
+    fn drop(&mut self) {
+        if !self.published {
+            // The descriptor remains valid even if the parent was renamed;
+            // unlinkat therefore cleans up the exact directory in which the
+            // temporary was created, never a path-resolved substitute.
+            let _ = unlinkat(&self.parent, &self.name, AtFlags::empty());
+        }
+    }
+}
+
+#[cfg(unix)]
+fn open_directory_nofollow(path: &Path) -> std::io::Result<File> {
+    let descriptor = rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )?;
+    Ok(descriptor.into())
+}
+
+#[cfg(unix)]
+fn open_directory_relative_nofollow(root: &File, relative: &Path) -> std::io::Result<File> {
+    let mut current = root.try_clone()?;
+    for component in relative.components() {
+        let descriptor = openat(
+            &current,
+            component.as_os_str(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )?;
+        current = descriptor.into();
+    }
+    Ok(current)
+}
+
+#[cfg(unix)]
+fn open_relative_nofollow(root: &File, relative: &Path) -> std::io::Result<OpenedRelative> {
+    let mut components = relative
+        .components()
+        .map(|component| component.as_os_str().to_os_string())
+        .collect::<Vec<_>>();
+    let name = components.pop().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "workspace relative path must contain a file name",
+        )
+    })?;
+    let mut parent = root.try_clone()?;
+    for component in components {
+        let descriptor = openat(
+            &parent,
+            &component,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )?;
+        parent = descriptor.into();
+    }
+    let descriptor = openat(
+        &parent,
+        &name,
+        // `O_NONBLOCK` is essential before the metadata check: opening a
+        // FIFO read-only without a writer blocks in the kernel, so a hostile
+        // workspace entry could wedge planning before the daemon's normal
+        // cancellation/timeout boundary is reached.  Regular files are
+        // unaffected by the flag; the subsequent fstat still rejects every
+        // special file before bytes are read.
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    )?;
+    let file: File = descriptor.into();
+    let metadata = file.metadata()?;
+    Ok(OpenedRelative {
+        parent,
+        name,
+        file,
+        metadata,
+    })
+}
+
+#[cfg(unix)]
+fn open_regular_at(
+    parent: &File,
+    name: &OsStr,
+    display_path: &Path,
+) -> WorkspaceResult<(File, fs::Metadata)> {
+    let descriptor = openat(
+        parent,
+        name,
+        // Keep the revalidation open non-blocking as well.  This path runs
+        // after the first descriptor check and must not reintroduce a FIFO
+        // denial-of-service window during the final identity comparison.
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(|error| WorkspaceError::Io(error.into()))?;
+    let file: File = descriptor.into();
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(WorkspaceError::NotAFile(display_path.to_owned()));
+    }
+    ensure_single_link(&metadata, display_path)?;
+    Ok((file, metadata))
+}
+
+#[cfg(unix)]
+fn sync_directory_fd(directory: &File) -> std::io::Result<()> {
+    directory.sync_all()
+}
+
+#[cfg(unix)]
+fn workspace_identity_snapshot_for_descriptor(
+    canonical_root: &Path,
+    descriptor: &File,
+) -> WorkspaceResult<WorkspaceIdentitySnapshot> {
+    let metadata = descriptor.metadata()?;
+    if !metadata.is_dir() {
+        return Err(WorkspaceError::NotDirectory(canonical_root.to_owned()));
+    }
+    let (device, inode) = directory_identity(&metadata);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(canonical_root.as_os_str().as_encoded_bytes());
+    hasher.update(&device.unwrap_or_default().to_le_bytes());
+    hasher.update(&inode.unwrap_or_default().to_le_bytes());
+    Ok(WorkspaceIdentitySnapshot {
+        canonical_root: canonical_root.to_owned(),
+        digest: hasher.finalize().to_hex().to_string(),
+        device,
+        inode,
+    })
 }
 
 #[cfg(test)]
@@ -1007,6 +1607,35 @@ mod tests {
         let file = workspace.read("hello.txt").unwrap();
         assert_eq!(file.bytes, b"old");
         assert_eq!(file.revision, blake3::hash(b"old").to_hex().to_string());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn special_file_read_is_rejected_without_blocking() {
+        use std::{sync::mpsc, time::Duration};
+
+        let directory = tempfile::tempdir().unwrap();
+        let fifo = directory.path().join("unreadable-fifo");
+        let mkfifo = ["/usr/bin/mkfifo", "/bin/mkfifo"]
+            .into_iter()
+            .find(|path| std::path::Path::new(path).is_file())
+            .expect("test host has mkfifo");
+        let status = std::process::Command::new(mkfifo)
+            .arg(&fifo)
+            .status()
+            .expect("spawn mkfifo");
+        assert!(status.success());
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = workspace.read("unreadable-fifo").map(|_| ());
+            let _ = sender.send(result.map_err(|error| error.to_string()));
+        });
+
+        let result = receiver
+            .recv_timeout(Duration::from_millis(500))
+            .expect("special-file validation must not block waiting for a FIFO writer");
+        assert!(matches!(result, Err(message) if message.contains("regular file")));
     }
 
     #[test]
@@ -1222,6 +1851,178 @@ mod tests {
         );
         assert_eq!(result.revision, blake3::hash(b"new").to_hex().to_string());
         assert_eq!(result.previous_revision, base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dirfd_patch_rejects_intermediate_directory_replacement_before_publish() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("root");
+        let source = root.join("src");
+        let detached = parent.path().join("detached-src");
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("target.txt"), b"old").unwrap();
+        fs::write(outside.path().join("target.txt"), b"outside").unwrap();
+        let workspace = Workspace::open(&root).unwrap();
+        let base = blake3::hash(b"old").to_hex().to_string();
+
+        let result = workspace.apply_patch_dirfd_observed(
+            Path::new("src/target.txt"),
+            Path::new("src/target.txt"),
+            &base,
+            b"new",
+            |stage| {
+                if stage == PatchStage::ReplacementSynced {
+                    fs::rename(&source, &detached).unwrap();
+                    symlink(outside.path(), &source).unwrap();
+                }
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(ApplyPatchError::Workspace(
+                WorkspaceError::OutsideWorkspace { .. }
+            )) | Err(ApplyPatchError::Workspace(
+                WorkspaceError::ResolvedPathChanged { .. }
+            ))
+        ));
+        assert_eq!(fs::read(detached.join("target.txt")).unwrap(), b"old");
+        assert_eq!(
+            fs::read(outside.path().join("target.txt")).unwrap(),
+            b"outside"
+        );
+        // The temporary was created through the detached parent descriptor and
+        // is cleaned there; no path-resolved temporary leaks into the attacker
+        // replacement.
+        assert!(fs::read_dir(&detached)
+            .unwrap()
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".yeux-tmp-")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dirfd_patch_rejects_parent_replacement_with_another_in_workspace_directory() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("root");
+        let source = root.join("src");
+        let detached = parent.path().join("detached-src");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("target.txt"), b"old").unwrap();
+        let workspace = Workspace::open(&root).unwrap();
+        let base = blake3::hash(b"old").to_hex().to_string();
+
+        let result = workspace.apply_patch_dirfd_observed(
+            Path::new("src/target.txt"),
+            Path::new("src/target.txt"),
+            &base,
+            b"new",
+            |stage| {
+                if stage == PatchStage::ReplacementSynced {
+                    fs::rename(&source, &detached).unwrap();
+                    fs::create_dir(&source).unwrap();
+                    fs::write(source.join("target.txt"), b"attacker").unwrap();
+                }
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(ApplyPatchError::Workspace(
+                WorkspaceError::FileIdentityChanged { .. }
+            ))
+        ));
+        assert_eq!(fs::read(detached.join("target.txt")).unwrap(), b"old");
+        assert_eq!(fs::read(source.join("target.txt")).unwrap(), b"attacker");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dirfd_publish_does_not_follow_a_final_target_symlink_race() {
+        use std::os::unix::fs::symlink;
+
+        let (directory, workspace) = setup();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        fs::write(outside.path(), b"outside").unwrap();
+        let base = blake3::hash(b"old").to_hex().to_string();
+        let result = workspace.apply_patch_dirfd_observed(
+            Path::new("hello.txt"),
+            Path::new("hello.txt"),
+            &base,
+            b"new",
+            |stage| {
+                if stage == PatchStage::BeforePublish {
+                    fs::remove_file(directory.path().join("hello.txt")).unwrap();
+                    symlink(outside.path(), directory.path().join("hello.txt")).unwrap();
+                }
+            },
+        );
+
+        // renameat operates on the pinned root directory and replaces the
+        // symlink entry itself; it never follows it to the outside file.
+        assert!(result.is_ok());
+        assert_eq!(
+            fs::read(directory.path().join("hello.txt")).unwrap(),
+            b"new"
+        );
+        assert_eq!(fs::read(outside.path()).unwrap(), b"outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutations_through_workspace_clones_are_serialized() {
+        use std::{
+            sync::{Arc, Barrier},
+            thread,
+        };
+
+        let (_directory, workspace) = setup();
+        let base = workspace.read("hello.txt").unwrap().revision;
+        let workspace = Arc::new(workspace);
+        let barrier = Arc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+        for replacement in [b"one".as_slice(), b"two".as_slice()] {
+            let workspace = Arc::clone(&workspace);
+            let barrier = Arc::clone(&barrier);
+            let base = base.clone();
+            workers.push(thread::spawn(move || {
+                barrier.wait();
+                workspace.apply_patch("hello.txt", &base, replacement)
+            }));
+        }
+        barrier.wait();
+        let results = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| { matches!(result, Err(ApplyPatchError::StaleRevision { .. })) })
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detects_same_length_content_change_during_descriptor_read() {
+        let (directory, _workspace) = setup();
+        let path = directory.path().join("hello.txt");
+        let file = File::open(&path).unwrap();
+        let metadata = file.metadata().unwrap();
+        fs::write(&path, b"new").unwrap();
+        let error =
+            ensure_file_identity_unchanged(&file, &metadata, Path::new("hello.txt")).unwrap_err();
+        assert!(matches!(error, WorkspaceError::FileChangedDuringRead(_)));
     }
 
     #[cfg(unix)]

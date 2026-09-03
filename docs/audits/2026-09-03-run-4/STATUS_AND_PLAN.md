@@ -4,6 +4,9 @@
 审计范围：本地工作区、`origin/main`、GitHub Actions、开放 Pull Request、发布保护设置  
 执行目标：在不改变历史审计记录的前提下，确认 M2 合并后的真实能力，修正文档漂移，并为下一阶段建立可验收计划。
 
+> 历史说明：第 1–6 节记录审计启动时（基于 `51c631c`）的初始快照与计划；
+> 第 7 节是本轮执行后的增量事实源，若两者冲突，以第 7 节和最终门禁结果为准。
+
 ## 1. 可复现的基线
 
 | 项目 | 结果 |
@@ -23,7 +26,7 @@
 ### 已进入 daemon 权威路径的能力
 
 1. `yeuxd::InvocationPipeline` 已成为副作用工具的唯一 authority path：注册、参数规范化、effect 计划、四层 capability 交集、沙箱检查、审批绑定、执行前重计划/重验证、一次性 token 和 opaque `ExecutionPermit` 均在 Rust daemon 内完成。
-2. `workspace.apply_patch` 已作为隐藏 adapter 注册，并在沙箱内通过受限 writer 发布替换内容；发布后再次读取并校验 revision，失败关闭。
+2. `workspace.apply_patch` 已作为隐藏 adapter 注册，并在 capability gate 通过后由受限 descriptor-bound writer 发布替换内容；发布后再次读取并校验 revision，失败关闭。
 3. `process.run` 已作为隐藏 adapter 注册，要求绝对可执行文件和 workspace 内 cwd，网络关闭、workspace 写入关闭，并通过异步 `ProcessExecutor` 执行。
 4. runner 已在 sandbox 能力可用且 host ceiling 非 `observe` 时向 provider 广告写入/进程工具；无沙箱时不广告，直接拒绝副作用准备。审批请求由 daemon 发起，TUI 已实现 allow-once/deny/inspect（deny 默认）和 unified diff 展示。
 5. Invocation 的 `proposed -> approved -> prepared -> started -> completed/failed/unknown` 生命周期及 ToolResult 原子入账已覆盖；取消、超时、崩溃后无法证明停止时进入 Unknown/reconciliation-required，而不是假装成功或自动重试。
@@ -112,10 +115,73 @@
 - 已将本地 `main` 从旧基线 fast-forward 到远端 `51c631c`。
 - 已运行 Rust/TypeScript 本地门禁；受限 shell 导致的 loopback/OS sandbox fixture 已用主机权限复核通过。
 - 已完成第二阶段第一子阶段：mutation 文件身份绑定、同字节新 inode fail-closed、prepared token TTL/容量治理和三层回归测试。
-- 已创建本状态与计划文档；下一步应在当前工作区提交文档同步变更，待维护者确认后再进行 GitHub 分支保护/PR 操作。
+- 已创建本状态与计划文档；在当时的执行快照中，下一步是提交文档同步变更，待维护者确认后再进行 GitHub 分支保护/PR 操作。
 
 ## 6. 明确不在本轮执行的动作
 
 - 不自动关闭、删除或合并开放 PR。
 - 不修改 GitHub branch protection、Secrets、Actions 权限或远端分支。
 - 不把未验证的 credential store、network proxy、PID namespace 实现伪装成已完成。
+
+## 7. 本轮执行更新（2026-09-03）
+
+本节是对上面历史基线和计划的增量记录；第 1 节描述的是审计开始时的快照，
+不再代表当前工作树的干净状态。
+
+截至 2026-09-03 的执行快照，以下改动已经落到当时的工作树；该快照中的“仍需”事项已在第 8 节记录其后续结果：
+
+1. **凭据边界**：`CredentialBroker` 已从 `DaemonConfig` 注入到 runtime/provider seam；
+   CLI 只接受 opaque handle，默认 `NoCredentialBroker`，解析失败关闭。provider 的
+   debug、错误、事件和进程环境路径均做了秘密脱敏/拒绝。OS keychain 或企业 secret
+   backend 尚未实现。
+2. **工作区 mutation**：Unix 路径操作保留 canonical root dirfd，逐组件使用
+   `openat(O_NOFOLLOW)`，临时文件使用 `O_EXCL` 并以 `renameat` 发布；文件 revision、
+   device/inode、父目录身份和 hardlink 计数在 prepare/revalidate/publish 边界复核。
+   这关闭了路径重定向和常见对象替换竞态，但 POSIX 仍没有“目标名称仅在 inode/hash
+   未变时替换”的原子条件原语，hostile final-name writer 仍是明确 residual。
+3. **进程/沙箱**：backend 启动 isolation probe 和每次 spawn 前 bounded handshake 已接通；
+   Linux bubblewrap 要求 PID namespace、`--die-with-parent` 和新 session，进程输出、
+   timeout、取消和进程组收束均有上限/证据；Unix 使用 `waitid(WNOWAIT)` 在 leader
+   回收前固定 PID/PGID，避免清理误伤复用后的数字 PID。macOS Seatbelt 不广告严格 process-tree
+   isolation，因此 `process.run` 在该能力不可证明时保持关闭。
+4. **Unknown/reconciliation**：新增稳定 `invocation/reconcile` JSON-RPC 方法和 TUI/JSONL
+   控制面命令。它只接受父 Turn 已终态、`Unknown` invocation、`operator_review` 有界
+   evidence；可选 `artifact://blake3/<digest>` 必须在本地 CAS 存在且校验通过。命令以
+   幂等 ledger 事务写入 `tool/reconciled` 与 ToolResult，绝不重试原 provider/tool。
+   这仍是 evidence-only 基础，不等同于自动外部状态读取或安全 retry。
+5. **发布门禁**：CI 增加 locked Cargo/PNPM、schema 漂移和 untracked schema、release
+   build、包 metadata 与 `pnpm pack` smoke 检查，并加入 force-push 可达性 fallback。
+   action SHA 固定、依赖审计、SBOM、签名发布和 `main` required checks 仍未配置。
+6. **不确定结果分类**：执行边界之后的进程树/输出收束失败、mutation worker 丢失，
+   以及 rename 成功后目录 fsync 失败均保持为 `Unknown`，runner 会停止后续 provider
+   round 并要求 reconciliation；可证明发生在 spawn/publish 前的校验错误仍为 `Failed`。
+
+本轮新增的验收证据包括 artifact URI round-trip/完整性测试、reconciliation 缺失与
+篡改 artifact 的 fail-closed 测试、以及在已验证 filesystem/process/network backend 上
+运行的 capability-gated read→patch→process 流程测试（当前 macOS Seatbelt 会明确 skip，
+不把 skip 当作完整 E2E 通过）。该快照之后原计划要求重新运行 fmt、clippy、schema、
+workspace Rust tests、TypeScript typecheck/test/build、package smoke 和 diff hygiene；
+第 8 节列出这些门禁的实际结果。
+
+## 8. 最终门禁与本地提交状态（2026-09-04）
+
+本轮实现、协议产物和审计文档已完成本地门禁，随后记录在当前仓库的本地提交中。
+本次只修改本地工作树，没有 push、合并、关闭 PR 或修改 GitHub 权限/保护规则；
+远端 CI 因此仍须由后续正常 push/PR 流程独立验证。
+
+| 门禁 | 结果 |
+|---|---|
+| `git diff --check` | 通过 |
+| `cargo fmt --all --check` | 通过 |
+| `cargo check --locked --workspace --all-targets` | 通过 |
+| `cargo clippy --locked --workspace --all-targets -- -D warnings` | 通过 |
+| `cargo test --locked --workspace --all-targets --no-fail-fast` | 271/271 通过；provider loopback fixture 在受限 shell 中无法 bind，使用已批准的本机权限重跑后通过，未访问外部网络 |
+| `cargo run --locked -p yeux-protocol --example export_schemas -- --check` | 通过；`spec/schema/` 共 56 份 JSON schema（另有说明文件），无漂移或未跟踪产物 |
+| `cargo build --locked --workspace --release` | 通过；本机 `rust-objcopy` 因缺少 `@rpath/libLLVM.dylib` 给出 warning，但不影响构建结果 |
+| `pnpm typecheck` / `pnpm test` / `pnpm build` | 全部通过；TypeScript 测试共 81 项 |
+| package metadata 与 `pnpm pack` smoke | 三个 workspace 包均通过，产物可打包 |
+
+最终状态的能力边界仍按本节以上残余项执行：没有 OS/企业 credential backend、完整
+endpoint 网络代理、跨平台进程树 supervisor、POSIX 最终名称条件 CAS、artifact
+输出/GC、真实仓库 E2E、崩溃注入矩阵或固定 action SHA/SBOM/签名发布。它们保持
+fail-closed 或未广告状态，不能由本地门禁结果推断为已完成。

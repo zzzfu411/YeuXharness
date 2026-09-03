@@ -6,6 +6,7 @@ import {
   PROTOCOL_VERSION,
   isRecord,
   isRuntimeDiagnosticNotification,
+  type InvocationReconcileResult,
   type ApprovalRequestResult,
   type EventEnvelope,
   type JsonRpcClient,
@@ -128,6 +129,39 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
       cwd: options.cwd,
       ...(options.threadId === undefined ? {} : { threadId: options.threadId }),
     });
+
+    // Reconciliation is a control-plane operation: it must remain usable
+    // when no model provider or process sandbox is configured.  Keep it
+    // before model discovery and write-mode checks, while still subscribing
+    // to the thread so the durable events are streamed to the caller.
+    if (options.command === "reconcile") {
+      if (
+        options.invocationId === undefined ||
+        options.reconciliationOutcome === undefined ||
+        options.reconciliationSummary === undefined
+      ) {
+        throw new Error("reconcile requires --invocation, --outcome, and --summary");
+      }
+      renderer.renderSessionBar({
+        cwd: session.workspaceRoot ?? options.cwd,
+        thread: threadId,
+        mode: "reconcile",
+        model: "control-plane",
+        ...(session.workspaceTrust === undefined ? {} : { trust: session.workspaceTrust }),
+        transport: connection.kind,
+        sandbox: false,
+      });
+      const result = await session.reconcileInvocation(threadId, {
+        invocationId: options.invocationId,
+        outcome: options.reconciliationOutcome,
+        summary: options.reconciliationSummary,
+        ...(options.artifactUri === undefined ? {} : { artifactUri: options.artifactUri }),
+      });
+      renderer.renderReconciliationResult(result);
+      await renderer.flush();
+      return { exitCode: 0, threadId };
+    }
+
     const models = await session.listModels();
     const model = models[0] === undefined
       ? "unconfigured"
@@ -427,6 +461,27 @@ class RuntimeSession {
     } finally {
       if (this.#activeTurn?.turnId === started.turn.id) this.#activeTurn = undefined;
     }
+  }
+
+  public async reconcileInvocation(
+    threadId: string,
+    options: {
+      readonly invocationId: string;
+      readonly outcome: "completed" | "failed";
+      readonly summary: string;
+      readonly artifactUri?: string;
+    },
+  ): Promise<InvocationReconcileResult> {
+    return await this.#client.command("invocation/reconcile", {
+      threadId,
+      invocationId: options.invocationId,
+      outcome: options.outcome,
+      evidence: {
+        source: "operator_review",
+        summary: options.summary,
+        ...(options.artifactUri === undefined ? {} : { artifactUri: options.artifactUri }),
+      },
+    });
   }
 
   async #waitForTerminal(turnId: string): Promise<EventEnvelope> {

@@ -1,7 +1,7 @@
 # YeuX Harness v1 路线图
 
-状态日期：2026-09-03<br>
-当前阶段：M0/M1 核心闭环已具备，M2 首版统一副作用管线已合并并通过主线 CI；文件 CAS、凭据注入、进程树监督、reconciliation 与发布门槛仍未完成<br>
+状态日期：2026-09-04<br>
+当前阶段：M0/M1 核心闭环已具备，M2 首版统一副作用管线及本轮安全/恢复增量已接通并通过本地门禁；GitHub CI 与发布治理仍需后续正常 PR 流程验证。Unix dirfd mutation、backend isolation probe/执行前 handshake、严格 process capability 和 evidence-only reconciliation 已落地，但最终名称条件 CAS、凭据后端、跨平台进程树监督与发布门槛仍未完成<br>
 当前版本：`0.1.0` 开发基线，不是 v0.1 发布版
 
 路线图采用阶段门槛，而不是以“文件已经存在”判断完成。某项能力只有在 daemon 执行路径中接通、失败路径经过测试、文档与协议同步后才算交付。
@@ -13,15 +13,15 @@
 | 区域 | 已落地 | 尚未闭环 |
 |---|---|---|
 | 仓库 | Apache-2.0、NOTICE、四 Rust crate、三个 TypeScript 包、macOS/Linux CI | 发布构建、安装器、SBOM |
-| 协议 | JSON-RPC 类型、UUIDv7 ID、版本协商、54 份稳定 schema 与 drift test | TS 自动生成与跨语言完整漂移门禁 |
-| 状态 | Workspace/Thread/Turn/Item/Job 事件、状态机、纯 projection replay | compaction、FTS、快照校验、reconciliation UI |
+| 协议 | JSON-RPC 类型、UUIDv7 ID、版本协商、56 份稳定 schema 与 drift test | TS 自动生成与跨语言完整漂移门禁 |
+| 状态 | Workspace/Thread/Turn/Item/Job 事件、状态机、纯 projection replay、Unknown evidence-only reconciliation 命令 | compaction、FTS、快照校验、reconciliation UI |
 | 存储 | SQLite WAL、追加式 events、Thread 内 seq、内容寻址 artifact | 迁移、备份、配额与 GC |
-| daemon | stdio、每用户私有 Unix socket、单写者锁、订阅/补发、跨重启命令去重、有界多轮 Agent loop、ToolCall/ToolResult 与 Invocation 入账；M2 pipeline 已接入 mutation/process/approval/sandbox | 完整 provider 凭据调度、reconciliation UI、真实任务 E2E |
-| runtime | workspace revision、结构化 `list/read/search`、root/file live identity revalidation、OpenAI-compatible adapter、policy、process、sandbox、artifact 原语；`CredentialBroker` seam 已存在 | daemon credential 注入、dirfd/openat2 CAS、完整进程树监督、网络代理与 artifact 输出策略 |
+| daemon | stdio、每用户私有 Unix socket、单写者锁、订阅/补发、跨重启命令去重、有界多轮 Agent loop、ToolCall/ToolResult 与 Invocation 入账；M2 pipeline 已接入 mutation/process/approval/sandbox；`invocation/reconcile` 已幂等收束 Unknown | 完整 provider 凭据调度、reconciliation UI、真实任务 E2E |
+| runtime | workspace revision、结构化 `list/read/search`、root/file live identity revalidation、Unix root-dirfd/openat/renameat mutation、OpenAI-compatible adapter、policy、process、sandbox capability probe/handshake、artifact 原语；`CredentialBroker` seam 已存在 | POSIX 最终名称条件 CAS、跨平台进程树监督、网络代理与 artifact 输出策略 |
 | TypeScript | JSON-RPC 客户端、socket 身份检查、终端安全渲染与原始 JSONL、stdio fallback、plugin host | OpenTUI、完整协议面、交互/JSONL parity、plugin OS 沙箱与 daemon 接入 |
 | 自动化/多智能体 | 公共类型、事件和 Job 元数据状态 | scheduler、worktree 子智能体、预算与 handoff |
 
-最重要的现状限制已经从“没有工具循环”转移为“首版副作用路径虽已接通，但还没有达到 hostile workspace 与发布级恢复门槛”：`turn/start` 在配置 provider 后可完成只读多轮任务；sandbox 就绪且 host ceiling 非 `observe` 时，provider 还可看到受统一管线保护的 `workspace.apply_patch` 与 `process.run`。文件目录 CAS、凭据注入、脱组进程树治理、完整 reconciliation 和真实“读、改、测、修”测试仍是发布阻断项。
+最重要的现状限制已经从“没有工具循环”转移为“首版副作用路径虽已接通，但还没有达到 hostile workspace 与发布级恢复门槛”：`turn/start` 在配置 provider 后可完成只读多轮任务；sandbox 就绪且 host ceiling 非 `observe` 时，provider 还可看到受统一管线保护的 `workspace.apply_patch` 与 `process.run`。dirfd/逐组件 no-follow 已关闭路径重定向，但 POSIX 最终名称仍无 inode/hash 条件发布；凭据仍是 broker seam（CLI 默认 no-op），跨平台进程树监督、reconciliation 交互 UX、artifact 输出/GC、网络代理和真实“读、改、测、修”测试仍是发布阻断项。
 
 ## 2. M0：契约与仓库基线
 
@@ -98,21 +98,21 @@
 
 目标：发布 v0.1，可在真实仓库中安全完成“读、改、测、修”。
 
-首版副作用管线已合并：`workspace.apply_patch` 与 `process.run` 作为隐藏 adapter 注册，经过统一 policy/approval/sandbox、一次性 token、执行前重验证和 opaque permit；sandbox 不可用时不向 provider 广告。M2 后半段仍需把原语提升到发布级安全证明，特别是 dirfd-relative CAS、凭据注入、进程树监督、reconciliation 与 artifact。
+首版副作用管线已合并：`workspace.apply_patch` 与 `process.run` 作为隐藏 adapter 注册，经过统一 policy/approval/sandbox、一次性 token、执行前重验证和 opaque permit；sandbox 不可用时不向 provider 广告。M2 后半段仍需把已接通的原语提升到发布级安全证明，重点是 POSIX 最终名称 CAS 残余、凭据后端注入、跨平台进程树监督、reconciliation 交互 UX、artifact 和真实 E2E。
 
 ### 交付物
 
-- [x] 内置 `workspace.apply_patch` adapter（含 base revision、diff summary、沙箱发布后 revision 校验）；Git diff/checkpoint 和更完整版本冲突 UX 待补。
+- [x] 内置 `workspace.apply_patch` adapter（含 base revision、diff summary、capability gate 后的 descriptor-bound 发布与 revision 校验）；Git diff/checkpoint 和更完整版本冲突 UX 待补。
 - [x] 完整调用生命周期：`proposed -> approved -> prepared -> started -> terminal/unknown`，terminal ToolResult 原子入账。
 - [x] `approval/request` TUI 交互、deny 默认、inspect unified diff 和 daemon-minted 精确 ApprovalBinding。
 - [x] macOS Seatbelt、Linux bubblewrap/namespaces 能力探测；能力不足时失败关闭。
-- [x] 已加固 launcher 环境边界的串行 `ProcessExecutor` 接入 daemon 统一管线；仍需补齐独立 stdout/stderr、超时及覆盖 `setsid`/`setpgid` 逃逸的完整进程树监督。
+- [x] 已加固 launcher 环境边界的串行 `ProcessExecutor` 接入 daemon 统一管线；backend isolation probe、执行前 handshake、Linux PID namespace/`--die-with-parent`、独立 stdout/stderr、超时和输出上限已接入，macOS 因无可证明 process isolation 而关闭任意进程；仍需补齐跨平台 supervisor/cgroup 证据与崩溃覆盖。
 - [ ] 将 `CredentialBroker` 从 daemon 配置注入 provider，并提供 OS keychain seam 与轮换测试。
 - [x] 为 mutation prepare→execute 传递 `FileRevisionSnapshot`，并将 device/inode/digest 纳入 runtime-only authority binding；同字节新 inode 会在 permit 前失败关闭。
-- [ ] 使用 root dirfd/`openat`/`openat2` 完成目录级 CAS，消除最后的检查-发布竞态。
+- [x] 使用 retained root dirfd、逐组件 `openat(O_NOFOLLOW)`、dirfd `O_EXCL` 临时文件和 `renameat` 完成目录级对象绑定，并重检父目录 identity；POSIX 最终名称的 inode/hash 条件 CAS 仍无法由 `renameat` 提供，hostile-writer 竞态保留为显式 residual。
 - [x] prepared/consumed token 增加 TTL 回收、容量上限和过期 fail-closed 语义。
 - [ ] artifact 引用、输出裁剪、敏感数据跨 chunk 删改和配额。
-- [ ] 将基础 Unknown marker/diagnostic 扩展为副作用工具的完整 reconciliation 流程与交互界面。
+- [x] 将基础 Unknown marker/diagnostic 扩展为 `invocation/reconcile` evidence-only 幂等命令（终态父 Turn、`operator_review` 有界证据、不重试 provider/tool）；交互界面、机器 receipt authority 和崩溃矩阵仍待完成。
 - [ ] 工具网络代理与私网、云 metadata、DNS rebinding 和代理绕过防护。
 
 ### v0.1 发布门槛

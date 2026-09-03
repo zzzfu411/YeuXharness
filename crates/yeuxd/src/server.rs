@@ -25,8 +25,9 @@ use yeux_protocol::{
     ServerRequestEnvelope, ThreadId, TurnId, TurnState, JSONRPC_VERSION, PROTOCOL_VERSION,
 };
 use yeux_runtime::{
-    DescriptorStore, EventLedger, NewCommandReceipt, NewInvocationOutcome, NewInvocationUnknown,
-    NewLedgerEvent,
+    ArtifactError, ArtifactStore, CredentialBroker, DescriptorStore, EventLedger,
+    NewCommandReceipt, NewInvocationOutcome, NewInvocationUnknown, NewLedgerEvent,
+    NoCredentialBroker,
 };
 
 use crate::runner::{
@@ -43,14 +44,32 @@ pub(crate) const NOT_FOUND: i32 = -32_004;
 pub(crate) const INVALID_STATE: i32 = -32_005;
 pub(crate) const FEATURE_UNAVAILABLE: i32 = -32_006;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DaemonConfig {
     pub state_dir: PathBuf,
     pub host_ceiling: CapabilityMode,
     pub max_line_bytes: usize,
     pub event_buffer: usize,
     pub model_provider: Option<ModelProviderConfig>,
+    credential_broker: Arc<dyn CredentialBroker>,
     execute_turns: bool,
+}
+
+impl std::fmt::Debug for DaemonConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DaemonConfig")
+            .field("state_dir", &self.state_dir)
+            .field("host_ceiling", &self.host_ceiling)
+            .field("max_line_bytes", &self.max_line_bytes)
+            .field("event_buffer", &self.event_buffer)
+            .field("model_provider", &self.model_provider)
+            // A host-provided broker is an authority object, not configuration
+            // data. Never invoke its Debug implementation or serialize it.
+            .field("credential_broker", &"REDACTED")
+            .field("execute_turns", &self.execute_turns)
+            .finish()
+    }
 }
 
 impl DaemonConfig {
@@ -68,6 +87,7 @@ impl DaemonConfig {
             max_line_bytes: DEFAULT_MAX_LINE_BYTES,
             event_buffer: DEFAULT_EVENT_BUFFER,
             model_provider: None,
+            credential_broker: Arc::new(NoCredentialBroker),
             execute_turns: true,
         })
     }
@@ -79,12 +99,25 @@ impl DaemonConfig {
             max_line_bytes: DEFAULT_MAX_LINE_BYTES,
             event_buffer: DEFAULT_EVENT_BUFFER,
             model_provider: None,
+            credential_broker: Arc::new(NoCredentialBroker),
             execute_turns: true,
         }
     }
 
     pub fn with_model_provider(mut self, provider: ModelProviderConfig) -> Self {
         self.model_provider = Some(provider);
+        self
+    }
+
+    /// Supply the runtime-owned credential authority. No broker or lease is
+    /// copied into model metadata, the ledger, tool arguments, or process
+    /// environments. Provider adapters must receive this same broker when
+    /// they are constructed; the daemon passes it to invocation pipelines.
+    ///
+    /// The default is [`NoCredentialBroker`]. This is the injection seam for
+    /// a host keychain adapter, not an environment-variable credential loader.
+    pub fn with_credential_broker(mut self, broker: Arc<dyn CredentialBroker>) -> Self {
+        self.credential_broker = broker;
         self
     }
 
@@ -116,6 +149,8 @@ pub enum DaemonError {
     Ledger(#[from] yeux_runtime::ledger::LedgerError),
     #[error("descriptor error: {0}")]
     Descriptor(#[from] yeux_runtime::descriptors::DescriptorError),
+    #[error("artifact store error: {0}")]
+    Artifact(#[from] ArtifactError),
     #[error("projection replay failed: {0}")]
     Replay(#[from] ReplayError),
     #[error("ID generation failed: {0}")]
@@ -141,6 +176,7 @@ impl std::fmt::Debug for Daemon {
 pub(crate) struct DaemonInner {
     pub(crate) config: DaemonConfig,
     pub(crate) ledger: Arc<EventLedger>,
+    pub(crate) artifacts: Arc<ArtifactStore>,
     pub(crate) descriptors: DescriptorStore,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) ids: Arc<dyn IdGenerator>,
@@ -287,6 +323,7 @@ impl Daemon {
         let database = config.state_dir.join("state.sqlite3");
         let ledger = Arc::new(EventLedger::open(&database)?);
         recover_interrupted_turns(&ledger, clock.as_ref(), ids.as_ref())?;
+        let artifacts = Arc::new(ArtifactStore::open(config.state_dir.join("artifacts"))?);
         let descriptors = DescriptorStore::open(&database)?;
         let (events, _) = broadcast::channel(config.event_buffer.max(1));
         let command_gate = Arc::new(Mutex::new(()));
@@ -299,7 +336,7 @@ impl Daemon {
                 display_name: selection.model.clone(),
                 capabilities: selection.provider.capabilities(),
             });
-        let turn_runner = TurnRunner::new_with_host_ceiling(
+        let turn_runner = TurnRunner::new_with_host_ceiling_and_credentials(
             Arc::clone(&ledger),
             events.clone(),
             Arc::clone(&clock),
@@ -307,11 +344,13 @@ impl Daemon {
             config.model_provider.clone(),
             Arc::clone(&command_gate),
             config.host_ceiling,
+            Arc::clone(&config.credential_broker),
         );
         Ok(Self {
             inner: Arc::new(DaemonInner {
                 config,
                 ledger,
+                artifacts,
                 descriptors,
                 clock,
                 ids,
@@ -1211,6 +1250,19 @@ mod tests {
         InvocationId, InvocationState, ModelEvent, ModelRequest, ProviderCapabilities, StopReason,
         TokenBudget, PROTOCOL_VERSION,
     };
+    use yeux_runtime::InMemoryCredentialBroker;
+
+    #[test]
+    fn daemon_config_accepts_a_broker_without_rendering_its_contents() {
+        let broker = Arc::new(InMemoryCredentialBroker::default());
+        broker.insert("provider/test", "daemon-config-secret");
+        let config = DaemonConfig::in_directory(tempfile::tempdir().unwrap().path())
+            .with_credential_broker(broker);
+        let rendered = format!("{config:?}");
+        assert!(rendered.contains("credential_broker"));
+        assert!(rendered.contains("REDACTED"));
+        assert!(!rendered.contains("daemon-config-secret"));
+    }
 
     #[test]
     fn malformed_approval_response_denies_pending_request() {
