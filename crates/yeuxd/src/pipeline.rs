@@ -7,7 +7,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     future::Future,
     sync::{Arc, Mutex},
 };
@@ -31,6 +31,8 @@ use crate::tools::{
 };
 
 pub const DEFAULT_PREPARATION_TTL_SECONDS: i64 = 60;
+const MAX_ISSUED_TOKENS: usize = 4_096;
+const CONSUMED_TOKEN_RETENTION_SECONDS: i64 = DEFAULT_PREPARATION_TTL_SECONDS * 2;
 
 /// The four independent capability layers supplied to policy evaluation.
 #[derive(Clone, Debug)]
@@ -115,6 +117,8 @@ pub enum PipelineError {
     TokenConsumed,
     #[error("prepared invocation token has expired")]
     PreparationExpired,
+    #[error("prepared invocation token capacity is exhausted")]
+    TokenCapacity,
     #[error(transparent)]
     Approval(#[from] yeux_core::ApprovalError),
     #[error(transparent)]
@@ -135,6 +139,7 @@ impl PipelineError {
             Self::UnknownPreparedToken => "unknown_prepared_token",
             Self::TokenConsumed => "prepared_token_consumed",
             Self::PreparationExpired => "prepared_token_expired",
+            Self::TokenCapacity => "prepared_token_capacity",
             Self::Approval(error) => match error {
                 yeux_core::ApprovalError::MissingApproval => "approval_required",
                 _ => "approval_invalid",
@@ -150,8 +155,15 @@ pub struct InvocationPipeline {
     registry: Arc<ToolRegistry>,
     sandbox: SandboxBackend,
     credentials: Arc<dyn CredentialBroker>,
-    issued_tokens: Arc<Mutex<BTreeMap<String, String>>>,
-    consumed_tokens: Arc<Mutex<BTreeSet<String>>>,
+    issued_tokens: Arc<Mutex<BTreeMap<String, IssuedTokenBinding>>>,
+    consumed_tokens: Arc<Mutex<BTreeMap<String, DateTime<Utc>>>>,
+}
+
+#[derive(Clone, Debug)]
+struct IssuedTokenBinding {
+    invocation_digest: String,
+    authority_binding_digest: String,
+    expires_at: DateTime<Utc>,
 }
 
 impl std::fmt::Debug for InvocationPipeline {
@@ -174,7 +186,7 @@ impl InvocationPipeline {
             sandbox,
             credentials,
             issued_tokens: Arc::new(Mutex::new(BTreeMap::new())),
-            consumed_tokens: Arc::new(Mutex::new(BTreeSet::new())),
+            consumed_tokens: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -250,6 +262,7 @@ impl InvocationPipeline {
             ))?;
         }
         let normalized_arguments = plan.normalized_arguments().clone();
+        let authority_binding_digest = plan.authority_binding_digest();
         let prepared_at = context.now;
         let expires_at = prepared_at + context.preparation_ttl;
         let invocation = PreparedInvocation {
@@ -274,13 +287,22 @@ impl InvocationPipeline {
                 None
             },
         };
-        self.issued_tokens
+        let mut issued = self
+            .issued_tokens
             .lock()
-            .map_err(|_| PipelineError::UnknownPreparedToken)?
-            .insert(
-                invocation.prepared_token.clone(),
-                prepared_binding_digest(&invocation),
-            );
+            .map_err(|_| PipelineError::UnknownPreparedToken)?;
+        prune_issued_tokens(&mut issued, Utc::now(), None);
+        if issued.len() >= MAX_ISSUED_TOKENS {
+            return Err(PipelineError::TokenCapacity);
+        }
+        issued.insert(
+            invocation.prepared_token.clone(),
+            IssuedTokenBinding {
+                invocation_digest: prepared_binding_digest(&invocation),
+                authority_binding_digest,
+                expires_at,
+            },
+        );
         Ok(invocation)
     }
 
@@ -386,7 +408,7 @@ impl InvocationPipeline {
     /// Execute only after exact binding validation and a fresh plan/revalidate
     /// pass. This is the only public path that obtains an execution permit.
     pub async fn execute(&self, invocation: PreparedInvocation) -> Result<Value, PipelineError> {
-        self.ensure_issued(&invocation)?;
+        let issued_binding = self.ensure_issued(&invocation)?;
         if invocation.expires_at < Utc::now() {
             return Err(PipelineError::PreparationExpired);
         }
@@ -439,32 +461,73 @@ impl InvocationPipeline {
         if digest_effects(revalidated.effects()) != invocation.effect_digest {
             return Err(PipelineError::BindingMismatch("effect_digest"));
         }
+        if revalidated.authority_binding_digest() != issued_binding.authority_binding_digest {
+            return Err(PipelineError::BindingMismatch("prepared_resource_binding"));
+        }
         {
             let mut consumed = self
                 .consumed_tokens
                 .lock()
                 .map_err(|_| PipelineError::TokenConsumed)?;
-            if !consumed.insert(invocation.prepared_token.clone()) {
+            let now = Utc::now();
+            prune_consumed_tokens(&mut consumed, now);
+            if consumed.contains_key(&invocation.prepared_token) {
                 return Err(PipelineError::TokenConsumed);
             }
+            if consumed.len() >= MAX_ISSUED_TOKENS {
+                if let Some(oldest) = consumed
+                    .iter()
+                    .min_by_key(|(_, consumed_at)| *consumed_at)
+                    .map(|(token, _)| token.clone())
+                {
+                    consumed.remove(&oldest);
+                }
+            }
+            consumed.insert(invocation.prepared_token.clone(), now);
         }
         let permit: ExecutionPermit = revalidated.into_execution_permit();
         Ok(self.registry.execute_async(permit).await?.into_value())
     }
 
-    fn ensure_issued(&self, invocation: &PreparedInvocation) -> Result<(), PipelineError> {
-        let issued = self
+    fn ensure_issued(
+        &self,
+        invocation: &PreparedInvocation,
+    ) -> Result<IssuedTokenBinding, PipelineError> {
+        let mut issued = self
             .issued_tokens
             .lock()
             .map_err(|_| PipelineError::UnknownPreparedToken)?;
+        prune_issued_tokens(&mut issued, Utc::now(), Some(&invocation.prepared_token));
         let Some(binding) = issued.get(&invocation.prepared_token) else {
+            let consumed = self
+                .consumed_tokens
+                .lock()
+                .map_err(|_| PipelineError::TokenConsumed)?;
+            if consumed.contains_key(&invocation.prepared_token) {
+                return Err(PipelineError::TokenConsumed);
+            }
             return Err(PipelineError::UnknownPreparedToken);
         };
-        if binding != &prepared_binding_digest(invocation) {
+        if binding.invocation_digest != prepared_binding_digest(invocation) {
             return Err(PipelineError::BindingMismatch("prepared_token_binding"));
         }
-        Ok(())
+        Ok(binding.clone())
     }
+}
+
+fn prune_issued_tokens(
+    issued: &mut BTreeMap<String, IssuedTokenBinding>,
+    now: DateTime<Utc>,
+    preserve: Option<&str>,
+) {
+    issued.retain(|token, binding| {
+        preserve.is_some_and(|value| value == token) || binding.expires_at >= now
+    });
+}
+
+fn prune_consumed_tokens(consumed: &mut BTreeMap<String, DateTime<Utc>>, now: DateTime<Utc>) {
+    let cutoff = now - Duration::seconds(CONSUMED_TOKEN_RETENTION_SECONDS);
+    consumed.retain(|_, consumed_at| *consumed_at >= cutoff);
 }
 
 fn prepared_binding_digest(invocation: &PreparedInvocation) -> String {
@@ -638,6 +701,55 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mutation_pipeline_rejects_same_byte_inode_replacement_after_approval() {
+        let backend = SandboxBackend::detect();
+        if matches!(backend, SandboxBackend::Unavailable { .. }) {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("hello.txt"), "before\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let registry = Arc::new(
+            ToolRegistry::workspace_built_ins_with_config(
+                WorkspaceTools::new(workspace.clone()),
+                crate::tools::BuiltInToolRegistryConfig::read_only()
+                    .with_hidden_workspace_mutations(),
+            )
+            .unwrap(),
+        );
+        let pipeline = InvocationPipeline::new(registry, backend, Arc::new(NoCredentialBroker));
+        let base = blake3::hash(b"before\n").to_hex().to_string();
+        let prepared = pipeline
+            .prepare(
+                WORKSPACE_APPLY_PATCH_TOOL_ID,
+                WORKSPACE_TOOL_VERSION,
+                serde_json::json!({
+                    "path": "hello.txt",
+                    "base_revision": base,
+                    "replacement": "after\n"
+                }),
+                &context(&workspace),
+            )
+            .unwrap();
+        let prepared = pipeline.approve_once(prepared, true).unwrap();
+
+        let replacement = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        fs::write(replacement.path(), "before\n").unwrap();
+        fs::rename(replacement.path(), directory.path().join("hello.txt")).unwrap();
+
+        let error = pipeline.execute(prepared).await.unwrap_err();
+        assert!(matches!(
+            error,
+            PipelineError::BindingMismatch("prepared_resource_binding")
+        ));
+        assert_eq!(
+            fs::read_to_string(directory.path().join("hello.txt")).unwrap(),
+            "before\n"
+        );
+    }
+
     #[test]
     fn approval_binding_is_daemon_minted_and_client_binding_is_rejected() {
         let invocation = PreparedInvocation {
@@ -752,6 +864,96 @@ mod tests {
         assert!(matches!(
             pipeline.approve_once(forged, true),
             Err(PipelineError::BindingMismatch("prepared_token_binding"))
+        ));
+    }
+
+    #[tokio::test]
+    async fn expired_prepared_tokens_are_reclaimed_without_reviving_the_old_token() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("hello.txt"), "before\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let registry = Arc::new(
+            ToolRegistry::workspace_built_ins_with_config(
+                WorkspaceTools::new(workspace.clone()),
+                crate::tools::BuiltInToolRegistryConfig::read_only(),
+            )
+            .unwrap(),
+        );
+        let pipeline = InvocationPipeline::new(
+            registry,
+            SandboxBackend::Unavailable {
+                reason: "token lifecycle test is read-only".into(),
+            },
+            Arc::new(NoCredentialBroker),
+        );
+        let mut expired_context = context(&workspace);
+        expired_context.now = Utc::now() - Duration::minutes(2);
+        let expired = pipeline
+            .prepare(
+                WORKSPACE_LIST_TOOL_ID,
+                WORKSPACE_TOOL_VERSION,
+                serde_json::json!({}),
+                &expired_context,
+            )
+            .unwrap();
+        assert_eq!(pipeline.issued_tokens.lock().unwrap().len(), 1);
+
+        let fresh = pipeline
+            .prepare(
+                WORKSPACE_LIST_TOOL_ID,
+                WORKSPACE_TOOL_VERSION,
+                serde_json::json!({}),
+                &context(&workspace),
+            )
+            .unwrap();
+        assert_eq!(pipeline.issued_tokens.lock().unwrap().len(), 1);
+        assert!(matches!(
+            pipeline.approve_once(expired, true),
+            Err(PipelineError::UnknownPreparedToken)
+        ));
+        pipeline.execute(fresh).await.unwrap();
+    }
+
+    #[test]
+    fn prepared_token_capacity_fails_closed() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("hello.txt"), "before\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let registry = Arc::new(
+            ToolRegistry::workspace_built_ins_with_config(
+                WorkspaceTools::new(workspace.clone()),
+                crate::tools::BuiltInToolRegistryConfig::read_only(),
+            )
+            .unwrap(),
+        );
+        let pipeline = InvocationPipeline::new(
+            registry,
+            SandboxBackend::Unavailable {
+                reason: "token capacity test is read-only".into(),
+            },
+            Arc::new(NoCredentialBroker),
+        );
+        {
+            let mut issued = pipeline.issued_tokens.lock().unwrap();
+            for index in 0..MAX_ISSUED_TOKENS {
+                issued.insert(
+                    format!("fixture-{index}"),
+                    IssuedTokenBinding {
+                        invocation_digest: "fixture".into(),
+                        authority_binding_digest: "fixture".into(),
+                        expires_at: Utc::now() + Duration::minutes(1),
+                    },
+                );
+            }
+        }
+        assert!(matches!(
+            pipeline.prepare(
+                WORKSPACE_LIST_TOOL_ID,
+                WORKSPACE_TOOL_VERSION,
+                serde_json::json!({}),
+                &context(&workspace),
+            ),
+            Err(PipelineError::TokenCapacity)
         ));
     }
 

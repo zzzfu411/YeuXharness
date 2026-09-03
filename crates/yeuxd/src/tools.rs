@@ -779,6 +779,22 @@ impl ToolPlan {
         &self.effects
     }
 
+    /// Digest of runtime-only preparation evidence that is not represented in
+    /// the wire-level `PreparedInvocation`. In particular, mutations bind the
+    /// exact file revision identity (device/inode/digest) observed during
+    /// preparation so a same-byte inode replacement cannot silently survive
+    /// the prepare -> execute boundary.
+    pub fn authority_binding_digest(&self) -> String {
+        digest_value(&serde_json::json!({
+            "tool_id": &self.key.id,
+            "tool_version": &self.key.version,
+            "workspace_identity": &self.workspace_identity,
+            "normalized_arguments": &self.normalized_arguments,
+            "effects": &self.effects,
+            "payload": planned_payload_binding(&self.payload),
+        }))
+    }
+
     pub fn unified_diff(&self) -> Option<String> {
         match &self.payload {
             PlannedPayload::WorkspaceMutation(prepared) => {
@@ -838,6 +854,17 @@ impl RevalidatedToolPlan {
         &self.effects
     }
 
+    pub fn authority_binding_digest(&self) -> String {
+        digest_value(&serde_json::json!({
+            "tool_id": &self.key.id,
+            "tool_version": &self.key.version,
+            "workspace_identity": &self.workspace_identity,
+            "normalized_arguments": &self.normalized_arguments,
+            "effects": &self.effects,
+            "payload": execution_payload_binding(&self.payload),
+        }))
+    }
+
     /// Reserved for `InvocationPipeline`: this remains private so registry
     /// consumers cannot turn preparation evidence into execution authority.
     #[allow(dead_code)]
@@ -850,6 +877,30 @@ impl RevalidatedToolPlan {
             effects: self.effects,
             payload: self.payload,
         }
+    }
+}
+
+fn planned_payload_binding(payload: &PlannedPayload) -> Value {
+    match payload {
+        PlannedPayload::WorkspaceMutation(prepared) => serde_json::json!({
+            "base_revision": prepared.base_revision(),
+        }),
+        PlannedPayload::WorkspaceRead => Value::Null,
+        PlannedPayload::Process(_) => Value::Null,
+        #[cfg(test)]
+        PlannedPayload::Test => Value::Null,
+    }
+}
+
+fn execution_payload_binding(payload: &ExecutionPayload) -> Value {
+    match payload {
+        ExecutionPayload::WorkspaceMutation(prepared) => serde_json::json!({
+            "base_revision": prepared.base_revision(),
+        }),
+        ExecutionPayload::WorkspaceRead => Value::Null,
+        ExecutionPayload::Process(_) => Value::Null,
+        #[cfg(test)]
+        ExecutionPayload::Test => Value::Null,
     }
 }
 
@@ -1166,6 +1217,11 @@ impl SealedToolAdapter for WorkspaceMutationAdapter {
             .tools
             .prepare_mutation(WORKSPACE_APPLY_PATCH_TOOL_ID, normalized_arguments)
             .map_err(Self::error)?;
+        if prepared.base_revision() != previous.base_revision() {
+            return Err(ToolRegistryError::PlanChanged {
+                field: "base_revision_identity",
+            });
+        }
         if prepared.diff_summary() != previous.diff_summary() {
             return Err(ToolRegistryError::PlanChanged {
                 field: "mutation_summary",
@@ -1231,6 +1287,13 @@ async fn sandboxed_apply_patch(
         .get("base_revision")
         .and_then(Value::as_str)
         .ok_or_else(|| ToolRegistryError::InvalidProcessArguments("mutation revision".into()))?;
+    workspace
+        .revalidate_revision(prepared.base_revision())
+        .map_err(|source| ToolRegistryError::Process {
+            tool_id: WORKSPACE_APPLY_PATCH_TOOL_ID.to_owned(),
+            tool_version: WORKSPACE_TOOL_VERSION.to_owned(),
+            source: ProcessError::Workspace(source),
+        })?;
     let writer = mutation_writer_executable()?;
     let mut request = ProcessRequest::new(writer);
     request.arguments = vec![path.to_owned()];
@@ -2436,6 +2499,46 @@ mod tests {
         let error = registry.revalidate(plan).unwrap_err();
         assert_eq!(error.code(), "workspace_stale_revision");
         assert_eq!(fs::read_to_string(path).unwrap(), "external change\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutation_plan_revalidation_detects_same_byte_inode_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hello.txt");
+        fs::write(&path, "before\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let tools = WorkspaceTools::new(workspace);
+        let base = blake3::hash(b"before\n").to_hex().to_string();
+        let registry = ToolRegistry::workspace_built_ins_with_config(
+            tools,
+            BuiltInToolRegistryConfig::read_only().with_hidden_workspace_mutations(),
+        )
+        .unwrap();
+        let plan = registry
+            .plan(
+                WORKSPACE_APPLY_PATCH_TOOL_ID,
+                WORKSPACE_TOOL_VERSION,
+                json!({
+                    "path": "hello.txt",
+                    "base_revision": base,
+                    "replacement": "after\n"
+                }),
+            )
+            .unwrap();
+
+        let replacement = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        fs::write(replacement.path(), "before\n").unwrap();
+        fs::rename(replacement.path(), &path).unwrap();
+
+        let error = registry.revalidate(plan).unwrap_err();
+        assert!(matches!(
+            error,
+            ToolRegistryError::PlanChanged {
+                field: "base_revision_identity"
+            }
+        ));
+        assert_eq!(fs::read_to_string(path).unwrap(), "before\n");
     }
 
     #[tokio::test]

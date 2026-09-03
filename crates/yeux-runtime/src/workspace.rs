@@ -452,9 +452,23 @@ impl Workspace {
         relative: impl AsRef<Path>,
         limit: u64,
     ) -> WorkspaceResult<RevisionedFile> {
+        self.read_resolved_limited_with_snapshot(relative, limit)
+            .map(|(file, _snapshot)| file)
+    }
+
+    /// Read a canonical workspace file and return the exact file identity
+    /// observed by the same descriptor that produced its bytes.  Mutation
+    /// preparation uses this pair to bind approval to both content and inode;
+    /// a later same-byte replacement must therefore fail closed.
+    pub(crate) fn read_resolved_limited_with_snapshot(
+        &self,
+        relative: impl AsRef<Path>,
+        limit: u64,
+    ) -> WorkspaceResult<(RevisionedFile, FileRevisionSnapshot)> {
         let relative = validate_relative(relative.as_ref())?;
         let absolute = self.resolve_expected(&relative)?;
         let (mut file, metadata) = open_regular_single_link(&absolute, &relative)?;
+        let identity = file_identity(&metadata);
         if metadata.len() > limit {
             return Err(WorkspaceError::ReadLimitExceeded {
                 path: relative,
@@ -475,11 +489,16 @@ impl Workspace {
         }
         ensure_file_identity_unchanged(&file, &metadata, &relative)?;
         self.revalidate_identity()?;
-        Ok(RevisionedFile {
-            relative_path: relative,
-            revision: digest(&bytes),
-            bytes,
-        })
+        let revision = digest(&bytes);
+        let revision_snapshot = revision_snapshot_from_parts(&relative, revision.clone(), identity);
+        Ok((
+            RevisionedFile {
+                relative_path: relative,
+                revision,
+                bytes,
+            },
+            revision_snapshot,
+        ))
     }
 
     /// Validate a regular file through the same no-follow/single-link path as

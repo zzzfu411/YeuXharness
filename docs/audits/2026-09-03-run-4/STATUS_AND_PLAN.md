@@ -32,7 +32,7 @@
 ### 尚未达到 v0.1 发布门槛的能力
 
 1. daemon CLI 仍通过 `OpenAiCompatibleProvider::without_credentials` 构造 provider，`CredentialBroker` 尚未从配置/密钥存储注入到实际 daemon。
-2. `FileRevisionSnapshot` 尚未完整地从 mutation prepare 绑定到 execute；中间目录被替换、path-based rename 与严格 dirfd-relative CAS 仍是残余竞态。当前实现不能宣称可防护 hostile shared workspace 的全部竞态。
+2. mutation prepare payload 现在已绑定同一文件描述符观察到的 `FileRevisionSnapshot`，并在 registry/pipeline 两层纳入 runtime-only authority binding；中间目录被替换、path-based rename 与严格 dirfd-relative CAS 仍是残余竞态。当前实现仍不能宣称可防护 hostile shared workspace 的全部竞态。
 3. process 的 PGID 清理已覆盖常规子进程、超时和取消，但主动 `setsid`/`setpgid` 脱组的后代仍可能存活；Linux PID namespace/cgroup 与 macOS supervisor/job 机制未完成。
 4. Unknown 目前可持久化并阻止自动继续，但完整 reconciliation 命令、外部状态读取、用户决策 UI 和安全 retry 规则仍未闭环。
 5. 大型工具结果尚未统一落入 artifact store；网络代理、私网/metadata/DNS rebinding 防护、MCP/插件接入统一 policy 仍未实现。
@@ -63,12 +63,14 @@
 
 验收：文档不再声称 M2 “未接入”；本地与远端 SHA、CI、PR、保护状态均可由命令复核；工作区门禁通过。
 
-### 阶段 2：文件 CAS 与 mutation 安全闭环
+### 阶段 2：文件 CAS 与 mutation 安全闭环（本轮已完成第一子阶段）
 
 - 为 `PreparedWorkspaceMutation` 绑定完整 `FileRevisionSnapshot`（device/inode/digest/权限），从 prepare 传到 execute。
 - 持有 workspace root dirfd，使用逐组件 `openat`/Linux `openat2` 或等效安全实现，消除 canonicalize 后目录替换和 path rename 竞态。
 - 为 prepared/consumed token 增加过期回收、并发安全的容量上限和指标；过期 token 必须保持 fail closed，不得重新激活。
 - 增加同字节新 inode、目录替换、硬链接、并发修改和注入崩溃测试；证明批准后目标未改变才可发布。
+
+本轮已完成：同一文件描述符生成的 `FileRevisionSnapshot`、prepare→revalidate→execute 的 authority digest、TTL/容量回收、consumed marker 保留窗口，以及 runtime/registry/pipeline 回归测试。剩余工作是 root dirfd、逐组件 `openat`/`openat2` 和 dirfd-relative 发布，以消除最后的检查-发布竞态。
 
 验收：在 adversarial shared-workspace fixture 中，所有身份变化均 fail closed，用户内容不被覆盖。
 
@@ -109,6 +111,7 @@
 - 已读取并核对本地实现、历史审计、GitHub 仓库元数据、分支、PR、Actions 与保护规则。
 - 已将本地 `main` 从旧基线 fast-forward 到远端 `51c631c`。
 - 已运行 Rust/TypeScript 本地门禁；受限 shell 导致的 loopback/OS sandbox fixture 已用主机权限复核通过。
+- 已完成第二阶段第一子阶段：mutation 文件身份绑定、同字节新 inode fail-closed、prepared token TTL/容量治理和三层回归测试。
 - 已创建本状态与计划文档；下一步应在当前工作区提交文档同步变更，待维护者确认后再进行 GitHub 分支保护/PR 操作。
 
 ## 6. 明确不在本轮执行的动作

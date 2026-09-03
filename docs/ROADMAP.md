@@ -108,7 +108,9 @@
 - [x] macOS Seatbelt、Linux bubblewrap/namespaces 能力探测；能力不足时失败关闭。
 - [x] 已加固 launcher 环境边界的串行 `ProcessExecutor` 接入 daemon 统一管线；仍需补齐独立 stdout/stderr、超时及覆盖 `setsid`/`setpgid` 逃逸的完整进程树监督。
 - [ ] 将 `CredentialBroker` 从 daemon 配置注入 provider，并提供 OS keychain seam 与轮换测试。
-- [ ] 为 mutation prepare→execute 传递 `FileRevisionSnapshot`，使用 root dirfd/`openat`/`openat2` 完成目录级 CAS。
+- [x] 为 mutation prepare→execute 传递 `FileRevisionSnapshot`，并将 device/inode/digest 纳入 runtime-only authority binding；同字节新 inode 会在 permit 前失败关闭。
+- [ ] 使用 root dirfd/`openat`/`openat2` 完成目录级 CAS，消除最后的检查-发布竞态。
+- [x] prepared/consumed token 增加 TTL 回收、容量上限和过期 fail-closed 语义。
 - [ ] artifact 引用、输出裁剪、敏感数据跨 chunk 删改和配额。
 - [ ] 将基础 Unknown marker/diagnostic 扩展为副作用工具的完整 reconciliation 流程与交互界面。
 - [ ] 工具网络代理与私网、云 metadata、DNS rebinding 和代理绕过防护。
