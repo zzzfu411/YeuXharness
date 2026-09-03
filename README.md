@@ -136,6 +136,7 @@ stdio 与 Unix socket 都使用一行一个 JSON-RPC 消息的 UTF-8 JSON。当�
 - [Run 3 执行记录](docs/audits/2026-09-01-run-3/EXECUTION_LOG.md)
 - [Run 4 当前状态、风险与执行计划](docs/audits/2026-09-03-run-4/STATUS_AND_PLAN.md)
 - [竞争差距分析与 P0–P4 计划](docs/COMPETITIVE_GAP_ANALYSIS.md)
+- [Run 5：2026-09-04 当前竞争差距分析](docs/audits/2026-09-04-run-5/COMPETITIVE_GAP_ANALYSIS.md)
 - [威胁模型](docs/THREAT_MODEL.md)
 - [架构决策](docs/adr/)
 - [设计系统 / Paper Signal](docs/design/README.md)：深色优先的 TUI/CLI/网页美学、Unicode/ASCII 资产和可选双鱼欢迎资产
