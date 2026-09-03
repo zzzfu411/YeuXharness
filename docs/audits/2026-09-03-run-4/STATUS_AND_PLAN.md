@@ -49,6 +49,7 @@
 | P1 | 进程树脱组与网络隔离不完整 | 恶意/异常命令可能留下进程或尝试外联 | 阶段 3 |
 | P1 | Unknown 缺少完整 reconciliation UX | 重启/超时后无法安全恢复任务 | 阶段 4 |
 | P1 | 真实仓库 E2E 与 crash matrix 不足 | 只读和 mutation 单测通过仍可能遗漏跨边界故障 | 阶段 5 |
+| P1 | prepared/consumed token 集合当前无 TTL 回收 | 长期运行 daemon 可被大量准备调用逐步耗尽内存 | 阶段 2 |
 | P2 | 发布、SBOM、依赖和 action 固定策略缺失 | 供应链和交付可重复性不足 | 阶段 6 |
 
 ## 4. 接下来六阶段计划
@@ -66,6 +67,7 @@
 
 - 为 `PreparedWorkspaceMutation` 绑定完整 `FileRevisionSnapshot`（device/inode/digest/权限），从 prepare 传到 execute。
 - 持有 workspace root dirfd，使用逐组件 `openat`/Linux `openat2` 或等效安全实现，消除 canonicalize 后目录替换和 path rename 竞态。
+- 为 prepared/consumed token 增加过期回收、并发安全的容量上限和指标；过期 token 必须保持 fail closed，不得重新激活。
 - 增加同字节新 inode、目录替换、硬链接、并发修改和注入崩溃测试；证明批准后目标未改变才可发布。
 
 验收：在 adversarial shared-workspace fixture 中，所有身份变化均 fail closed，用户内容不被覆盖。
@@ -114,4 +116,3 @@
 - 不自动关闭、删除或合并开放 PR。
 - 不修改 GitHub branch protection、Secrets、Actions 权限或远端分支。
 - 不把未验证的 credential store、network proxy、PID namespace 实现伪装成已完成。
-
