@@ -54,10 +54,14 @@ enforced by the operating system rather than by prompts.
    ceilings.
 10. Process target variables never enter the Seatbelt or bubblewrap launcher
     environment before isolation is active.
-11. The read-only Agent loop advertises and dispatches only the built-in
-    `workspace.list`, `workspace.read` and `workspace.search` tools. Their
-    resolved effects remain inside the opened workspace; unknown or
-    unnegotiated tools never fall through to a shell, plugin or other executor.
+11. The Agent loop always advertises the built-in
+    `workspace.list`, `workspace.read` and `workspace.search` tools. It may
+    advertise `workspace.apply_patch` and `process.run` only after the daemon
+    confirms the required OS sandbox and a non-`observe` host ceiling; those
+    calls still require the unified policy/approval/permit path. Their resolved
+    effects remain inside the opened workspace unless an explicit higher mode
+    is granted; unknown or unnegotiated tools never fall through to a shell,
+    plugin or other executor.
 12. Concurrent read-only calls may finish in any order (with one search slot per
     canonical workspace identity), but their persisted results and the next
     model request follow the model's original call order.

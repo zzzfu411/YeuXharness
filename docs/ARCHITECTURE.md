@@ -152,9 +152,9 @@ proposed -> approved -> prepared -> started
 
 状态转换只能由 core 校验过的事件推进。`steer` 在下一个安全点修改当前 Turn 的后续行为；follow-up 在当前 Turn 完成后创建新 Turn。已经发生的副作用不会被取消动作伪装成回滚。
 
-当前 core 已实现状态转换规则和 projection 校验。daemon 已将单请求 runner 扩展为有界只读 Agent loop：从 root 到 leaf 按每层 `parent_seq` 构建 fork 谱系上下文，在 provider 支持 tool calls 时注册三个内置 workspace 只读工具，持久化模型流、ToolCall/ToolResult Item、Invocation 状态和最终 assistant Item，然后进入 `completed`、`failed` 或 `cancelled`。每轮调用之间会重新加载 ledger，因此已持久化的 `turn/steer` 会在下一模型请求安全点作为用户内容进入当前 loop；多个只读调用受 daemon 全局 worker 闸门约束并可并发执行，但同一 workspace identity 的 `search` 通过单槽闸门串行化，结果仍按模型首次给出的调用顺序入账和回灌。取消后的 provider delta 不落账；若工具已跨越执行边界且停止证据不足，Invocation 记为 `Unknown`，父 Turn 以 reconciliation-required 的 `failed` 诊断收束，不伪装成 `cancelled`；daemon 重启会把未终结 Turn 记录为 `failed`，不会自动重调 provider 或工具。
+当前 core 已实现状态转换规则和 projection 校验。daemon 已将单请求 runner 扩展为有界多轮 Agent loop：从 root 到 leaf 按每层 `parent_seq` 构建 fork 谱系上下文，在 provider 支持 tool calls 时注册三个内置 workspace 只读工具，并在 sandbox 就绪且 host ceiling 非 `observe` 时按统一管线广告 `workspace.apply_patch`、`process.run`。runner 持久化模型流、ToolCall/ToolResult Item、Invocation 状态和最终 assistant Item，然后进入 `completed`、`failed` 或 `cancelled`。每轮调用之间会重新加载 ledger，因此已持久化的 `turn/steer` 会在下一模型请求安全点作为用户内容进入当前 loop；多个只读调用受 daemon 全局 worker 闸门约束并可并发执行，但同一 workspace identity 的 `search` 通过单槽闸门串行化，结果仍按模型首次给出的调用顺序入账和回灌。取消后的 provider delta 不落账；若工具已跨越执行边界且停止证据不足，Invocation 记为 `Unknown`，父 Turn 以 reconciliation-required 的 `failed` 诊断收束，不伪装成 `cancelled`；daemon 重启会把未终结 Turn 记录为 `failed`，不会自动重调 provider 或工具。
 
-这条路径只允许结构化读取，尚不是编码闭环：写文件、进程、网络、MCP 和插件工具仍不向模型开放，通用 policy/approval/sandbox 执行管线属于 M2。
+在只读工具之外，当前 daemon 还会在 sandbox 就绪且 host ceiling 非 `observe` 时广告受保护的 `workspace.apply_patch` 和 `process.run`。两者必须经过统一 policy/approval/sandbox 管线、一次性 prepared token、执行前重验证和 opaque permit；网络、MCP 和插件工具仍不向模型开放。M2 的剩余工作是发布级文件 CAS、凭据注入、进程树监督、reconciliation 与真实任务 E2E。
 
 ## 7. 模型层
 
@@ -169,7 +169,7 @@ v1 provider 目标：
 
 模型供应商网络与工具网络分开治理。Provider 凭据通过 opaque handle 请求 `CredentialBroker`，不得从项目配置或普通环境变量直接继承。
 
-当前 OpenAI-compatible Chat Completions SSE adapter 可通过 daemon 的 `--provider-base-url` 与 `--model` 注册到 Turn runner，仅支持不需凭据的 endpoint。tool calling 默认按 provider capability 启用，也可用 `--disable-provider-tools` 关闭；Agent loop 默认最多 8 个模型轮次、32 个工具调用和 4 MiB 累计工具结果，并允许从 CLI 收紧。该 adapter 将非成功响应体限制为 8 KiB，并限制 SSE 缓冲（8 MiB）、流总量（64 MiB）、SSE/模型事件（各 100,000）、累计输出（32 MiB）和同时跟踪的 tool-call 状态（4,096）。`CredentialBroker`、OpenAI Responses 和其他原生 adapter 尚未实现。
+当前 OpenAI-compatible Chat Completions SSE adapter 可通过 daemon 的 `--provider-base-url` 与 `--model` 注册到 Turn runner；CLI 仍使用无凭据构造器，因此真实 credential handle 尚未从 daemon 配置注入。tool calling 默认按 provider capability 启用，也可用 `--disable-provider-tools` 关闭；Agent loop 默认最多 8 个模型轮次、32 个工具调用和 4 MiB 累计工具结果，并允许从 CLI 收紧。该 adapter 将非成功响应体限制为 8 KiB，并限制 SSE 缓冲（8 MiB）、流总量（64 MiB）、SSE/模型事件（各 100,000）、累计输出（32 MiB）和同时跟踪的 tool-call 状态（4,096）。`CredentialBroker` runtime seam 已实现，OpenAI Responses 和其他原生 adapter 尚未实现。
 
 ## 8. 工具与副作用
 
@@ -192,11 +192,11 @@ v1 provider 目标：
 
 当前 M1 专用路径已经实现 `workspace.list`、`workspace.read`、`workspace.search`：参数必须是拒绝未知字段的 JSON object；遍历和结果使用稳定顺序；路径逃逸、符号链接、硬链接、非 UTF-8 内容和越界资源会返回稳定错误。硬上限为 10,000 个遍历项、32 层深度、1 MiB 单文件、32 MiB 累计扫描、1,000 个匹配和 8 MiB 序列化结果。`workspace.search` 还受每 Turn 共享的 matcher operation budget（由 32 MiB 扫描上限推导、配置只能收紧）、同一 canonical workspace identity 的单槽 gate，以及 daemon 级 4 槽 blocking-worker 上限约束。tool-call 参数碎片按首次出现顺序汇聚，并限制每轮调用数、单调用参数和每轮累计参数大小。
 
-每次已接受的只读调用会记录实际解析的 workspace-relative read effect，并持久化 `proposed -> approved -> prepared -> started -> completed/failed/cancelled/unknown`；只读调用当前以无需交互审批的固定原因进入 `approved`。`unknown` 表示执行边界后的结果无法证明，不能静默重试，须通过 reconciliation 收束。同一轮调用会在全局 worker 闸门下执行；同一 workspace identity 的 `search` 进一步使用单槽闸门，daemon 等待后仍严格按模型调用顺序提交 ToolResult。未知工具只返回错误结果，不会被转交给 Shell、插件或其他执行器；未协商 tool capability 时出现工具调用会使 Turn 失败且不执行。这是一个刻意收窄的只读闭环，不代表通用 ToolRegistry、policy、ApprovalBinding 或 OS sandbox 管线已经完成。
+每次已接受的调用会记录实际解析的 effect，并持久化 `proposed -> approved -> prepared -> started -> completed/failed/cancelled/unknown`；只读调用以无需交互审批的固定原因进入 `approved`，副作用调用通过 daemon 审批绑定。`unknown` 表示执行边界后的结果无法证明，不能静默重试，须通过 reconciliation 收束。同一轮只读调用会在全局 worker 闸门下执行并按模型调用顺序入账；未知工具只返回错误结果，不会被转交给 Shell、插件或其他执行器；未协商 tool capability 时出现工具调用会使 Turn 失败且不执行。这是一个已扩展到首版受保护 mutation/process 的闭环；发布级文件 CAS、完整进程树治理、网络代理、artifact 输出和 reconciliation 仍未完成。
 
 补丁必须携带 base hash。当前 workspace primitive 已拒绝绝对路径、`..`、静态符号链接逃逸、多硬链接和陈旧 revision，Unix 叶子文件的校验与哈希绑定同一 `O_NOFOLLOW` 文件描述符，并使用原子替换；它还没有作为 daemon ToolSpec 接入统一管线。`Workspace::identity_snapshot` / `live_identity` / `revalidate_identity` 现在会在打开时记录并在每个路径操作及发布边界重新验证 canonical root、device、inode 和 digest；`revision_snapshot` / `revalidate_revision` 同样绑定文件 revision 与 device/inode，并在哈希前后拒绝对象变化。因此根目录替换、同字节新 inode 和读入期间的文件变化会失败关闭，而不会被旧的缓存 digest 静默接受（极端 inode 复用及检查后的最后微小竞态除外）。当前隐藏 mutation adapter 的 prepare payload 仍只携带 digest，尚未把 `FileRevisionSnapshot` 从 prepare 传到 execute；所以在开放写入前，还必须补上 prepare→execute 间同字节新 inode 的 fail-closed 证明。中间目录在 canonicalize 后被并发替换，以及 base-hash 校验到 path-based rename 之间的严格文件系统 CAS，仍需 M2 的持有 root dirfd、逐组件 `openat`/Linux `openat2` 和 dirfd-relative 发布；当前实现明确将这段竞态记录为残余限制，不能宣称已完成 hostile shared-workspace 防护。
 
-当前 process primitive 会串行调用、清空继承环境、校验显式变量名并拒绝普通环境中的敏感变量。Seatbelt/bubblewrap launcher 只获得固定最小 `PATH`；目标变量由 `/usr/bin/env -i` 或 `bwrap --setenv` 在隔离建立后注入，避免 `LD_*`/`DYLD_*` 等变量先影响 launcher。它尚未接入 daemon，这是 M2 开放进程工具前的安全门槛。该原语还会限制输出，并在正常退出、超时、等待错误或调用取消时清理原 PGID；主动通过 `setsid`/`setpgid` 脱组的后代仍可能存活。完整进程树治理需要 M2 的 Linux PID namespace/cgroup 和 macOS supervisor/job 机制，不能只依赖 PGID。
+当前 process primitive 会串行调用、清空继承环境、校验显式变量名并拒绝普通环境中的敏感变量。`process.run` 已接入 daemon 统一管线；Seatbelt/bubblewrap launcher 只获得固定最小 `PATH`，目标变量由 `/usr/bin/env -i` 或 `bwrap --setenv` 在隔离建立后注入，避免 `LD_*`/`DYLD_*` 等变量先影响 launcher。该原语限制输出，并在正常退出、超时、等待错误或调用取消时清理原 PGID；主动通过 `setsid`/`setpgid` 脱组的后代仍可能存活。完整进程树治理需要 Linux PID namespace/cgroup 和 macOS supervisor/job 机制，不能只依赖 PGID。
 
 ## 9. 权限、配置与凭据
 
@@ -250,9 +250,9 @@ v1 只支持一层本地子智能体，默认并发上限 4。只读任务可共
 | SQLite append-only ledger | 已实现基线 | 迁移、备份、崩溃窗口验证 |
 | 纯 projection replay | 已实现基线和 lifecycle golden trace | 扩展 traces 与快照交叉校验 |
 | Workspace/Thread/Turn/Item | 已实现投影、基础命令与有界多轮只读 Agent loop；steer 在下一模型请求安全点注入 | 写入/进程闭环与 compaction |
-| OpenAI-compatible provider | 无凭据流式 adapter 已接 daemon；支持 tool calls，流/输出/状态/loop 均有硬上限 | `CredentialBroker` 与四类 provider 契约测试 |
+| OpenAI-compatible provider | 无凭据流式 adapter 已接 daemon；支持 tool calls，流/输出/状态/loop 均有硬上限；runtime 已提供 `CredentialBroker` seam | daemon credential 注入与四类 provider 契约测试 |
 | 结构化 workspace 只读工具 | `list/read/search` 已接 daemon；严格参数、路径/链接防护、实际 effect、并发执行与模型顺序入账 | 更完整真实仓库 E2E 与预算调优 |
-| 工作区 patch/process/sandbox/artifact | runtime 原语已实现；launcher 环境边界已加固但未接 daemon | 统一管线、审批 UI、平台加固 |
+| 工作区 patch/process/sandbox/artifact | patch/process 已经通过统一 pipeline、审批和 OS sandbox 接入 daemon；artifact 仍为原语 | dirfd/CAS、进程树监督、artifact 输出与 reconciliation |
 | TypeScript 终端客户端 | 安全 socket 连接、终端清理与原始 JSONL 已实现 | OpenTUI 体验、完整命令面与 JSONL parity 门禁 |
 | 插件 | 独立进程与摘要校验基线 | OS 沙箱、Rust policy/ledger 接入 |
 | Skills/MCP/FTS | 仅协议或 descriptor 占位；FTS 尚未实现 | M3 完整实现 |
