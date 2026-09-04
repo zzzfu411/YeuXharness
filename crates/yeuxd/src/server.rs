@@ -1376,6 +1376,98 @@ mod tests {
     }
 
     #[derive(Debug)]
+    struct ProtectedMutationProvider {
+        round: AtomicUsize,
+        base_revision: String,
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+
+    impl ProtectedMutationProvider {
+        fn new(base_revision: String) -> Self {
+            Self {
+                round: AtomicUsize::new(0),
+                base_revision,
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl ModelProvider for ProtectedMutationProvider {
+        fn provider_id(&self) -> &str {
+            "protected-mutation"
+        }
+
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                tool_calls: true,
+                parallel_tool_calls: false,
+                ..ProviderCapabilities::default()
+            }
+        }
+
+        fn stream<'life0, 'life1, 'async_trait>(
+            &'life0 self,
+            request: ModelRequest,
+            sink: &'life1 mut (dyn ModelEventSink + Send),
+        ) -> Pin<Box<dyn Future<Output = Result<(), PortError>> + Send + 'async_trait>>
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async move {
+                self.requests.lock().unwrap().push(request);
+                match self.round.fetch_add(1, Ordering::SeqCst) {
+                    0 => {
+                        sink.emit(ModelEvent::ToolCallDelta {
+                            call_id: "read-target".into(),
+                            name: "workspace.read".into(),
+                            json_delta: "{\"path\":\"status.txt\"}".into(),
+                        })
+                        .await?;
+                        sink.emit(ModelEvent::Completed {
+                            stop_reason: StopReason::ToolUse,
+                        })
+                        .await
+                    }
+                    1 => {
+                        sink.emit(ModelEvent::ToolCallDelta {
+                            call_id: "write-target".into(),
+                            name: "workspace.apply_patch".into(),
+                            json_delta: serde_json::json!({
+                                "path": "status.txt",
+                                "base_revision": self.base_revision,
+                                "replacement": "after\n"
+                            })
+                            .to_string(),
+                        })
+                        .await?;
+                        sink.emit(ModelEvent::Completed {
+                            stop_reason: StopReason::ToolUse,
+                        })
+                        .await
+                    }
+                    2 => {
+                        sink.emit(ModelEvent::TextDelta {
+                            text: "mutation approved and persisted".into(),
+                        })
+                        .await?;
+                        sink.emit(ModelEvent::Completed {
+                            stop_reason: StopReason::EndTurn,
+                        })
+                        .await
+                    }
+                    _ => Err(PortError {
+                        code: "unexpected_round".into(),
+                        message: "protected mutation provider was called too many times".into(),
+                        retryable: false,
+                    }),
+                }
+            })
+        }
+    }
+
+    #[derive(Debug)]
     struct ControlledProvider {
         started: Arc<Notify>,
         release: Arc<Notify>,
@@ -2446,6 +2538,185 @@ mod tests {
             .invocations
             .values()
             .any(|invocation| invocation.state == InvocationState::Completed));
+
+        client_write.shutdown().await.unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn protected_mutation_loop_requires_wire_approval_and_replays_terminal_evidence() {
+        let state = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("status.txt"), "before\n").unwrap();
+        let base_revision = blake3::hash(b"before\n").to_hex().to_string();
+        let provider = Arc::new(ProtectedMutationProvider::new(base_revision));
+        let config =
+            DaemonConfig::in_directory(state.path()).with_model_provider(ModelProviderConfig::new(
+                provider.clone(),
+                "mutation-model",
+                TokenBudget {
+                    max_input_tokens: 4_096,
+                    max_output_tokens: 256,
+                },
+            ));
+        let daemon = Daemon::open(config).unwrap();
+        let projection_daemon = daemon.clone();
+        let (client, server) = duplex(128 * 1_024);
+        let (server_read, server_write) = split(server);
+        let task = tokio::spawn(async move {
+            daemon
+                .serve_connection(BufReader::new(server_read), BufWriter::new(server_write))
+                .await
+        });
+        let (client_read, mut client_write) = split(client);
+        let mut client_read = BufReader::new(client_read);
+
+        let initialize = send_json(
+            &mut client_write,
+            &mut client_read,
+            wire_command(
+                method::INITIALIZE,
+                serde_json::to_value(InitializeParams {
+                    protocol_version: PROTOCOL_VERSION,
+                    client_info: ClientInfo {
+                        name: "mutation-wire-test".into(),
+                        version: "0".into(),
+                    },
+                    capabilities: ClientCapabilities {
+                        event_replay: true,
+                        server_requests: true,
+                        ..ClientCapabilities::default()
+                    },
+                })
+                .unwrap(),
+            ),
+        )
+        .await;
+        if initialize["result"]["capabilities"]["write_tools"] != true {
+            // macOS Seatbelt and restricted CI hosts intentionally do not
+            // advertise this capability. The negative result is the evidence
+            // we want: no client can accidentally infer a write grant.
+            client_write.shutdown().await.unwrap();
+            task.await.unwrap().unwrap();
+            return;
+        }
+        let opened = send_json(
+            &mut client_write,
+            &mut client_read,
+            wire_command(method::WORKSPACE_OPEN, json!({ "path": workspace.path() })),
+        )
+        .await;
+        let workspace_id = opened["result"]["workspace"]["id"].clone();
+        let identity_digest = opened["result"]["workspace"]["identity"]["digest"].clone();
+        let trusted = send_json(
+            &mut client_write,
+            &mut client_read,
+            wire_command(
+                method::WORKSPACE_TRUST,
+                json!({
+                    "workspaceId": workspace_id,
+                    "trust": "trusted",
+                    "identityDigest": identity_digest
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(trusted["result"]["workspace"]["trust"], "trusted");
+        let started = send_json(
+            &mut client_write,
+            &mut client_read,
+            wire_command(method::THREAD_START, json!({ "workspaceId": workspace_id })),
+        )
+        .await;
+        let thread_id = started["result"]["thread"]["id"].clone();
+        let subscribed = send_json(
+            &mut client_write,
+            &mut client_read,
+            wire_command(
+                method::THREAD_SUBSCRIBE,
+                json!({ "threadId": thread_id, "afterSeq": 0 }),
+            ),
+        )
+        .await;
+        assert_eq!(subscribed["result"]["replayedThroughSeq"], 1);
+        assert_eq!(
+            read_json(&mut client_read).await["params"]["kind"],
+            "thread/started"
+        );
+
+        let turn_started = send_json(
+            &mut client_write,
+            &mut client_read,
+            wire_command(
+                method::TURN_START,
+                json!({
+                    "threadId": thread_id,
+                    "content": [ContentBlock::Text { text: "update status".into() }]
+                }),
+            ),
+        )
+        .await;
+        let turn_id = turn_started["result"]["turn"]["id"].as_str().unwrap();
+        let mut saw_read = false;
+        let mut saw_proposal = false;
+        let mut saw_approval = false;
+        let mut saw_patch_result = false;
+        let saw_completion = loop {
+            let message = read_json(&mut client_read).await;
+            if message["method"] == method::APPROVAL_REQUEST {
+                saw_approval = true;
+                let response = json!({
+                    "jsonrpc": JSONRPC_VERSION,
+                    "id": message["id"].clone(),
+                    "result": {"approved": true}
+                });
+                client_write
+                    .write_all(
+                        format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                client_write.flush().await.unwrap();
+                continue;
+            }
+            let params = &message["params"];
+            saw_read |= params["kind"] == "tool/proposed"
+                && params["payload"]["tool_id"] == "workspace.read";
+            saw_proposal |= params["kind"] == "tool/proposed"
+                && params["payload"]["tool_id"] == "workspace.apply_patch";
+            saw_patch_result |= params["kind"] == "item/added"
+                && params["payload"]["item"]["kind"] == "tool_result"
+                && params["payload"]["item"]["content"]["content"][0]["content"]["path"]
+                    == "status.txt";
+            if params["kind"] == "turn/state_changed" && params["payload"]["to"] == "completed" {
+                break true;
+            }
+        };
+        assert!(saw_read);
+        assert!(saw_proposal);
+        assert!(saw_approval);
+        assert!(saw_patch_result);
+        assert!(saw_completion);
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join("status.txt")).unwrap(),
+            "after\n"
+        );
+
+        let projection = projection_daemon.projection().unwrap();
+        assert_eq!(
+            projection.turns[&turn_id.parse::<TurnId>().unwrap()].state,
+            TurnState::Completed
+        );
+        let invocation = projection
+            .invocations
+            .values()
+            .find(|invocation| invocation.tool_id == "workspace.apply_patch")
+            .expect("patch invocation persisted");
+        assert_eq!(invocation.state, InvocationState::Completed);
+        assert!(projection.items.values().any(|item| {
+            item.kind == ItemKind::ToolResult
+                && item.content["invocation_id"] == invocation.invocation_id.to_string()
+        }));
 
         client_write.shutdown().await.unwrap();
         task.await.unwrap().unwrap();

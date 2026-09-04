@@ -198,4 +198,46 @@ describe("EventRenderer", () => {
 
     expect(new Set(outputs)).toEqual(new Set([`${JSON.stringify(event)}\n`]));
   });
+
+  it("renders control-plane results as structured JSONL", () => {
+    let output = "";
+    const renderer = new EventRenderer({
+      jsonl: true,
+      color: false,
+      write: (text) => {
+        output += text;
+      },
+    });
+    renderer.renderCommandResult("doctor", { sandbox: "seatbelt" }, "ready");
+    expect(JSON.parse(output)).toEqual({
+      jsonrpc: "2.0",
+      method: "runtime/command",
+      params: {
+        command: "doctor",
+        message: "ready",
+        result: { sandbox: "seatbelt" },
+      },
+    });
+  });
+
+  it("keeps capability failure reasons visible in the human doctor view", () => {
+    let output = "";
+    const renderer = new EventRenderer({
+      color: false,
+      ascii: true,
+      write: (text) => {
+        output += text;
+      },
+    });
+    renderer.renderDoctor({
+      sandbox: "seatbelt",
+      writeTools: true,
+      processTools: false,
+      processReason: "process isolation is unavailable on this host",
+      hostCeiling: "operate",
+    });
+    expect(output).toContain("DOCTOR");
+    expect(output).toContain("process tools unavailable");
+    expect(output).toContain("process isolation is unavailable");
+  });
 });

@@ -80,6 +80,12 @@
           "default": false,
           "type": "boolean"
         },
+        "process_tools_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "sandbox": {
           "default": null,
           "type": [
@@ -99,6 +105,13 @@
           "description": "True only when the daemon has registered the M2 write pipeline and the required host sandbox is available.",
           "default": false,
           "type": "boolean"
+        },
+        "write_tools_reason": {
+          "description": "Human-readable fail-closed explanation when a capability is not advertised. This is diagnostic context, never an authority grant.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     }

@@ -202,6 +202,12 @@ pub struct ServerCapabilities {
     pub write_tools: bool,
     #[serde(default)]
     pub process_tools: bool,
+    /// Human-readable fail-closed explanation when a capability is not
+    /// advertised. This is diagnostic context, never an authority grant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_tools_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_tools_reason: Option<String>,
     #[serde(default)]
     pub sandbox: Option<String>,
 }

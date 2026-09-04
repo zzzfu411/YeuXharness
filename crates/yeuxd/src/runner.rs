@@ -3151,7 +3151,11 @@ fn classify_tool_execution_error(
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::VecDeque, future::Future, path::Path, pin::Pin, sync::Mutex as TestMutex,
+        collections::VecDeque,
+        future::Future,
+        path::Path,
+        pin::Pin,
+        sync::{atomic::AtomicUsize, Mutex as TestMutex},
     };
 
     use chrono::{DateTime, Utc};
@@ -3438,6 +3442,294 @@ mod tests {
                 max_output_tokens: 128,
             },
         )
+    }
+
+    #[derive(Default)]
+    struct ApproveEverySideEffect {
+        requests: AtomicUsize,
+    }
+
+    impl ApprovalHandler for ApproveEverySideEffect {
+        fn request<'a>(
+            &'a self,
+            params: ApprovalRequestParams,
+        ) -> Pin<Box<dyn Future<Output = ApprovalRequestResult> + Send + 'a>> {
+            assert!(!params.invocation.effects.is_read_only());
+            self.requests.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async {
+                ApprovalRequestResult {
+                    approved: true,
+                    approval: None,
+                }
+            })
+        }
+    }
+
+    /// A capability-gated end-to-end fixture for the first useful coding
+    /// slice. It uses a temporary git repository, a scripted provider, the
+    /// daemon runner and the real approval/pipeline boundary: read the
+    /// fixture, record a plan, introduce a regression with a revision-bound
+    /// patch, run a read-only test, observe the failure, repair and rerun the
+    /// test, inspect the final Git diff, then finish with a durable assistant
+    /// message. Linux is the only supported platform for this arbitrary
+    /// process assertion today; macOS remains an explicit observe-only
+    /// residual until a descendant supervisor is available.
+    #[tokio::test]
+    async fn real_repository_read_patch_test_fix_loop_is_durable() {
+        use crate::tools::{
+            PROCESS_RUN_TOOL_ID, WORKSPACE_APPLY_PATCH_TOOL_ID, WORKSPACE_READ_TOOL_ID,
+        };
+        if !cfg!(target_os = "linux") {
+            eprintln!("skipping real repository fixture: strict process supervision is Linux-only");
+            return;
+        }
+        let backend = SandboxBackend::detect();
+        let capabilities = backend.capabilities();
+        if !capabilities.filesystem_isolation
+            || !capabilities.process_isolation
+            || !capabilities.network_isolation
+        {
+            eprintln!(
+                "skipping real repository fixture: backend={} capabilities={capabilities:?}",
+                backend.name()
+            );
+            return;
+        }
+        let shell = ["/bin/sh", "/usr/bin/sh"]
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .find(|path| std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()));
+        let Some(shell) = shell else {
+            eprintln!("skipping real repository fixture: shell unavailable");
+            return;
+        };
+
+        let repository = tempfile::tempdir().unwrap();
+        let git_status = std::process::Command::new("git")
+            .args([
+                "init",
+                "--quiet",
+                repository.path().to_string_lossy().as_ref(),
+            ])
+            .status();
+        if !git_status.is_ok_and(|status| status.success()) {
+            eprintln!("skipping real repository fixture: git init unavailable");
+            return;
+        }
+        std::fs::write(repository.path().join("answer.txt"), "41\n").unwrap();
+        let git = ["/usr/bin/git", "/bin/git"]
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .find(|path| std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()));
+        let Some(git) = git else {
+            eprintln!("skipping real repository fixture: git executable unavailable");
+            return;
+        };
+        let git_setup = std::process::Command::new(&git)
+            .current_dir(repository.path())
+            .args(["add", "--", "answer.txt"])
+            .status()
+            .and_then(|status| {
+                if !status.success() {
+                    return Err(std::io::Error::other("git add failed"));
+                }
+                std::process::Command::new(&git)
+                    .current_dir(repository.path())
+                    .args([
+                        "-c",
+                        "user.name=YeuX fixture",
+                        "-c",
+                        "user.email=fixture@example.invalid",
+                        "commit",
+                        "--quiet",
+                        "-m",
+                        "baseline",
+                    ])
+                    .status()
+            });
+        if !git_setup.is_ok_and(|status| status.success()) {
+            eprintln!("skipping real repository fixture: git baseline commit unavailable");
+            return;
+        }
+        let original_revision = blake3::hash(b"41\n").to_hex().to_string();
+        let invalid_revision = blake3::hash(b"forty-two\n").to_hex().to_string();
+
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![
+                ModelEvent::ToolCallDelta {
+                    call_id: "read-status".into(),
+                    name: WORKSPACE_READ_TOOL_ID.into(),
+                    json_delta: "{\"path\":\"answer.txt\"}".into(),
+                },
+                ModelEvent::Completed {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                ModelEvent::TextDelta {
+                    text: "Plan: update the answer, run the check, repair any failure, then inspect the final diff.\n".into(),
+                },
+                ModelEvent::ToolCallDelta {
+                    call_id: "introduce-regression".into(),
+                    name: WORKSPACE_APPLY_PATCH_TOOL_ID.into(),
+                    json_delta: format!(
+                        "{{\"path\":\"answer.txt\",\"base_revision\":\"{original_revision}\",\"replacement\":\"forty-two\\n\"}}"
+                    ),
+                },
+                ModelEvent::Completed {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                ModelEvent::ToolCallDelta {
+                    call_id: "test-fails".into(),
+                    name: PROCESS_RUN_TOOL_ID.into(),
+                    json_delta: serde_json::json!({
+                        "executable": shell,
+                        "arguments": ["-c", "test \"$(cat answer.txt)\" = \"42\""],
+                        "cwd": "."
+                    })
+                    .to_string(),
+                },
+                ModelEvent::Completed {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                ModelEvent::ToolCallDelta {
+                    call_id: "repair-regression".into(),
+                    name: WORKSPACE_APPLY_PATCH_TOOL_ID.into(),
+                    json_delta: format!(
+                        "{{\"path\":\"answer.txt\",\"base_revision\":\"{invalid_revision}\",\"replacement\":\"42\\n\"}}"
+                    ),
+                },
+                ModelEvent::Completed {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                ModelEvent::ToolCallDelta {
+                    call_id: "test-pass".into(),
+                    name: PROCESS_RUN_TOOL_ID.into(),
+                    json_delta: serde_json::json!({
+                        "executable": shell,
+                        "arguments": ["-c", "test \"$(cat answer.txt)\" = \"42\""],
+                        "cwd": "."
+                    })
+                    .to_string(),
+                },
+                ModelEvent::Completed {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                ModelEvent::ToolCallDelta {
+                    call_id: "show-final-diff".into(),
+                    name: PROCESS_RUN_TOOL_ID.into(),
+                    json_delta: serde_json::json!({
+                        "executable": git,
+                        "arguments": ["--no-ext-diff", "--no-color", "diff", "--", "answer.txt"],
+                        "cwd": "."
+                    })
+                    .to_string(),
+                },
+                ModelEvent::Completed {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                ModelEvent::TextDelta {
+                    text: "read, repaired, and verified".into(),
+                },
+                ModelEvent::Completed {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ]));
+        let fixture = fixture_at(Some(provider_config(provider.clone())), repository.path());
+        let approval = Arc::new(ApproveEverySideEffect::default());
+        let result = fixture
+            .runner
+            .run_with_approval(
+                TurnRunSpec {
+                    thread_id: fixture.thread_id,
+                    turn_id: fixture.turn_id,
+                },
+                &NeverCancelled,
+                Some(approval.clone()),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(result, TurnRunResult::Completed { .. }));
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join("answer.txt")).unwrap(),
+            "42\n"
+        );
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 7);
+        drop(requests);
+        assert_eq!(approval.requests.load(Ordering::Relaxed), 5);
+
+        let projection = fixture.ledger.project_core().unwrap();
+        let mut tool_ids = projection
+            .invocations
+            .values()
+            .map(|invocation| invocation.tool_id.as_str())
+            .collect::<Vec<_>>();
+        tool_ids.sort_unstable();
+        assert_eq!(
+            tool_ids,
+            [
+                PROCESS_RUN_TOOL_ID,
+                PROCESS_RUN_TOOL_ID,
+                PROCESS_RUN_TOOL_ID,
+                WORKSPACE_APPLY_PATCH_TOOL_ID,
+                WORKSPACE_APPLY_PATCH_TOOL_ID,
+                WORKSPACE_READ_TOOL_ID,
+            ]
+        );
+        assert!(projection
+            .invocations
+            .values()
+            .all(|invocation| invocation.state == InvocationState::Completed));
+        let mut exit_codes = projection
+            .items
+            .values()
+            .filter(|item| item.kind == ItemKind::ToolResult)
+            .filter_map(|item| item.content["content"][0]["content"]["exit_code"].as_i64())
+            .collect::<Vec<_>>();
+        exit_codes.sort_unstable();
+        assert_eq!(exit_codes, [0, 0, 1]);
+        assert!(projection.items.values().any(|item| {
+            item.kind == ItemKind::ToolResult
+                && item.content["content"][0]["content"]["stdout"]
+                    .as_str()
+                    .is_some_and(|diff| {
+                        diff.contains("--- a/answer.txt")
+                            && diff.contains("-41")
+                            && diff.contains("+42")
+                    })
+        }));
+        assert!(projection.items.values().any(|item| {
+            item.kind == ItemKind::ToolCall
+                && item.content["content"].as_array().is_some_and(|content| {
+                    content.iter().any(|block| {
+                        block["type"] == "text"
+                            && block["text"]
+                                .as_str()
+                                .is_some_and(|text| text.starts_with("Plan: update the answer"))
+                    })
+                })
+        }));
+        assert!(projection.items.values().any(|item| {
+            item.kind == ItemKind::AssistantMessage
+                && item.content["content"][0]["text"] == "read, repaired, and verified"
+        }));
+        assert_eq!(
+            projection.turns[&fixture.turn_id].state,
+            TurnState::Completed
+        );
     }
 
     #[tokio::test]

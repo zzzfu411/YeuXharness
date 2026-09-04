@@ -2726,7 +2726,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "yeux-core"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -2742,7 +2742,7 @@ dependencies = [
 
 [[package]]
 name = "yeux-protocol"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "chrono",
  "schemars",
@@ -2753,7 +2753,7 @@ dependencies = [
 
 [[package]]
 name = "yeux-runtime"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2777,7 +2777,7 @@ dependencies = [
 
 [[package]]
 name = "yeuxd"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "blake3",
  "chrono",

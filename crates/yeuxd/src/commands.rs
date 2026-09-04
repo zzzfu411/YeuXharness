@@ -141,7 +141,7 @@ impl Daemon {
         // needs filesystem/network policy evidence; a process tool additionally
         // requires strict descendant containment. On macOS Seatbelt can satisfy
         // the former while deliberately failing closed for the latter.
-        let write_sandbox_ready = sandbox
+        let write_sandbox_error = sandbox
             .ensure(SandboxRequirement {
                 filesystem_isolation: true,
                 process_isolation: false,
@@ -149,8 +149,8 @@ impl Daemon {
                 allow_workspace_write: true,
                 allow_network: false,
             })
-            .is_ok();
-        let process_sandbox_ready = sandbox
+            .err();
+        let process_sandbox_error = sandbox
             .ensure(SandboxRequirement {
                 filesystem_isolation: true,
                 process_isolation: true,
@@ -158,7 +158,9 @@ impl Daemon {
                 allow_workspace_write: false,
                 allow_network: false,
             })
-            .is_ok();
+            .err();
+        let write_sandbox_ready = write_sandbox_error.is_none();
+        let process_sandbox_ready = process_sandbox_error.is_none();
         let provider_tools_ready = self
             .inner
             .config
@@ -171,6 +173,20 @@ impl Daemon {
         let process_tools_ready = process_sandbox_ready
             && provider_tools_ready
             && self.inner.config.host_ceiling != CapabilityMode::Observe;
+        let write_tools_reason = capability_reason(
+            write_tools_ready,
+            provider_tools_ready,
+            self.inner.config.host_ceiling,
+            write_sandbox_error.as_ref().map(ToString::to_string),
+            "filesystem mutation",
+        );
+        let process_tools_reason = capability_reason(
+            process_tools_ready,
+            provider_tools_ready,
+            self.inner.config.host_ceiling,
+            process_sandbox_error.as_ref().map(ToString::to_string),
+            "process execution",
+        );
         encode(InitializeResult {
             protocol_version: PROTOCOL_VERSION,
             server_info: ClientInfo {
@@ -191,6 +207,8 @@ impl Daemon {
                 plugins: false,
                 write_tools: write_tools_ready,
                 process_tools: process_tools_ready,
+                write_tools_reason,
+                process_tools_reason,
                 sandbox: Some(sandbox.name().to_owned()),
             },
             host_ceiling: self.inner.config.host_ceiling,
@@ -1365,6 +1383,28 @@ fn validate_turn_content(content: &[yeux_protocol::ContentBlock]) -> Result<(), 
         }
     }
     Ok(())
+}
+
+fn capability_reason(
+    ready: bool,
+    provider_tools_ready: bool,
+    host_ceiling: CapabilityMode,
+    sandbox_error: Option<String>,
+    capability: &str,
+) -> Option<String> {
+    if ready {
+        return None;
+    }
+    if !provider_tools_ready {
+        return Some("configured provider does not advertise tool calls".into());
+    }
+    if host_ceiling == CapabilityMode::Observe {
+        return Some("daemon host ceiling is observe".into());
+    }
+    if let Some(error) = sandbox_error {
+        return Some(format!("{capability} sandbox unavailable: {error}"));
+    }
+    Some(format!("{capability} is unavailable"))
 }
 
 fn validate_optional_bounded_text(

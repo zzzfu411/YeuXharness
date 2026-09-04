@@ -33,7 +33,10 @@ export class TerminalPrompter {
   readonly #output: Writable;
   readonly #capabilities: TerminalCapabilities;
   readonly #theme: ThemeName;
+  readonly #closedWaiters = new Set<() => void>();
   #queue: Promise<unknown> = Promise.resolve();
+  #closed = false;
+  #activeCommandAbort: AbortController | undefined;
 
   public constructor(
     input: Readable = process.stdin,
@@ -42,6 +45,18 @@ export class TerminalPrompter {
   ) {
     const terminal = (output as Writable & { readonly isTTY?: boolean }).isTTY === true;
     this.#readline = createInterface({ input, output, terminal });
+    const markInputClosed = (): void => {
+      this.#markClosed();
+    };
+    // `readline` does not consistently emit its own close event for a
+    // non-TTY stream that reaches EOF before the first question. Observe the
+    // source stream as well so pipes and scripted sessions can terminate
+    // without a pending promise.
+    input.once("end", markInputClosed);
+    input.once("close", markInputClosed);
+    this.#readline.once("close", () => {
+      this.#markClosed();
+    });
     this.#output = output;
     this.#capabilities = options.capabilities ?? detectTerminalCapabilities(
       {
@@ -55,27 +70,72 @@ export class TerminalPrompter {
   }
 
   public question(prompt: string): Promise<string> {
+    this.#interruptCommandQuestion();
     return this.#enqueueQuestion(sanitizeTerminalText(prompt));
   }
 
   /** Renderer-owned interactive prompt; untrusted text never enters this path. */
-  public command(): Promise<string> {
+  public async command(signal?: AbortSignal): Promise<string | undefined> {
+    if (this.#closed) return undefined;
+    const controller = new AbortController();
+    const relayAbort = (): void => {
+      controller.abort();
+    };
+    if (signal?.aborted === true) relayAbort();
+    else signal?.addEventListener("abort", relayAbort, { once: true });
+    this.#activeCommandAbort?.abort();
+    this.#activeCommandAbort = controller;
     const prompt = paint(
       `yeux ${glyph("prompt", this.#capabilities)}`,
       "focus",
       this.#capabilities,
       this.#theme,
     );
-    return this.#enqueueQuestion(`\n${prompt} `);
+    try {
+      return await this.#questionUntilClose(`\n${prompt} `, controller.signal);
+    } catch (error) {
+      // readline rejects a pending question when stdin reaches EOF. EOF is a
+      // normal terminal action, so callers can leave the session cleanly
+      // without printing an internal error or waiting on an unsettled await.
+      if (this.#closed || isReadlineClosedError(error)) return undefined;
+      // Approval and user/input requests temporarily supersede the idle
+      // command prompt. An empty line tells the active-turn input loop to
+      // wait again after the higher-priority question is answered.
+      if (controller.signal.aborted && isAbortError(error)) return "";
+      throw error;
+    } finally {
+      signal?.removeEventListener("abort", relayAbort);
+      if (this.#activeCommandAbort === controller) this.#activeCommandAbort = undefined;
+    }
   }
 
-  #enqueueQuestion(prompt: string): Promise<string> {
-    const operation = this.#queue.then(async () => await this.#readline.question(prompt));
+  #enqueueQuestion(prompt: string, signal?: AbortSignal): Promise<string> {
+    const operation = this.#queue.then(async () => signal === undefined
+      ? await this.#readline.question(prompt)
+      : await this.#readline.question(prompt, { signal }));
     this.#queue = operation.catch(() => undefined);
     return operation;
   }
 
+  async #questionUntilClose(prompt: string, signal?: AbortSignal): Promise<string | undefined> {
+    if (this.#closed) return undefined;
+    let release: (() => void) | undefined;
+    const closed = new Promise<void>((resolve) => {
+      release = resolve;
+      this.#closedWaiters.add(resolve);
+    });
+    try {
+      return await Promise.race([
+        this.#enqueueQuestion(prompt, signal),
+        closed.then(() => undefined),
+      ]);
+    } finally {
+      if (release !== undefined) this.#closedWaiters.delete(release);
+    }
+  }
+
   public async approval(params: ApprovalRequestParams): Promise<ApprovalRequestResult> {
+    this.#interruptCommandQuestion();
     const safe = normalizeApprovalRequest(params);
     const safeArguments = sanitizeTerminalText(
       JSON.stringify(safe.invocation.normalized_arguments, null, 2),
@@ -90,16 +150,17 @@ export class TerminalPrompter {
     const rail = glyph("approvalRail", this.#capabilities);
 
     while (true) {
-      const choice = parseApprovalChoice(
-        await this.#enqueueQuestion(
+      const answer = await this.#questionUntilClose(
           paint(
             `${glyph("prompt", this.#capabilities)} approval: `,
             "approval",
             this.#capabilities,
             this.#theme,
           ),
-        ),
-      );
+        );
+      // EOF is equivalent to the documented deny default. This keeps a
+      // disconnected client from accidentally approving a side effect.
+      const choice = parseApprovalChoice(answer ?? "");
       if (choice === "inspect") {
         const unified = unifiedDiffFromApproval(safe);
         if (unified !== undefined) {
@@ -123,13 +184,49 @@ export class TerminalPrompter {
     if (!isRecord(params) || typeof params.prompt !== "string") {
       throw { code: -32602, message: "Invalid user/input request" };
     }
+    this.#interruptCommandQuestion();
     const prompt = sanitizeTerminalLine(params.prompt);
-    return { content: [{ type: "text", text: await this.#enqueueQuestion(`${prompt}: `) }] };
+    try {
+      const answer = await this.#enqueueQuestion(`${prompt}: `);
+      if (answer === undefined) throw { code: -32010, message: "Input closed before a response" };
+      return { content: [{ type: "text", text: answer }] };
+    } catch (error) {
+      if (this.#closed || isReadlineClosedError(error)) {
+        throw { code: -32010, message: "Input closed before a response" };
+      }
+      throw error;
+    }
   }
 
   public close(): void {
+    this.#markClosed();
+  }
+
+  #markClosed(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#interruptCommandQuestion();
+    for (const resolve of this.#closedWaiters) resolve();
+    this.#closedWaiters.clear();
     this.#readline.close();
   }
+
+  #interruptCommandQuestion(): void {
+    const controller = this.#activeCommandAbort;
+    this.#activeCommandAbort = undefined;
+    controller?.abort();
+  }
+}
+
+function isReadlineClosedError(error: unknown): boolean {
+  return error instanceof Error && (
+    error.message.includes("readline was closed") ||
+    error.message.includes("ERR_USE_AFTER_CLOSE")
+  );
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 export interface ApprovalGateFormatOptions {
@@ -194,8 +291,61 @@ export function formatApprovalGate(
     .join("\n");
 }
 
-function displayWidth(text: string): number {
-  return [...text].length;
+/**
+ * Return terminal cells rather than JavaScript code points. This intentionally
+ * covers the common CJK, emoji and combining-mark cases without depending on
+ * a native module; ambiguous characters stay one cell for stable ASCII-like
+ * framing across locales.
+ */
+export function displayWidth(text: string): number {
+  let width = 0;
+  const normalized = text.normalize("NFC");
+  // Segmenting grapheme clusters keeps ZWJ emoji and regional-indicator flags
+  // at their rendered width instead of counting every code point separately.
+  const segmenter = typeof Intl.Segmenter === "function"
+    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+    : undefined;
+  const clusters = segmenter === undefined
+    ? [...normalized]
+    : [...segmenter.segment(normalized)].map(({ segment }) => segment);
+  for (const cluster of clusters) {
+    const codePoints = [...cluster].map((character) => character.codePointAt(0) ?? 0);
+    if (codePoints.length === 0 || codePoints.every(isZeroWidth)) continue;
+    width += codePoints.some(isWide) || codePoints.includes(0xfe0f) || codePoints.includes(0x20e3)
+      ? 2
+      : 1;
+  }
+  return width;
+}
+
+function isZeroWidth(codePoint: number): boolean {
+  return (
+    (codePoint >= 0x0300 && codePoint <= 0x036f) ||
+    (codePoint >= 0x1ab0 && codePoint <= 0x1aff) ||
+    (codePoint >= 0x1dc0 && codePoint <= 0x1dff) ||
+    (codePoint >= 0x20d0 && codePoint <= 0x20ff) ||
+    (codePoint >= 0xfe00 && codePoint <= 0xfe0f) ||
+    (codePoint >= 0x200b && codePoint <= 0x200f) ||
+    (codePoint >= 0x2060 && codePoint <= 0x2064) ||
+    (codePoint >= 0xfeff && codePoint <= 0xfeff)
+  );
+}
+
+function isWide(codePoint: number): boolean {
+  return (
+    (codePoint >= 0x1100 && codePoint <= 0x115f) ||
+    (codePoint >= 0x2329 && codePoint <= 0x232a) ||
+    (codePoint >= 0x2e80 && codePoint <= 0xa4cf) ||
+    (codePoint >= 0xac00 && codePoint <= 0xd7a3) ||
+    (codePoint >= 0xf900 && codePoint <= 0xfaff) ||
+    (codePoint >= 0xfe10 && codePoint <= 0xfe19) ||
+    (codePoint >= 0xfe30 && codePoint <= 0xfe6f) ||
+    (codePoint >= 0xff00 && codePoint <= 0xff60) ||
+    (codePoint >= 0xffe0 && codePoint <= 0xffe6) ||
+    (codePoint >= 0x1f1e6 && codePoint <= 0x1f1ff) ||
+    (codePoint >= 0x1f300 && codePoint <= 0x1faff) ||
+    (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+  );
 }
 
 export const renderApprovalGate = formatApprovalGate;

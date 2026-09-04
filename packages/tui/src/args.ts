@@ -217,4 +217,9 @@ Options:
       --ascii           Use copy-safe ASCII rails and status glyphs
       --jsonl           Machine-readable event stream
   -h, --help            Show this help
-  -V, --version         Show the client version`;
+  -V, --version         Show the client version
+
+Interactive commands:
+  /help /model /context /plan /resume /compact /interrupt /steer
+  /reconcile /mode /threads /fork /exit
+  EOF also closes an interactive session cleanly.`;

@@ -204,4 +204,28 @@ describe("TerminalPrompter", () => {
     expect(rendered).toContain("+new");
     expect(rendered).not.toContain("INSPECT · NORMALIZED ARGUMENTS");
   });
+
+  it("lets an approval question supersede an active command prompt", async () => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const prompter = new TerminalPrompter(input, output, { ascii: true });
+    const pendingCommand = prompter.command();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const approval = prompter.approval({
+      invocation: {
+        invocation_id: "invocation-priority",
+        tool_id: "workspace.apply_patch",
+        tool_version: "1.0",
+        effects: { filesystem_write: [{ path: "status.txt" }] },
+        effect_digest: "digest",
+        normalized_arguments: { path: "status.txt" },
+      },
+      explanation: "write the reviewed patch",
+    });
+    await expect(pendingCommand).resolves.toBe("");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    input.write("a\n");
+    await expect(approval).resolves.toEqual({ approved: true });
+    prompter.close();
+  });
 });

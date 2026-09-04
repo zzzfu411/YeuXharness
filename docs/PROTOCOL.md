@@ -22,7 +22,7 @@ stdio 和 Unix socket 使用相同 framing：每行一个完整 UTF-8 JSON 对�
   "method": "initialize",
   "params": {
     "protocolVersion": { "major": 2, "minor": 0 },
-    "clientInfo": { "name": "yeux", "version": "0.1.0" },
+    "clientInfo": { "name": "yeux", "version": "0.1.0-alpha.1" },
     "capabilities": {
       "event_replay": true,
       "server_requests": true,
@@ -40,7 +40,7 @@ stdio 和 Unix socket 使用相同 framing：每行一个完整 UTF-8 JSON 对�
   "id": 1,
   "result": {
     "protocolVersion": { "major": 2, "minor": 0 },
-    "serverInfo": { "name": "yeuxd", "version": "0.1.0" },
+    "serverInfo": { "name": "yeuxd", "version": "0.1.0-alpha.1" },
     "capabilities": {
       "unix_socket": true,
       "jobs": false,

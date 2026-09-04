@@ -5,6 +5,8 @@
 比较对象：终端版 **Grok Build**，以及 Claude Code、OpenAI Codex、Pi；“Grok Build Mode”网页应用构建器单独说明。
 文档性质：基于当前源码、文档、CLI smoke 和官方公开资料的工程判断，不是模型能力或性能 benchmark。
 
+> **执行状态说明**：本文保留为 Run 5 开始前的差距快照，正文中的“当前”均指 `0a68ae7`。团队随后以 `82c13c570ac33bc5ad1dddadde40baa7c447b158` 为起点执行了 P0/M2.5 最小纵向切片；已实现的 Git fixture、wire approval/trust、TUI 控制面、能力诊断、验收结果与仍保留的 residual 见 [Run 5 执行记录](EXECUTION_LOG.md)。这份分析不据此回写历史判断。
+
 ## 结论
 
 YeuX 现在更准确的定位是：**安全内核优先的本地 agent runtime 原型，已经有可执行的只读多轮 loop 和首版受保护副作用管线，但还没有完成可交付的“读—改—测—修” coding-agent 产品。**
@@ -217,6 +219,7 @@ Rust protocol 声明的方法面比 TypeScript 当前 command map 宽，`thread/
 
 - YeuX：[README](../../../README.md)、[架构](../../ARCHITECTURE.md)、[路线图](../../ROADMAP.md)、[威胁模型](../../THREAT_MODEL.md)、[Paper Signal](../../design/AESTHETIC.md)。
 - 当前 Run 4 状态与门禁：[STATUS_AND_PLAN.md](../2026-09-03-run-4/STATUS_AND_PLAN.md)。
+- Run 5 实现与最终门禁：[EXECUTION_LOG.md](EXECUTION_LOG.md)。
 - 历史竞争分析（2026-08-31）：[COMPETITIVE_GAP_ANALYSIS.md](../../COMPETITIVE_GAP_ANALYSIS.md)。
 - Grok：[产品页](https://x.ai/build)、[overview](https://docs.x.ai/build/overview)、[modes/commands](https://docs.x.ai/build/modes-and-commands)、[permissions](https://docs.x.ai/build/features/permissions)、[skills/plugins](https://docs.x.ai/build/features/skills-plugins-marketplaces)、[source](https://github.com/xai-org/grok-build)、[workflows](https://x.ai/news/workflows)。
 - Claude：[overview](https://code.claude.com/docs/en/overview)、[common workflows](https://code.claude.com/docs/en/common-workflows)。

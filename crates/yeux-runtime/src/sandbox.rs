@@ -13,7 +13,11 @@ const MINIMAL_PATH: &str = "/usr/bin:/bin";
 /// A launcher probe must never be allowed to hang the daemon.  The probe is
 /// run only for trusted, platform-provided paths returned by [`detect`], but
 /// the same bound also protects callers that construct a backend explicitly.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+// Two seconds proved too tight when the test runner and linker saturated a
+// macOS host: an otherwise immediate launcher could be descheduled across the
+// entire window. Five seconds remains a small, fail-closed bound while avoiding
+// false capability loss under ordinary CI contention.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SandboxCapabilities {

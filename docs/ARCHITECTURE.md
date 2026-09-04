@@ -1,6 +1,6 @@
 # YeuX Harness v1 架构
 
-状态：Accepted target architecture，v0.1 基线正在实现（实现状态核对：2026-09-03）
+状态：Accepted target architecture，v0.1 基线正在实现（实现状态核对：2026-09-04）
 适用平台：macOS、Linux  
 许可证：Apache-2.0
 
@@ -158,6 +158,8 @@ proposed -> approved -> prepared -> started
 
 当前 core 已实现状态转换规则和 projection 校验。daemon 已将单请求 runner 扩展为有界多轮 Agent loop：从 root 到 leaf 按每层 `parent_seq` 构建 fork 谱系上下文，在 provider 支持 tool calls 时注册三个内置 workspace 只读工具，并在 sandbox 就绪且 host ceiling 非 `observe` 时按统一管线广告 `workspace.apply_patch`、`process.run`。runner 持久化模型流、ToolCall/ToolResult Item、Invocation 状态和最终 assistant Item，然后进入 `completed`、`failed` 或 `cancelled`。每轮调用之间会重新加载 ledger，因此已持久化的 `turn/steer` 会在下一模型请求安全点作为用户内容进入当前 loop；多个只读调用受 daemon 全局 worker 闸门约束并可并发执行，但同一 workspace identity 的 `search` 通过单槽闸门串行化，结果仍按模型首次给出的调用顺序入账和回灌。取消后的 provider delta 不落账；若工具已跨越执行边界且停止证据不足，Invocation 记为 `Unknown`，父 Turn 以 reconciliation-required 的 `failed` 诊断收束，不伪装成 `cancelled`；daemon 重启会把未终结 Turn 记录为 `failed`，不会自动重调 provider 或工具。
 
+Run 5 增加了一条最小真实 Git fixture：脚本 provider 在临时仓库中依次读取文件、持久化公开计划、提交一个错误 patch、观察检查失败、按新 revision 修复、复测并取得 final diff；测试从 ledger 断言 ToolCall/ToolResult、Invocation、EffectSet、退出码和终态。完整 process 链只在 Linux strict sandbox capability probe 通过时运行，macOS 保持明确关闭。另一个 JSON-RPC fixture 证明写入必须先提交 identity-bound workspace trust，再经真实 `approval/request` 才能发布 patch 和重放 terminal evidence。
+
 在只读工具之外，当前 daemon 还会在 sandbox 就绪且 host ceiling 非 `observe` 时广告受保护的
 `workspace.apply_patch` 和 `process.run`。两者必须经过统一 policy/approval/sandbox 管线、
 一次性 prepared token、执行前重验证和 opaque permit；网络、MCP 和插件工具仍不向模型开放。
@@ -176,8 +178,9 @@ proposed -> approved -> prepared -> started
   独立 CLI 仍构造 `NoCredentialBroker`，未接入操作系统 keychain 或企业 secret store，
   所以未解析句柄会失败关闭。
 - `invocation/reconcile` 已实现为仅接受终态父 Turn、来源为 `operator_review` 的有界证据，
-  以幂等 ledger 事务收束 `Unknown`；它不会重试 provider 或工具。artifact 输出、崩溃矩阵、
-  真实仓库 E2E、网络 endpoint 代理和发布/迁移仍是后续 release blocker。
+  以幂等 ledger 事务收束 `Unknown`；它不会重试 provider 或工具。当前只有一个最小 Git
+  fixture，artifact 输出、随机崩溃矩阵、10 仓库任务 gate、专用 Git/checkpoint、网络
+  endpoint 代理和发布/迁移仍是后续 release blocker。
 
 ## 7. 模型层
 
@@ -215,7 +218,7 @@ v1 provider 目标：
 
 当前 M1 专用路径已经实现 `workspace.list`、`workspace.read`、`workspace.search`：参数必须是拒绝未知字段的 JSON object；遍历和结果使用稳定顺序；路径逃逸、符号链接、硬链接、非 UTF-8 内容和越界资源会返回稳定错误。硬上限为 10,000 个遍历项、32 层深度、1 MiB 单文件、32 MiB 累计扫描、1,000 个匹配和 8 MiB 序列化结果。`workspace.search` 还受每 Turn 共享的 matcher operation budget（由 32 MiB 扫描上限推导、配置只能收紧）、同一 canonical workspace identity 的单槽 gate，以及 daemon 级 4 槽 blocking-worker 上限约束。tool-call 参数碎片按首次出现顺序汇聚，并限制每轮调用数、单调用参数和每轮累计参数大小。
 
-每次已接受的调用会记录实际解析的 effect，并持久化 `proposed -> approved -> prepared -> started -> completed/failed/cancelled/unknown`；只读调用以无需交互审批的固定原因进入 `approved`，副作用调用通过 daemon 审批绑定。`unknown` 表示执行边界后的结果无法证明，不能静默重试，须通过 `invocation/reconcile` 收束。同一轮只读调用会在全局 worker 闸门下执行并按模型调用顺序入账；未知工具只返回错误结果，不会被转交给 Shell、插件或其他执行器；未协商 tool capability 时出现工具调用会使 Turn 失败且不执行。首版受保护 mutation/process 和 evidence-only reconciliation 已形成可测试闭环；发布级文件 CAS 的最后命名空间竞态、完整 artifact 输出/GC、endpoint 网络代理、崩溃矩阵和真实任务 E2E 仍未完成。
+每次已接受的调用会记录实际解析的 effect，并持久化 `proposed -> approved -> prepared -> started -> completed/failed/cancelled/unknown`；只读调用以无需交互审批的固定原因进入 `approved`，副作用调用通过 daemon 审批绑定。`unknown` 表示执行边界后的结果无法证明，不能静默重试，须通过 `invocation/reconcile` 收束。同一轮只读调用会在全局 worker 闸门下执行并按模型调用顺序入账；未知工具只返回错误结果，不会被转交给 Shell、插件或其他执行器；未协商 tool capability 时出现工具调用会使 Turn 失败且不执行。首版受保护 mutation/process 和 evidence-only reconciliation 已形成可测试闭环，并由一条 capability-gated Git fixture 与一条真实 wire approval/trust fixture 覆盖；发布级文件 CAS 的最后命名空间竞态、完整 artifact 输出/GC、endpoint 网络代理、随机崩溃矩阵和多仓库任务 gate 仍未完成。
 
 补丁必须携带 base hash。当前 workspace primitive 已拒绝绝对路径、`..`、静态符号链接逃逸、多硬链接和陈旧 revision；Unix 叶子文件的校验与哈希绑定同一 `O_NOFOLLOW` 文件描述符。发布路径保留 canonical workspace root dirfd，逐组件使用 `openat`/`O_NOFOLLOW`，临时文件通过 dirfd-relative `O_EXCL` 创建并以 `renameat` 原子替换，发布前重检父目录 device/inode；`workspace.apply_patch` 已作为 daemon ToolSpec 通过统一管线接入，在 capability gate 通过后由 descriptor-bound writer 发布并再次校验 revision。它不启动任意子进程，因此该路径的直接边界是 descriptor/policy/approval，而非 process-tree sandbox。`Workspace::identity_snapshot` / `live_identity` / `revalidate_identity` 会在打开时记录并在每个路径操作及发布边界重新验证 canonical root、device、inode 和 digest；`revision_snapshot` / `revalidate_revision` 同样绑定文件 revision 与 device/inode，并在哈希前后拒绝对象变化。因此根目录替换、同字节新 inode、读入期间的文件变化、中间目录替换和最终目标符号链接重定向都会失败关闭，而不会被旧的缓存 digest 静默接受。残余限制是 POSIX `renameat` 没有“仅当目标仍为该 inode/hash 才替换”的条件原语：非合作写者可在最后重检后替换最终名称，或把已打开的父目录移出原路径；结果因此是 fd 对象绑定而非完整路径命名空间 CAS，调用方必须将不确定结果交给 reconciliation。
 
@@ -274,8 +277,10 @@ v1 只支持一层本地子智能体，默认并发上限 4。只读任务可共
 当前只有 descriptor store、Job 协议/状态投影、`invocation/reconcile` evidence-only
 命令和 plugin host 基线；执行型 MCP、Skills、调度器、SQLite FTS5 和子智能体均未实现。
 reconcile 只收束已知为 `Unknown` 且父 Turn 已终态的调用，不会重试任何 provider/tool，
-并要求有界的 operator evidence。交互 TUI 与无头 JSONL 对同一 ledger 的完整投影一致性
-门禁、artifact 引用/GC 和崩溃恢复 E2E 也仍待补齐。
+并要求有界的 operator evidence。行式 TUI 已提供 thread resume/list/fork、运行中
+steer/interrupt、reconcile、requested/effective mode、capability reason 和本地 plan/context
+控制面；`thread/compact` 仍明确返回 feature unavailable。交互 TUI 与无头 JSONL 对同一
+ledger 的完整投影一致性门禁、artifact 引用/GC 和随机崩溃恢复矩阵仍待补齐。
 
 ## 11. 实现状态
 
@@ -284,12 +289,12 @@ reconcile 只收束已知为 `Unknown` 且父 Turn 已终态的调用，不会�
 | JSON-RPC、stdio、Unix socket | 已实现每用户私有路径与连接前后身份检查 | 兼容矩阵、长期连接加固 |
 | SQLite append-only ledger | 已实现基线 | 迁移、备份、崩溃窗口验证 |
 | 纯 projection replay | 已实现基线和 lifecycle golden trace | 扩展 traces 与快照交叉校验 |
-| Workspace/Thread/Turn/Item | 已实现投影、基础命令与有界多轮 Agent loop；steer 在下一模型请求安全点注入；mutation/process 受统一 permit 管线约束 | compaction、完整恢复矩阵与真实仓库 E2E |
+| Workspace/Thread/Turn/Item | 已实现投影、基础命令与有界多轮 Agent loop；steer 在下一模型请求安全点注入；mutation/process 受统一 permit 管线约束；一个最小 Git fixture 覆盖错误 patch、失败检查、修复、复测与 diff | compaction、完整恢复矩阵、专用 Git/checkpoint 与多仓库任务 gate |
 | OpenAI-compatible provider | Chat Completions SSE adapter 已接 daemon；支持 tool calls，流/输出/状态/loop 均有硬上限；runtime/pipeline/provider 可注入 `CredentialBroker`，CLI 默认 `NoCredentialBroker` 并失败关闭未解析 handle | keychain/企业 secret store、原生 Responses/Anthropic/Gemini、契约/成本测试 |
-| 结构化 workspace 只读工具 | `list/read/search` 已接 daemon；严格参数、路径/链接防护、实际 effect、并发执行与模型顺序入账 | 更完整真实仓库 E2E 与预算调优 |
+| 结构化 workspace 只读工具 | `list/read/search` 已接 daemon；严格参数、路径/链接防护、实际 effect、并发执行与模型顺序入账 | 多仓库真实任务覆盖与预算调优 |
 | 工作区 patch/process/sandbox/artifact | Unix patch 使用 root dirfd、逐组件 `openat(O_NOFOLLOW)`、`O_EXCL` 临时文件和 `renameat`，并重检父目录身份；最终名称仍无 POSIX 条件 inode/hash CAS。process 仅在 capability probe + handshake 成功时广告（Linux PID namespace；macOS 关闭）；artifact 仍为原语 | 完整命名空间 CAS/hostile-writer 证据、跨平台 supervisor、artifact 输出/GC、endpoint 网络代理 |
 | Unknown invocation / reconciliation | `invocation/reconcile` 已实现：父 Turn 终态、`operator_review` 有界证据、幂等 ledger 事务；不重试 provider/tool | 自动化 operator UX、崩溃注入与 artifact 证据关联 |
-| TypeScript 终端客户端 | 安全 socket 连接、终端清理与原始 JSONL 已实现 | OpenTUI 体验、完整命令面与 JSONL parity 门禁 |
+| TypeScript 终端客户端 | 安全 socket 连接、终端清理、原始 JSONL、稳定命令 map、行式 slash commands、运行中 steer/interrupt、capability reason、EOF 和 grapheme width 已实现 | OpenTUI 体验、schema 自动生成与 JSONL parity 门禁 |
 | 插件 | 独立进程与摘要校验基线 | OS 沙箱、Rust policy/ledger 接入 |
 | Skills/MCP/FTS | 仅协议或 descriptor 占位；FTS 尚未实现 | M3 完整实现 |
 | Job | 规格与状态管理 | M4 调度、恢复和无交互审批 |
