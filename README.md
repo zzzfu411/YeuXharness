@@ -1,10 +1,48 @@
 # YeuX Harness
 
 > 安全、可重放、可解释的本地混合智能体平台。
+>
+> 纸本工作台，仪器只取密度。
+
+<p align="center">
+  <img src="assets/brand/yeux-fish-doodle-fallback.svg" alt="YeuX 鱼仔涂鸦" width="220">
+</p>
 
 YeuX Harness 面向个人高级用户，采用 Rust 权威运行时和 TypeScript 终端界面。它将模型输出、仓库内容、工具、MCP 与插件都视为不可信输入，并用事件账本、能力交集、精确审批和操作系统沙箱约束副作用。
 
 项目采用 Apache-2.0 许可证，首发目标平台为 macOS 和 Linux。
+
+**这是 v0.1 工程基线：只读 Agent loop 已贯通，但还不是可完成真实“读、改、测、修”的发布版。** 当前产品面是 TypeScript 终端客户端 `yeux` 通过 Unix socket / stdio 连接 Rust daemon `yeuxd`。默认主题是 Paper（`#D8D3CC` 纸面、`#8C3A2C` 朱印、`#2A2733` 夜墨）：Session Bar 常驻 cwd / thread / mode / model，事件走带 rail 的时间轨，审批是双线朱红（朱印）Approval Gate。下面的截图来自 Linux 上真实运行的客户端和 in-tree presenter fixtures，不是效果图，也没有伪造模型对话。未配置 `--provider-base-url` 和 `--model` 时，客户端在打印 Session Bar 与 Inspector 后以 `provider_unconfigured` 退出，**不会进入 `yeux ›`，也不会启动 Turn**。普通 TTY 不嵌入鱼仔位图；本仓库默认分支上的品牌资产是 [`assets/brand/yeux-fish-doodle-fallback.svg`](assets/brand/yeux-fish-doodle-fallback.svg)。设计说明见 [设计系统 / Paper Signal](docs/design/README.md)。
+
+## 产品界面
+
+### Session Bar
+
+`yeux` 连上 `yeuxd` 后先画 Session Bar（`CWD` / `THREAD` / `MODE` / `MODEL`，以及 trust 与 transport），再画 Inspector 的 policy 摘要。当前 VM 没有 provider 凭据，因此 `MODEL` 为 `unconfigured`，`MODE` 保持 `OBSERVE`，写工具与 named sandbox 均为 none。这不是空提示符：未配置 provider 时交互循环不会开始。
+
+![Session Bar、Inspector 与未配置诊断](docs/screenshots/yeux-session-bar.png)
+
+### Sequenced Timeline 与 Unknown
+
+时间轨按 `seq` 排列，模型与工具输出不会裸出现。`packages/tui/fixtures/paper-unknown-failed.jsonl` 是一条 inert 事件流（不启动 daemon、不调用 provider）：`UNKNOWN · RECONCILIATION REQUIRED` 会留在轨上，随后 Turn 以 `FAILED` 收束。
+
+![Unknown 保持可见的失败 Turn](docs/screenshots/yeux-unknown-failed.png)
+
+### 朱红 Approval Gate
+
+写入管线仍未打开。朱印门来自 presenter fixture replay，而不是一次真实写操作：`yeux replay packages/tui/fixtures/paper-approval-gate.jsonl` 把 `tool/proposed` 送进双线审批框，默认 DENY。
+
+![朱红双线 Approval Gate](docs/screenshots/yeux-approval-gate.png)
+
+`--ascii` 把 rail 和门框降到 copy-safe ASCII（`|` / `+-` / `?` / `>`），状态词与默认 DENY 不变：
+
+![ASCII Approval Gate](docs/screenshots/yeux-approval-ascii.png)
+
+### 命令行帮助
+
+`yeux --help` 列出交互会话、`run`、`replay` 与 `--ascii`。
+
+![yeux --help](docs/screenshots/yeux-help.png)
 
 ## 当前状态
 
@@ -102,6 +140,7 @@ packages/
   tui/             # 协议专用终端客户端，发布目标命令名为 `yeux`
   plugin-host/     # 进程外插件宿主基线
 docs/
+  screenshots/     # README 产品截图（实拍终端）
   adr/             # 已接受架构决策
 spec/traces/       # 黄金事件轨迹规范与后续 fixtures
 spec/schema/       # 从 Rust 公共类型生成的稳定 JSON Schema
