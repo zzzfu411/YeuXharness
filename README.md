@@ -2,9 +2,54 @@
 
 > 安全、可重放、可解释的本地混合智能体平台。
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/yeux-fish-doodle-nocturne-v2.png">
+    <img src="assets/brand/yeux-fish-doodle-paper-v2.png" alt="YeuX 鱼仔涂鸦" width="220">
+  </picture>
+</p>
+
 YeuX Harness 面向个人高级用户，采用 Rust 权威运行时和 TypeScript 终端界面。它将模型输出、仓库内容、工具、MCP 与插件都视为不可信输入，并用事件账本、能力交集、精确审批和操作系统沙箱约束副作用。
 
 项目采用 Apache-2.0 许可证，首发目标平台为 macOS 和 Linux。
+
+**这是 v0.1 工程基线：只读 Agent loop 已贯通，但还不是可完成真实“读、改、测、修”的发布版。** 当前产品面是 TypeScript 终端客户端 `yeux`（Paper Signal / Nocturne 行渲染器）通过 Unix socket / stdio 连接 Rust daemon `yeuxd`。下面的截图来自 Linux 上真实运行的客户端，不是效果图，也没有伪造模型对话。未配置 `--provider-base-url` 和 `--model` 时，Turn 会以 `provider_unconfigured` 诊断进入 `failed`。普通 TTY 不嵌入鱼仔位图；品牌资产见 [`assets/brand`](assets/brand/README.md) 与 [设计系统 / Paper Signal](docs/design/README.md)。
+
+## 产品界面
+
+### 会话启动
+
+`yeux` 连上 `yeuxd` 后给出 Nocturne 提示符。当前交互客户端没有 Session Bar 或 slash 命令面板；`/exit` 与 `/quit` 结束会话，其它输入都会启动一次 Turn。
+
+![交互会话启动](docs/screenshots/yeux-session.png)
+
+### 未配置 provider 的 Turn
+
+发送一句真实提示后，事件时间轨写入 ledger：`START TURN`、用户 Item、`CONTEXT`，然后是 `DIAGNOSTIC` 与 `FAILED`。没有模型回复，也没有工具调用，因为 daemon 没有配置 provider。
+
+![未配置 provider 的真实 Turn](docs/screenshots/yeux-unconfigured-turn.png)
+
+`yeux run` 走同一条人类终端时间轨，而不是 `--jsonl`：
+
+![yeux run 单次 Turn](docs/screenshots/yeux-run-turn.png)
+
+`--ascii` 会把时间轨降到 copy-safe ASCII glyph（`|` / `.` / `o` / `!!` / `ERR`），颜色角色不变：
+
+![yeux run --ascii](docs/screenshots/yeux-run-ascii.png)
+
+### 命令行帮助
+
+`yeux --help` 说明交互会话、`run` 与 `--ascii`。`yeuxd --help` 列出只读 Agent loop 的 provider 与预算开关。
+
+![yeux --help](docs/screenshots/yeux-help.png)
+
+![yeuxd --help](docs/screenshots/yeuxd-help.png)
+
+### daemon
+
+`yeuxd` 在 Unix socket 上监听，并把 state 目录与 provider 配置写到 stderr。当前 VM 没有可用的 provider 凭据，因此 provider 行是 `unconfigured`。
+
+![yeuxd 监听 Unix socket](docs/screenshots/yeuxd-listen.png)
 
 ## 当前状态
 
@@ -103,6 +148,9 @@ packages/
   plugin-host/     # 进程外插件宿主基线
 docs/
   adr/             # 已接受架构决策
+  design/          # Paper Signal 设计系统、token 与终端资产
+  screenshots/     # Linux 上真实运行的终端截图
+assets/brand/      # 鱼仔涂鸦 v2（paper / nocturne）与 SVG 回退
 spec/traces/       # 黄金事件轨迹规范与后续 fixtures
 spec/schema/       # 从 Rust 公共类型生成的稳定 JSON Schema
 ```
