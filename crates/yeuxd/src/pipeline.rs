@@ -7,7 +7,7 @@
 #![allow(clippy::result_large_err)]
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     future::Future,
     sync::{Arc, Mutex},
 };
@@ -31,6 +31,8 @@ use crate::tools::{
 };
 
 pub const DEFAULT_PREPARATION_TTL_SECONDS: i64 = 60;
+const MAX_ISSUED_TOKENS: usize = 4_096;
+const CONSUMED_TOKEN_RETENTION_SECONDS: i64 = DEFAULT_PREPARATION_TTL_SECONDS * 2;
 
 /// The four independent capability layers supplied to policy evaluation.
 #[derive(Clone, Debug)]
@@ -115,6 +117,8 @@ pub enum PipelineError {
     TokenConsumed,
     #[error("prepared invocation token has expired")]
     PreparationExpired,
+    #[error("prepared invocation token capacity is exhausted")]
+    TokenCapacity,
     #[error(transparent)]
     Approval(#[from] yeux_core::ApprovalError),
     #[error(transparent)]
@@ -135,12 +139,20 @@ impl PipelineError {
             Self::UnknownPreparedToken => "unknown_prepared_token",
             Self::TokenConsumed => "prepared_token_consumed",
             Self::PreparationExpired => "prepared_token_expired",
+            Self::TokenCapacity => "prepared_token_capacity",
             Self::Approval(error) => match error {
                 yeux_core::ApprovalError::MissingApproval => "approval_required",
                 _ => "approval_invalid",
             },
             Self::Credential(_) => "credential_unavailable",
         }
+    }
+
+    /// True only after a sealed adapter crossed its execution boundary and
+    /// could not prove a terminal outcome. Callers must persist `Unknown` and
+    /// require reconciliation instead of exposing a retryable failure.
+    pub const fn outcome_unknown(&self) -> bool {
+        matches!(self, Self::Tool(error) if error.outcome_unknown())
     }
 }
 
@@ -150,8 +162,15 @@ pub struct InvocationPipeline {
     registry: Arc<ToolRegistry>,
     sandbox: SandboxBackend,
     credentials: Arc<dyn CredentialBroker>,
-    issued_tokens: Arc<Mutex<BTreeMap<String, String>>>,
-    consumed_tokens: Arc<Mutex<BTreeSet<String>>>,
+    issued_tokens: Arc<Mutex<BTreeMap<String, IssuedTokenBinding>>>,
+    consumed_tokens: Arc<Mutex<BTreeMap<String, DateTime<Utc>>>>,
+}
+
+#[derive(Clone, Debug)]
+struct IssuedTokenBinding {
+    invocation_digest: String,
+    authority_binding_digest: String,
+    expires_at: DateTime<Utc>,
 }
 
 impl std::fmt::Debug for InvocationPipeline {
@@ -174,7 +193,7 @@ impl InvocationPipeline {
             sandbox,
             credentials,
             issued_tokens: Arc::new(Mutex::new(BTreeMap::new())),
-            consumed_tokens: Arc::new(Mutex::new(BTreeSet::new())),
+            consumed_tokens: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -250,6 +269,7 @@ impl InvocationPipeline {
             ))?;
         }
         let normalized_arguments = plan.normalized_arguments().clone();
+        let authority_binding_digest = plan.authority_binding_digest();
         let prepared_at = context.now;
         let expires_at = prepared_at + context.preparation_ttl;
         let invocation = PreparedInvocation {
@@ -274,13 +294,22 @@ impl InvocationPipeline {
                 None
             },
         };
-        self.issued_tokens
+        let mut issued = self
+            .issued_tokens
             .lock()
-            .map_err(|_| PipelineError::UnknownPreparedToken)?
-            .insert(
-                invocation.prepared_token.clone(),
-                prepared_binding_digest(&invocation),
-            );
+            .map_err(|_| PipelineError::UnknownPreparedToken)?;
+        prune_issued_tokens(&mut issued, Utc::now(), None);
+        if issued.len() >= MAX_ISSUED_TOKENS {
+            return Err(PipelineError::TokenCapacity);
+        }
+        issued.insert(
+            invocation.prepared_token.clone(),
+            IssuedTokenBinding {
+                invocation_digest: prepared_binding_digest(&invocation),
+                authority_binding_digest,
+                expires_at,
+            },
+        );
         Ok(invocation)
     }
 
@@ -386,7 +415,7 @@ impl InvocationPipeline {
     /// Execute only after exact binding validation and a fresh plan/revalidate
     /// pass. This is the only public path that obtains an execution permit.
     pub async fn execute(&self, invocation: PreparedInvocation) -> Result<Value, PipelineError> {
-        self.ensure_issued(&invocation)?;
+        let issued_binding = self.ensure_issued(&invocation)?;
         if invocation.expires_at < Utc::now() {
             return Err(PipelineError::PreparationExpired);
         }
@@ -439,32 +468,73 @@ impl InvocationPipeline {
         if digest_effects(revalidated.effects()) != invocation.effect_digest {
             return Err(PipelineError::BindingMismatch("effect_digest"));
         }
+        if revalidated.authority_binding_digest() != issued_binding.authority_binding_digest {
+            return Err(PipelineError::BindingMismatch("prepared_resource_binding"));
+        }
         {
             let mut consumed = self
                 .consumed_tokens
                 .lock()
                 .map_err(|_| PipelineError::TokenConsumed)?;
-            if !consumed.insert(invocation.prepared_token.clone()) {
+            let now = Utc::now();
+            prune_consumed_tokens(&mut consumed, now);
+            if consumed.contains_key(&invocation.prepared_token) {
                 return Err(PipelineError::TokenConsumed);
             }
+            if consumed.len() >= MAX_ISSUED_TOKENS {
+                if let Some(oldest) = consumed
+                    .iter()
+                    .min_by_key(|(_, consumed_at)| *consumed_at)
+                    .map(|(token, _)| token.clone())
+                {
+                    consumed.remove(&oldest);
+                }
+            }
+            consumed.insert(invocation.prepared_token.clone(), now);
         }
         let permit: ExecutionPermit = revalidated.into_execution_permit();
         Ok(self.registry.execute_async(permit).await?.into_value())
     }
 
-    fn ensure_issued(&self, invocation: &PreparedInvocation) -> Result<(), PipelineError> {
-        let issued = self
+    fn ensure_issued(
+        &self,
+        invocation: &PreparedInvocation,
+    ) -> Result<IssuedTokenBinding, PipelineError> {
+        let mut issued = self
             .issued_tokens
             .lock()
             .map_err(|_| PipelineError::UnknownPreparedToken)?;
+        prune_issued_tokens(&mut issued, Utc::now(), Some(&invocation.prepared_token));
         let Some(binding) = issued.get(&invocation.prepared_token) else {
+            let consumed = self
+                .consumed_tokens
+                .lock()
+                .map_err(|_| PipelineError::TokenConsumed)?;
+            if consumed.contains_key(&invocation.prepared_token) {
+                return Err(PipelineError::TokenConsumed);
+            }
             return Err(PipelineError::UnknownPreparedToken);
         };
-        if binding != &prepared_binding_digest(invocation) {
+        if binding.invocation_digest != prepared_binding_digest(invocation) {
             return Err(PipelineError::BindingMismatch("prepared_token_binding"));
         }
-        Ok(())
+        Ok(binding.clone())
     }
+}
+
+fn prune_issued_tokens(
+    issued: &mut BTreeMap<String, IssuedTokenBinding>,
+    now: DateTime<Utc>,
+    preserve: Option<&str>,
+) {
+    issued.retain(|token, binding| {
+        preserve.is_some_and(|value| value == token) || binding.expires_at >= now
+    });
+}
+
+fn prune_consumed_tokens(consumed: &mut BTreeMap<String, DateTime<Utc>>, now: DateTime<Utc>) {
+    let cutoff = now - Duration::seconds(CONSUMED_TOKEN_RETENTION_SECONDS);
+    consumed.retain(|_, consumed_at| *consumed_at >= cutoff);
 }
 
 fn prepared_binding_digest(invocation: &PreparedInvocation) -> String {
@@ -512,7 +582,12 @@ fn required_mode(effects: &EffectSet) -> Result<CapabilityMode, PipelineError> {
 fn sandbox_requirement(allow_workspace_write: bool, process: bool) -> SandboxRequirement {
     SandboxRequirement {
         filesystem_isolation: true,
-        process_isolation: process || allow_workspace_write,
+        // Structured workspace mutations are performed by the
+        // revision-bound WorkspaceTools executor, not by a child process.
+        // Requiring process-tree containment merely because a file is being
+        // changed would unnecessarily disable safe mutations on platforms
+        // (notably macOS Seatbelt) that lack a strict descendant supervisor.
+        process_isolation: process,
         network_isolation: true,
         allow_workspace_write,
         allow_network: false,
@@ -526,7 +601,7 @@ mod tests {
     use tempfile::tempdir;
     use yeux_runtime::{NoCredentialBroker, Workspace, WorkspaceTools};
 
-    use crate::tools::{WORKSPACE_LIST_TOOL_ID, WORKSPACE_READ_TOOL_ID};
+    use crate::tools::{PROCESS_RUN_TOOL_ID, WORKSPACE_LIST_TOOL_ID, WORKSPACE_READ_TOOL_ID};
 
     fn grants() -> PipelineGrants {
         let build = CapabilityGrant {
@@ -599,8 +674,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn process_requires_an_explicit_workspace_root_read_grant() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("secret.txt"), "secret\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let registry = Arc::new(
+            ToolRegistry::workspace_built_ins_with_config_and_process(
+                Arc::new(WorkspaceTools::new(workspace.clone())),
+                crate::tools::BuiltInToolRegistryConfig::read_only().with_hidden_process(),
+                Some(Arc::new(yeux_runtime::ProcessExecutor::new(
+                    SandboxBackend::Unavailable {
+                        reason: "policy-only test".into(),
+                    },
+                ))),
+            )
+            .unwrap(),
+        );
+        let pipeline = InvocationPipeline::new(
+            registry,
+            SandboxBackend::Unavailable {
+                reason: "policy-only test".into(),
+            },
+            Arc::new(NoCredentialBroker),
+        );
+        let mut restricted = context(&workspace);
+        restricted.grants.turn_override.filesystem_read = vec!["src".into()];
+        restricted.grants.turn_override.process = true;
+        restricted.grants.turn_override.mode = CapabilityMode::Build;
+        let executable = ["/bin/true", "/usr/bin/true"]
+            .into_iter()
+            .find(|path| fs::metadata(path).is_ok_and(|metadata| metadata.is_file()))
+            .expect("test host has a trusted true executable");
+        let result = pipeline.prepare(
+            PROCESS_RUN_TOOL_ID,
+            PROCESS_TOOL_VERSION,
+            serde_json::json!({"executable": executable}),
+            &restricted,
+        );
+        assert!(
+            matches!(result, Err(PipelineError::PolicyDenied { reasons }) if reasons.iter().any(|reason| reason.contains("filesystem read")))
+        );
+    }
+
     #[tokio::test]
-    async fn mutation_applies_inside_sandbox_wrap() {
+    async fn mutation_applies_after_capability_gate_with_descriptor_bound_writer() {
         let backend = SandboxBackend::detect();
         if matches!(backend, SandboxBackend::Unavailable { .. }) {
             return;
@@ -635,6 +753,297 @@ mod tests {
         assert_eq!(
             fs::read_to_string(directory.path().join("hello.txt")).unwrap(),
             "after\n"
+        );
+    }
+
+    /// Exercise a reproducible miniature repository task without a provider or
+    /// network dependency: read the live revision, reject an unapproved change,
+    /// approve a regression, observe a failing read-only shell assertion, then
+    /// approve a revision-bound repair and observe the assertion pass. This is
+    /// deliberately capability-gated: hosts without a verified filesystem and
+    /// strict process-tree sandbox (for example, macOS Seatbelt) report an
+    /// explicit skip; production code fails closed in that case.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_patch_process_repair_pipeline_uses_one_authority_path_when_capable() {
+        let backend = SandboxBackend::detect();
+        let capabilities = backend.capabilities();
+        if !capabilities.filesystem_isolation
+            || !capabilities.process_isolation
+            || !capabilities.network_isolation
+        {
+            eprintln!(
+                "skipping capability-gated authority-path fixture: backend={} capabilities={capabilities:?}",
+                backend.name()
+            );
+            return;
+        }
+        let executable = ["/bin/sh", "/usr/bin/sh"]
+            .into_iter()
+            .find(|path| fs::metadata(path).is_ok_and(|metadata| metadata.is_file()));
+        let Some(executable) = executable else {
+            eprintln!("skipping capability-gated authority-path fixture: shell unavailable");
+            return;
+        };
+
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("status.txt"), "PASS\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let tools = Arc::new(WorkspaceTools::new(workspace.clone()));
+        let registry = Arc::new(
+            ToolRegistry::workspace_built_ins_with_config_and_process(
+                Arc::clone(&tools),
+                crate::tools::BuiltInToolRegistryConfig::read_only()
+                    .with_hidden_workspace_mutations()
+                    .with_hidden_process(),
+                Some(Arc::new(yeux_runtime::ProcessExecutor::new(
+                    backend.clone(),
+                ))),
+            )
+            .unwrap(),
+        );
+        let pipeline = InvocationPipeline::new(registry, backend, Arc::new(NoCredentialBroker));
+
+        // Read through the authority pipeline so the patch binds to the exact
+        // revision returned by the daemon-owned read adapter.
+        let read_invocation = pipeline
+            .prepare(
+                WORKSPACE_READ_TOOL_ID,
+                WORKSPACE_TOOL_VERSION,
+                serde_json::json!({"path": "status.txt"}),
+                &context(&workspace),
+            )
+            .unwrap();
+        assert!(!InvocationPipeline::requires_approval(&read_invocation));
+        let read_result = pipeline.execute(read_invocation).await.unwrap();
+        assert_eq!(read_result["content"], "PASS\n");
+        let initial_revision = read_result["revision"]
+            .as_str()
+            .expect("workspace.read returns a BLAKE3 revision")
+            .to_owned();
+
+        // A rejected approval must not mutate the workspace. Re-read through
+        // the same authority path so every later patch binds the latest live
+        // revision rather than reusing stale client evidence.
+        let rejected_patch = pipeline
+            .prepare(
+                WORKSPACE_APPLY_PATCH_TOOL_ID,
+                WORKSPACE_TOOL_VERSION,
+                serde_json::json!({
+                    "path": "status.txt",
+                    "base_revision": initial_revision,
+                    "replacement": "BROKEN\n"
+                }),
+                &context(&workspace),
+            )
+            .unwrap();
+        assert!(InvocationPipeline::requires_approval(&rejected_patch));
+        assert!(matches!(
+            pipeline.approve_once(rejected_patch, false),
+            Err(PipelineError::ApprovalDenied)
+        ));
+        assert_eq!(
+            fs::read_to_string(directory.path().join("status.txt")).unwrap(),
+            "PASS\n"
+        );
+
+        let after_rejection_read = pipeline
+            .prepare(
+                WORKSPACE_READ_TOOL_ID,
+                WORKSPACE_TOOL_VERSION,
+                serde_json::json!({"path": "status.txt"}),
+                &context(&workspace),
+            )
+            .unwrap();
+        let after_rejection_read = pipeline.execute(after_rejection_read).await.unwrap();
+        assert_eq!(after_rejection_read["content"], "PASS\n");
+        let regression_base_revision = after_rejection_read["revision"]
+            .as_str()
+            .expect("re-read returns the current BLAKE3 revision")
+            .to_owned();
+        assert_eq!(regression_base_revision, initial_revision);
+
+        // Introduce a deliberate regression through a fresh approval. The
+        // unapproved execution attempt must fail before any permit is minted.
+        let regression = pipeline
+            .prepare(
+                WORKSPACE_APPLY_PATCH_TOOL_ID,
+                WORKSPACE_TOOL_VERSION,
+                serde_json::json!({
+                    "path": "status.txt",
+                    "base_revision": regression_base_revision,
+                    "replacement": "BROKEN\n"
+                }),
+                &context(&workspace),
+            )
+            .unwrap();
+        assert!(InvocationPipeline::requires_approval(&regression));
+        assert!(matches!(
+            pipeline.execute(regression.clone()).await,
+            Err(PipelineError::ApprovalRequired)
+        ));
+        let approved_regression = pipeline.approve_once(regression, true).unwrap();
+        let regression_result = pipeline.execute(approved_regression).await.unwrap();
+        assert_eq!(
+            regression_result["previous_revision"],
+            regression_base_revision
+        );
+        assert_eq!(
+            regression_result["revision"],
+            blake3::hash(b"BROKEN\n").to_hex().to_string()
+        );
+
+        // The process adapter is read-only. A fixed shell assertion observes
+        // the failed test as exit code 1; a non-zero test result is data, not a
+        // transport or pipeline error.
+        let assertion_arguments = serde_json::json!({
+            "executable": executable,
+            "arguments": ["-c", "test \"$(/bin/cat status.txt)\" = \"PASS\""],
+            "cwd": "."
+        });
+        let failed_test = pipeline
+            .prepare(
+                PROCESS_RUN_TOOL_ID,
+                PROCESS_TOOL_VERSION,
+                assertion_arguments.clone(),
+                &context(&workspace),
+            )
+            .unwrap();
+        assert!(InvocationPipeline::requires_approval(&failed_test));
+        assert!(failed_test.effects.filesystem_write.is_empty());
+        assert!(failed_test.effects.filesystem_delete.is_empty());
+        assert!(failed_test.effects.network.is_empty());
+        let failed_test = pipeline.approve_once(failed_test, true).unwrap();
+        let failed_test_result = pipeline.execute(failed_test).await.unwrap();
+        assert_eq!(failed_test_result["exit_code"], 1);
+        assert_eq!(failed_test_result["timed_out"], false);
+        assert_eq!(failed_test_result["stdout"], "");
+        assert_eq!(failed_test_result["stderr"], "");
+        assert_eq!(failed_test_result["stdout_truncated"], false);
+        assert_eq!(failed_test_result["stderr_truncated"], false);
+
+        // Bind the repair to a fresh read after the failed test, even though
+        // process.run is read-only and leaves the file revision unchanged.
+        let after_failure_read = pipeline
+            .prepare(
+                WORKSPACE_READ_TOOL_ID,
+                WORKSPACE_TOOL_VERSION,
+                serde_json::json!({"path": "status.txt"}),
+                &context(&workspace),
+            )
+            .unwrap();
+        let after_failure_read = pipeline.execute(after_failure_read).await.unwrap();
+        assert_eq!(after_failure_read["content"], "BROKEN\n");
+        let repair_base_revision = after_failure_read["revision"]
+            .as_str()
+            .expect("post-test read returns the current BLAKE3 revision")
+            .to_owned();
+        assert_eq!(
+            repair_base_revision,
+            regression_result["revision"].as_str().unwrap()
+        );
+
+        // Repair the regression through a second approval and a second
+        // revision-bound mutation. No stale base revision is reused.
+        let repair = pipeline
+            .prepare(
+                WORKSPACE_APPLY_PATCH_TOOL_ID,
+                WORKSPACE_TOOL_VERSION,
+                serde_json::json!({
+                    "path": "status.txt",
+                    "base_revision": repair_base_revision,
+                    "replacement": "PASS\n"
+                }),
+                &context(&workspace),
+            )
+            .unwrap();
+        assert!(InvocationPipeline::requires_approval(&repair));
+        let approved_repair = pipeline.approve_once(repair, true).unwrap();
+        let repair_result = pipeline.execute(approved_repair).await.unwrap();
+        assert_eq!(repair_result["previous_revision"], repair_base_revision);
+        assert_eq!(
+            repair_result["revision"],
+            blake3::hash(b"PASS\n").to_hex().to_string()
+        );
+
+        // A fresh process invocation proves the repaired contents satisfy the
+        // same fixed assertion and remains approval-gated and read-only.
+        let successful_test = pipeline
+            .prepare(
+                PROCESS_RUN_TOOL_ID,
+                PROCESS_TOOL_VERSION,
+                assertion_arguments,
+                &context(&workspace),
+            )
+            .unwrap();
+        assert!(InvocationPipeline::requires_approval(&successful_test));
+        assert!(successful_test.effects.filesystem_write.is_empty());
+        assert!(successful_test.effects.filesystem_delete.is_empty());
+        assert!(successful_test.effects.network.is_empty());
+        assert!(matches!(
+            pipeline.execute(successful_test.clone()).await,
+            Err(PipelineError::ApprovalRequired)
+        ));
+        let successful_test = pipeline.approve_once(successful_test, true).unwrap();
+        let successful_test_result = pipeline.execute(successful_test).await.unwrap();
+        assert_eq!(successful_test_result["exit_code"], 0);
+        assert_eq!(successful_test_result["timed_out"], false);
+        assert_eq!(successful_test_result["stdout"], "");
+        assert_eq!(successful_test_result["stderr"], "");
+        assert_eq!(successful_test_result["stdout_truncated"], false);
+        assert_eq!(successful_test_result["stderr_truncated"], false);
+        assert_eq!(
+            fs::read_to_string(directory.path().join("status.txt")).unwrap(),
+            "PASS\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mutation_pipeline_rejects_same_byte_inode_replacement_after_approval() {
+        let backend = SandboxBackend::detect();
+        if matches!(backend, SandboxBackend::Unavailable { .. }) {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("hello.txt"), "before\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let registry = Arc::new(
+            ToolRegistry::workspace_built_ins_with_config(
+                WorkspaceTools::new(workspace.clone()),
+                crate::tools::BuiltInToolRegistryConfig::read_only()
+                    .with_hidden_workspace_mutations(),
+            )
+            .unwrap(),
+        );
+        let pipeline = InvocationPipeline::new(registry, backend, Arc::new(NoCredentialBroker));
+        let base = blake3::hash(b"before\n").to_hex().to_string();
+        let prepared = pipeline
+            .prepare(
+                WORKSPACE_APPLY_PATCH_TOOL_ID,
+                WORKSPACE_TOOL_VERSION,
+                serde_json::json!({
+                    "path": "hello.txt",
+                    "base_revision": base,
+                    "replacement": "after\n"
+                }),
+                &context(&workspace),
+            )
+            .unwrap();
+        let prepared = pipeline.approve_once(prepared, true).unwrap();
+
+        let replacement = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        fs::write(replacement.path(), "before\n").unwrap();
+        fs::rename(replacement.path(), directory.path().join("hello.txt")).unwrap();
+
+        let error = pipeline.execute(prepared).await.unwrap_err();
+        assert!(matches!(
+            error,
+            PipelineError::BindingMismatch("prepared_resource_binding")
+        ));
+        assert_eq!(
+            fs::read_to_string(directory.path().join("hello.txt")).unwrap(),
+            "before\n"
         );
     }
 
@@ -752,6 +1161,96 @@ mod tests {
         assert!(matches!(
             pipeline.approve_once(forged, true),
             Err(PipelineError::BindingMismatch("prepared_token_binding"))
+        ));
+    }
+
+    #[tokio::test]
+    async fn expired_prepared_tokens_are_reclaimed_without_reviving_the_old_token() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("hello.txt"), "before\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let registry = Arc::new(
+            ToolRegistry::workspace_built_ins_with_config(
+                WorkspaceTools::new(workspace.clone()),
+                crate::tools::BuiltInToolRegistryConfig::read_only(),
+            )
+            .unwrap(),
+        );
+        let pipeline = InvocationPipeline::new(
+            registry,
+            SandboxBackend::Unavailable {
+                reason: "token lifecycle test is read-only".into(),
+            },
+            Arc::new(NoCredentialBroker),
+        );
+        let mut expired_context = context(&workspace);
+        expired_context.now = Utc::now() - Duration::minutes(2);
+        let expired = pipeline
+            .prepare(
+                WORKSPACE_LIST_TOOL_ID,
+                WORKSPACE_TOOL_VERSION,
+                serde_json::json!({}),
+                &expired_context,
+            )
+            .unwrap();
+        assert_eq!(pipeline.issued_tokens.lock().unwrap().len(), 1);
+
+        let fresh = pipeline
+            .prepare(
+                WORKSPACE_LIST_TOOL_ID,
+                WORKSPACE_TOOL_VERSION,
+                serde_json::json!({}),
+                &context(&workspace),
+            )
+            .unwrap();
+        assert_eq!(pipeline.issued_tokens.lock().unwrap().len(), 1);
+        assert!(matches!(
+            pipeline.approve_once(expired, true),
+            Err(PipelineError::UnknownPreparedToken)
+        ));
+        pipeline.execute(fresh).await.unwrap();
+    }
+
+    #[test]
+    fn prepared_token_capacity_fails_closed() {
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join("hello.txt"), "before\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let registry = Arc::new(
+            ToolRegistry::workspace_built_ins_with_config(
+                WorkspaceTools::new(workspace.clone()),
+                crate::tools::BuiltInToolRegistryConfig::read_only(),
+            )
+            .unwrap(),
+        );
+        let pipeline = InvocationPipeline::new(
+            registry,
+            SandboxBackend::Unavailable {
+                reason: "token capacity test is read-only".into(),
+            },
+            Arc::new(NoCredentialBroker),
+        );
+        {
+            let mut issued = pipeline.issued_tokens.lock().unwrap();
+            for index in 0..MAX_ISSUED_TOKENS {
+                issued.insert(
+                    format!("fixture-{index}"),
+                    IssuedTokenBinding {
+                        invocation_digest: "fixture".into(),
+                        authority_binding_digest: "fixture".into(),
+                        expires_at: Utc::now() + Duration::minutes(1),
+                    },
+                );
+            }
+        }
+        assert!(matches!(
+            pipeline.prepare(
+                WORKSPACE_LIST_TOOL_ID,
+                WORKSPACE_TOOL_VERSION,
+                serde_json::json!({}),
+                &context(&workspace),
+            ),
+            Err(PipelineError::TokenCapacity)
         ));
     }
 

@@ -444,6 +444,55 @@ impl EventLedger {
         )
     }
 
+    /// Atomically reconcile an invocation and persist the command receipt that
+    /// caused the reconciliation.  Keeping the typed invocation precondition
+    /// and the receipt in one SQLite transaction prevents a crash from
+    /// exposing a resolved invocation without a retryable command response,
+    /// or from allowing two command handlers to resolve the same `Unknown`
+    /// invocation with divergent evidence.
+    pub fn append_invocation_reconciliation_with_receipt(
+        &self,
+        input: NewInvocationOutcome,
+        receipt: NewCommandReceipt,
+    ) -> LedgerResult<CommandBatchAppendResult> {
+        validate_invocation_reconciliation(&input)?;
+        let (invocation_id, expected_state, expected_final_state) =
+            invocation_outcome_precondition(&input)?;
+        debug_assert_eq!(expected_state, InvocationState::Unknown);
+
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = get_command_receipt(&transaction, &receipt.command_id)? {
+            if existing.method == receipt.method && existing.params_digest == receipt.params_digest
+            {
+                transaction.commit()?;
+                return Ok(CommandBatchAppendResult {
+                    events: Vec::new(),
+                    response: existing.response,
+                    replayed: true,
+                });
+            }
+            return Err(LedgerError::CommandIdConflict {
+                command_id: receipt.command_id,
+            });
+        }
+
+        let events = Self::append_invocation_events_checked_transaction(
+            &transaction,
+            vec![input.tool_result, input.terminal_state],
+            invocation_id,
+            expected_state,
+            expected_final_state,
+        )?;
+        let stored_receipt = insert_command_receipt(&transaction, &receipt)?;
+        transaction.commit()?;
+        Ok(CommandBatchAppendResult {
+            events,
+            response: stored_receipt.response,
+            replayed: false,
+        })
+    }
+
     /// Append invocation events while holding the ledger mutex and transaction
     /// together with a state precondition.  This closes the check/append race
     /// that would otherwise let two recovery workers both emit a transition
@@ -458,6 +507,28 @@ impl EventLedger {
         let mut connection = self.lock()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
+        let events = Self::append_invocation_events_checked_transaction(
+            &transaction,
+            inputs,
+            invocation_id,
+            expected_state,
+            expected_final_state,
+        )?;
+        transaction.commit()?;
+        Ok(events)
+    }
+
+    /// Validate and append a typed invocation batch inside a caller-owned
+    /// transaction.  The transaction must already hold the ledger mutex when
+    /// used by the public helpers above, so the state check and event sequence
+    /// allocation remain one atomic operation.
+    fn append_invocation_events_checked_transaction(
+        transaction: &Transaction<'_>,
+        inputs: Vec<NewLedgerEvent>,
+        invocation_id: InvocationId,
+        expected_state: InvocationState,
+        expected_final_state: InvocationState,
+    ) -> LedgerResult<Vec<LedgerEvent>> {
         // A fully committed retry is allowed even though the projected state
         // has already advanced to its terminal value.  The batch helper still
         // compares every field and rejects divergent reuse.  We nevertheless
@@ -466,10 +537,10 @@ impl EventLedger {
         // proposal) could be replayed successfully and hide an unreplayable
         // ledger.
         let fully_existing = inputs.iter().try_fold(true, |all, input| {
-            Ok::<_, LedgerError>(all && get_event_by_id(&transaction, &input.event_id)?.is_some())
+            Ok::<_, LedgerError>(all && get_event_by_id(transaction, &input.event_id)?.is_some())
         })?;
         let invocation_id = invocation_id.to_string();
-        let found = invocation_state_in(&transaction, &invocation_id)?;
+        let found = invocation_state_in(transaction, &invocation_id)?;
         if !fully_existing {
             if found != Some(expected_state) {
                 return Err(LedgerError::InvocationStateConflict {
@@ -502,7 +573,7 @@ impl EventLedger {
         // projection replay.  Reject it while the same transaction still
         // holds the invocation state precondition.
         let Some((proposal_thread, proposal_turn, proposal_agent, proposal_call_id)) =
-            invocation_scope_in(&transaction, &invocation_id)?
+            invocation_scope_in(transaction, &invocation_id)?
         else {
             return Err(LedgerError::InvalidInvocationOutcome(
                 "invocation outcome requires a persisted proposal".into(),
@@ -525,8 +596,7 @@ impl EventLedger {
             ));
         }
 
-        let events = append_batch_transaction(&transaction, inputs)?;
-        transaction.commit()?;
+        let events = append_batch_transaction(transaction, inputs)?;
         Ok(events)
     }
 

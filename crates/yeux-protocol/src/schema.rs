@@ -33,6 +33,14 @@ pub fn stable_schema_bundle() -> BTreeMap<&'static str, RootSchema> {
     schemas.insert("TurnSteerParams", schema_for!(TurnSteerParams));
     schemas.insert("TurnInterruptParams", schema_for!(TurnInterruptParams));
     schemas.insert("AcceptedResult", schema_for!(AcceptedResult));
+    schemas.insert(
+        "InvocationReconcileParams",
+        schema_for!(InvocationReconcileParams),
+    );
+    schemas.insert(
+        "InvocationReconcileResult",
+        schema_for!(InvocationReconcileResult),
+    );
     schemas.insert("ModelListParams", schema_for!(ModelListParams));
     schemas.insert("ModelListResult", schema_for!(ModelListResult));
     schemas.insert("SkillListParams", schema_for!(SkillListParams));

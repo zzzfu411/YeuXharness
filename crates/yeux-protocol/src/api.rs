@@ -207,6 +207,29 @@ pub struct AcceptedResult {
 pub type TurnSteerResult = AcceptedResult;
 pub type TurnInterruptResult = AcceptedResult;
 
+/// Explicitly resolve an invocation whose external outcome could not be
+/// proven after execution started. This request is evidence-only: it must not
+/// cause the daemon to execute or retry the original tool invocation. The
+/// current daemon accepts only `operator_review` evidence; machine-verified
+/// receipt sources require a separate authority path.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct InvocationReconcileParams {
+    pub thread_id: ThreadId,
+    pub invocation_id: InvocationId,
+    pub outcome: InvocationReconciliationOutcome,
+    pub evidence: InvocationReconciliationEvidence,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct InvocationReconcileResult {
+    pub thread_id: ThreadId,
+    pub invocation_id: InvocationId,
+    pub state: InvocationState,
+    pub evidence: InvocationReconciliationEvidence,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelListParams {

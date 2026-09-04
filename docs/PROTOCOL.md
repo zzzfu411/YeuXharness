@@ -22,7 +22,7 @@ stdio 和 Unix socket 使用相同 framing：每行一个完整 UTF-8 JSON 对�
   "method": "initialize",
   "params": {
     "protocolVersion": { "major": 2, "minor": 0 },
-    "clientInfo": { "name": "yeux", "version": "0.1.0" },
+    "clientInfo": { "name": "yeux", "version": "0.1.0-alpha.1" },
     "capabilities": {
       "event_replay": true,
       "server_requests": true,
@@ -40,7 +40,7 @@ stdio 和 Unix socket 使用相同 framing：每行一个完整 UTF-8 JSON 对�
   "id": 1,
   "result": {
     "protocolVersion": { "major": 2, "minor": 0 },
-    "serverInfo": { "name": "yeuxd", "version": "0.1.0" },
+    "serverInfo": { "name": "yeuxd", "version": "0.1.0-alpha.1" },
     "capabilities": {
       "unix_socket": true,
       "jobs": false,
@@ -53,6 +53,13 @@ stdio 和 Unix socket 使用相同 framing：每行一个完整 UTF-8 JSON 对�
 ```
 
 能力标志只表示当前 daemon 已接通并可安全执行的闭环。当前 `jobs`、`plugins` 和 `subagents` 均为 `false`：Job 规格仍可由兼容客户端读取/管理，但后台调度、插件 authority 和子智能体执行尚未开放；`job/run` 返回 `feature unavailable`。
+
+副作用工具不会仅因协议类型存在就自动开放：`workspace.apply_patch` 与 `process.run`
+只在 host ceiling、workspace trust 和已探测的 sandbox 能力满足要求时出现在 provider
+ToolSpec 列表中；每次 process spawn 还必须通过一次有界 launcher handshake。Unix patch 的 descriptor-relative publication 关闭路径重定向，但
+POSIX 最终名称没有 inode/hash 条件 `rename`；该残余由 invocation revision evidence
+和 reconciliation 语义承接。macOS Seatbelt 不声明 arbitrary process isolation，因而
+`process.run` 在该平台保持隐藏。
 
 ## 2. 命令包络
 
@@ -85,7 +92,7 @@ stdio 和 Unix socket 使用相同 framing：每行一个完整 UTF-8 JSON 对�
 - 实验方法必须使用 `experimental/` 前缀，不进入稳定兼容承诺。
 - 每个事件独立携带 `schema_version`，replay 再次验证兼容性。
 
-Rust `stable_schema_bundle()` 从公共类型生成 JSON Schema map，54 份稳定 schema 已提交到 `spec/schema/`。`export_schemas --check` 与协议测试执行字节级漂移检查。Rust wire 类型仍是规范源；从 schema 自动生成完整 TypeScript 类型尚未完成，`packages/protocol` 目前是客户端使用部分的镜像。
+Rust `stable_schema_bundle()` 从公共类型生成 JSON Schema map，当前 56 份稳定 schema 已提交到 `spec/schema/`。`export_schemas --check` 与协议测试执行字节级漂移检查。Rust wire 类型仍是规范源；从 schema 自动生成完整 TypeScript 类型尚未完成，`packages/protocol` 目前是客户端使用部分的镜像。
 
 ## 4. 领域标识与事件顺序
 
@@ -173,23 +180,24 @@ Workspace、Thread、Turn、Item、Event 和 Command 的核心 ID 使用 UUIDv7�
 | `thread/archive` | 稳定 | 已实现；active Turn 时拒绝 |
 | `thread/compact` | 稳定声明 | 未实现，返回 feature unavailable |
 | `thread/subscribe` | 稳定 | 已实现；先固定并补发到 `replayedThroughSeq`，再进入实时订阅 |
-| `turn/start` | 稳定 | 创建 Turn 和用户 Item 后异步启动有界 runner；配置 provider 且协商 tool calls 时，只注册 `workspace.list/read/search`，持久化多轮模型流、ToolCall/ToolResult、Invocation 和 assistant Item；未配置时以 `provider_unconfigured` 失败；重启不重调 provider/tool，而是终结遗留 Turn 为 `failed` |
+| `turn/start` | 稳定 | 创建 Turn 和用户 Item 后异步启动有界 runner；配置 provider 且协商 tool calls 时始终注册 `workspace.list/read/search`，并仅在 sandbox capability/host ceiling 允许时附加受保护的 `workspace.apply_patch`、`process.run`；持久化多轮模型流、ToolCall/ToolResult、Invocation 和 assistant Item；未配置时以 `provider_unconfigured` 失败；重启不重调 provider/tool，而是终结遗留 Turn 为 `failed` |
 | `turn/steer` | 稳定 | 持久化 steering 事件；runner 在每次后续模型请求前重载 ledger，使消息在下一安全点进入当前 loop |
 | `turn/interrupt` | 稳定 | 已连接 runner 取消标志并持久化 `cancelling -> cancelled`（未跨越未决执行边界时）；取消后的 provider delta 不再落账；已越过执行边界但无法证明结果的工具会记录 `Unknown`/诊断，Turn 以 reconciliation-required 失败收束，禁止伪报成功、clean `Cancelled` 或静默重试 |
+| `invocation/reconcile` | 稳定 | 仅收束父 Turn 已终态且 invocation 为 `Unknown` 的调用；当前只接受 `operator_review` 有界证据，可验证 `artifact://` 引用；以幂等 ledger 事务写入 `tool/reconciled` 与 ToolResult，绝不重试原 provider/tool |
 | `model/list` | 稳定 | 读取 provider descriptor，不自动发现模型 |
 | `skill/list` | 稳定 | 读取 descriptor，不加载或执行 Skill |
 | `mcp/status` | 稳定 | 读取 descriptor，不连接 MCP server |
 | `plugin/list` | 稳定 | 读取 descriptor，不启动插件 |
 | `job/create|list|pause|resume` | 稳定 | 管理规格和投影状态，不调度执行 |
 | `job/run` | 稳定声明 | 未实现，返回 feature unavailable |
-| `approval/request` | 服务端请求 | 类型和 TS handler 已定义，daemon 尚不发出 |
+| `approval/request` | 服务端请求 | live connection 上由副作用 runner 发出；pending 请求、断线和 malformed response 均 deny-default；daemon 不接受客户端自带的 ApprovalBinding |
 | `user/input` | 服务端请求 | 类型和 TS handler 已定义，daemon 尚不发出 |
 
 ## 8. 服务端请求
 
 需要人类决策时，目标协议由 daemon 发起带 JSON-RPC `id` 的请求，而不是事件通知：
 
-- `approval/request`：携带完整 PreparedInvocation、effect digest 和解释；响应为拒绝或精确 ApprovalBinding。
+- `approval/request`：携带完整 PreparedInvocation、effect digest 和解释；响应为拒绝或精确 ApprovalBinding。连接级 daemon 会为需要审批的副作用调用发出该请求；断线、格式错误或未知响应 ID 均按 deny-default 处理。
 - `user/input`：携带 Thread、Turn、问题和 metadata；响应为 content blocks。
 
 无头 JSONL 客户端默认不能交互审批。后台 Job 没有预授权时必须进入 `waiting_for_approval`，不能将“无客户端响应”解释为允许。
@@ -204,7 +212,7 @@ persisted EventEnvelope[] -> validate -> deterministic Projection
 
 Replay 不表示重新发送 prompt，不重新执行 tool，不重新访问网络，也不尝试让外部世界回到历史状态。`thread/fork` 引用父历史点并创建新的局部事件序列；它同样不会重演父 Thread 的副作用。
 
-调用处于 `unknown` 且非幂等时，只能由 reconciliation 读取外部状态并请求用户决策。任何恢复路径都不得自动将它重新排队。
+调用处于 `unknown` 且非幂等时，只能由 reconciliation 收集并记录外部状态证据后请求用户决策。当前 `invocation/reconcile` 是 operator-review/evidence-only 路径：它验证可选 artifact URI、写入 `tool/reconciled`，不读取或重试原工具；未来 machine receipt authority 仍需单独设计。任何恢复路径都不得自动将它重新排队。
 
 ## 10. 错误
 

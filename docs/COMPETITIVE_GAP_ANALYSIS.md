@@ -296,7 +296,7 @@ P1
 
 | ID | 交付物与依赖 | 验收指标与测试 | 主要风险 | 明确不照搬 |
 |---|---|---|---|---|
-| **P0.1** | 从 Rust schema 生成完整 TypeScript protocol；补齐 command/event/tool/invocation 类型。依赖：现有 54 schema。 | CI 中 Rust schema、生成 TS、提交产物三者 byte-for-byte 无漂移；TS 能覆盖 daemon 全命令；旧客户端对兼容字段可忽略、主版本不匹配明确拒绝。 | 生成类型过于宽松；Rust/TS `null`、union、整数范围语义不一致。 | 不复制 Codex 当前庞大的实验协议面；只生成 YeuX 已实现或本阶段需要的稳定 surface。 |
+| **P0.1** | 从 Rust schema 生成完整 TypeScript protocol；补齐 command/event/tool/invocation 类型。依赖：现有 56 schema。 | CI 中 Rust schema、生成 TS、提交产物三者 byte-for-byte 无漂移；TS 能覆盖 daemon 全命令；旧客户端对兼容字段可忽略、主版本不匹配明确拒绝。 | 生成类型过于宽松；Rust/TS `null`、union、整数范围语义不一致。 | 不复制 Codex 当前庞大的实验协议面；只生成 YeuX 已实现或本阶段需要的稳定 surface。 |
 | **P0.2** | 在 `yeuxd` 建立唯一 `ToolRegistry`、`ToolExecutor` port 和 tool schema catalog；runner 不直接调用具体工具。依赖：P0.1、现有 `ToolSpec`/Invocation 类型。 | 未注册、重复名称、schema 无效、版本冲突均有稳定错误；tool schema 进入 provider 请求；任何 executor 调用都有 invocation/event identity；单元测试覆盖 registry 生命周期。 | 为赶进度在 runner 中写 `match tool_name`，以后绕过 policy。 | 不照搬“everything is a plugin”到 authority：registry 可扩展，但 ledger/policy/approval 不能替换。 |
 | **P0.3** | 将 `workspace.list/read/search` 包装成只读工具，并加入路径、单文件字节、文件数、深度、总扫描字节、结果条数和时限预算。依赖：P0.2。 | `..`、绝对路径、symlink、Unicode、超大文件、二进制、深目录、海量文件测试；所有预算命中时返回稳定、可恢复的裁剪结果；工具 effect 必须严格为 read-only。 | 当前 `read_to_end`、递归 list、全仓顺序 search 可被大仓库耗尽内存/时间；TOCTOU。 | 不复制通用 shell `find/grep/cat` 作为 P0 工具；先用结构化、可预算、可审计原语。 |
 | **P0.4** | 将单请求 runner 改为有上限的多步 loop：request→stream→tool calls→execute→results→next request。依赖：P0.2/P0.3。 | 限制每 Turn 最大 step、tool call、并发、总工具输出、总 provider bytes 与 wall time；碎片 tool JSON、重复 call ID、未知工具、部分失败、模型无终止响应均有测试；不会无限循环。 | 重复调用、结果顺序漂移、取消后残余事件落账、模型制造无限 tool loop。 | 不直接复制某 provider 的 tool-call wire；内部始终使用 provider-neutral `ModelEvent`/`PreparedInvocation`。 |

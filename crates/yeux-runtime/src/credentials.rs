@@ -9,12 +9,26 @@ use std::{collections::BTreeMap, sync::RwLock};
 
 use async_trait::async_trait;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum CredentialError {
-    #[error("credential handle is unavailable: {0}")]
+    // Keep the handle payload for typed matching, but never render it. A host
+    // adapter might accidentally pass a secret where an opaque handle was
+    // expected, and this error can cross logging/diagnostic boundaries.
+    #[error("credential handle is unavailable")]
     Unavailable(String),
     #[error("credential broker is unavailable")]
     BrokerUnavailable,
+}
+
+impl std::fmt::Debug for CredentialError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Handles are not bearer values, but they can still identify a
+        // tenant/provider and must not become accidental log material.
+        match self {
+            Self::Unavailable(_) => formatter.write_str("CredentialError::Unavailable(REDACTED)"),
+            Self::BrokerUnavailable => formatter.write_str("CredentialError::BrokerUnavailable"),
+        }
+    }
 }
 
 /// A short-lived secret value.  It cannot be serialized, displayed, or
@@ -109,6 +123,7 @@ mod tests {
     #[tokio::test]
     async fn missing_handles_fail_closed() {
         let error = NoCredentials.resolve("missing").await.unwrap_err();
-        assert!(matches!(error, CredentialError::Unavailable(handle) if handle == "missing"));
+        assert!(matches!(&error, CredentialError::Unavailable(handle) if handle == "missing"));
+        assert!(!format!("{error:?}").contains("missing"));
     }
 }

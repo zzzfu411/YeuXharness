@@ -1,7 +1,11 @@
 import type {
   CapabilityGrant,
   EventEnvelope,
+  InvocationReconcileResult,
+  ModelDescriptor,
   RuntimeDiagnosticNotification,
+  Thread,
+  ThreadReadResult,
   RuntimeMode,
 } from "@yeux/protocol";
 
@@ -189,6 +193,173 @@ export class EventRenderer {
     this.#write(`${paintTerminalText(text, "warning", this.#capabilities, this.#theme)}\n`);
   }
 
+  /**
+   * Render a control-plane result that is not itself an event envelope.
+   * Keeping this shape explicit makes JSONL reconciliation output
+   * distinguishable from replayed event records while preserving the same
+   * stream for scripts and operators.
+   */
+  public renderReconciliationResult(result: InvocationReconcileResult): void {
+    if (this.#jsonl) {
+      this.#write(`${JSON.stringify({
+        jsonrpc: "2.0",
+        method: "runtime/reconciliation",
+        params: result,
+      })}\n`);
+      return;
+    }
+
+    const summary = sanitizeTerminalLine(result.evidence.summary).replace(/[\r\n]+/g, " ");
+    const text = `[reconciled] invocation ${result.invocationId} → ${result.state} · ${summary}`;
+    this.#write(`${paintTerminalText(text, "success", this.#capabilities, this.#theme)}\n`);
+  }
+
+  /** Render a client control-plane action with the same human/JSONL split as events. */
+  public renderCommandResult(command: string, result: unknown, message?: string): void {
+    if (this.#jsonl) {
+      this.#write(`${JSON.stringify({
+        jsonrpc: "2.0",
+        method: "runtime/command",
+        params: { command, ...(message === undefined ? {} : { message }), result },
+      })}\n`);
+      return;
+    }
+    if (message !== undefined && message.length > 0) {
+      this.#write(`${paintTerminalText(message, "text", this.#capabilities, this.#theme)}\n`);
+    }
+  }
+
+  public renderModels(models: readonly ModelDescriptor[]): void {
+    if (this.#jsonl) {
+      this.renderCommandResult("model", { models });
+      return;
+    }
+    const lines = models.length === 0
+      ? ["MODELS", "  none configured"]
+      : ["MODELS", ...models.map((model) => {
+          const capabilities = Object.entries(model.capabilities)
+            .filter(([, value]) => value === true)
+            .map(([key]) => key)
+            .join(", ");
+          return `  ${singleLine(model.provider)}/${singleLine(model.model)}${capabilities.length > 0 ? ` · ${capabilities}` : ""}`;
+        })];
+    this.#write(`${lines.map((line, index) => paintTerminalText(
+      line,
+      index === 0 ? "focus" : "muted",
+      this.#capabilities,
+      this.#theme,
+    )).join("\n")}\n`);
+  }
+
+  public renderDoctor(state: {
+    readonly sandbox: string;
+    readonly writeTools: boolean;
+    readonly processTools: boolean;
+    readonly writeReason?: string;
+    readonly processReason?: string;
+    readonly hostCeiling?: string;
+    readonly transport?: string;
+  }): void {
+    const result = {
+      sandbox: state.sandbox,
+      write_tools: state.writeTools,
+      process_tools: state.processTools,
+      ...(state.writeReason === undefined ? {} : { write_tools_reason: state.writeReason }),
+      ...(state.processReason === undefined ? {} : { process_tools_reason: state.processReason }),
+      ...(state.hostCeiling === undefined ? {} : { host_ceiling: state.hostCeiling }),
+      ...(state.transport === undefined ? {} : { transport: state.transport }),
+    };
+    if (this.#jsonl) {
+      this.renderCommandResult("doctor", result);
+      return;
+    }
+    const lines = [
+      "DOCTOR",
+      `  transport ${singleLine(state.transport ?? "unknown")}`,
+      `  sandbox ${singleLine(state.sandbox)}`,
+      `  host ceiling ${singleLine(state.hostCeiling ?? "unknown")}`,
+      `  write tools ${state.writeTools ? "available" : `unavailable${state.writeReason === undefined ? "" : ` · ${singleLine(state.writeReason)}`}`}`,
+      `  process tools ${state.processTools ? "available" : `unavailable${state.processReason === undefined ? "" : ` · ${singleLine(state.processReason)}`}`}`,
+    ];
+    this.#write(`${lines.map((line, index) => paintTerminalText(
+      line,
+      index === 0 ? "focus" : "muted",
+      this.#capabilities,
+      this.#theme,
+    )).join("\n")}\n`);
+  }
+
+  public renderContext(result: ThreadReadResult): void {
+    if (this.#jsonl) {
+      this.renderCommandResult("context", result);
+      return;
+    }
+    const counts = new Map<string, number>();
+    for (const event of result.events) counts.set(event.kind, (counts.get(event.kind) ?? 0) + 1);
+    const kinds = [...counts.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([kind, count]) => `${kind}×${count}`)
+      .join("  ");
+    const lines = [
+      "CONTEXT",
+      `  thread ${singleLine(result.thread.id)} · status ${singleLine(result.thread.status)} · last seq ${result.thread.last_seq}`,
+      `  page ${result.events.length} event${result.events.length === 1 ? "" : "s"}${result.nextAfterSeq === undefined ? "" : ` · next after ${result.nextAfterSeq}`}`,
+      `  ${kinds.length === 0 ? "no events in page" : kinds}`,
+    ];
+    this.#write(`${lines.map((line, index) => paintTerminalText(
+      line,
+      index === 0 ? "focus" : "muted",
+      this.#capabilities,
+      this.#theme,
+    )).join("\n")}\n`);
+  }
+
+  public renderThreads(threads: readonly Thread[]): void {
+    if (this.#jsonl) {
+      this.renderCommandResult("threads", { threads });
+      return;
+    }
+    const lines = threads.length === 0
+      ? ["THREADS", "  none"]
+      : ["THREADS", ...threads.map((thread) =>
+          `  ${singleLine(thread.id)} · ${singleLine(thread.status)} · seq ${thread.last_seq}${thread.title === undefined ? "" : ` · ${singleLine(thread.title)}`}`)];
+    this.#write(`${lines.map((line, index) => paintTerminalText(
+      line,
+      index === 0 ? "focus" : "muted",
+      this.#capabilities,
+      this.#theme,
+    )).join("\n")}\n`);
+  }
+
+  public renderPlan(steps: readonly string[]): void {
+    if (this.#jsonl) {
+      this.renderCommandResult("plan", { steps });
+      return;
+    }
+    const lines = steps.length === 0
+      ? ["PLAN", "  (empty) · /plan add <step>"]
+      : ["PLAN", ...steps.map((step, index) => `  ${String(index + 1).padStart(2, "0")} · ${singleLine(step)}`)];
+    this.#write(`${lines.map((line, index) => paintTerminalText(
+      line,
+      index === 0 ? "focus" : "muted",
+      this.#capabilities,
+      this.#theme,
+    )).join("\n")}\n`);
+  }
+
+  public renderMode(mode: RuntimeMode, effective: RuntimeMode): void {
+    if (this.#jsonl) {
+      this.renderCommandResult("mode", { requested: mode, effective });
+      return;
+    }
+    this.#write(`${paintTerminalText(
+      `[mode] requested ${mode} · effective ${effective}`,
+      "text",
+      this.#capabilities,
+      this.#theme,
+    )}\n`);
+  }
+
   /** Emit the identity block once a thread and provider have been resolved. */
   public renderSessionBar(state: SessionBarState): void {
     if (this.#jsonl) return;
@@ -204,6 +375,12 @@ export class EventRenderer {
       this.#recentEvents.push(event);
       if (this.#recentEvents.length > 12) this.#recentEvents.shift();
     }
+  }
+
+  /** Replace the bounded inspector tail after an explicit resume/reload. */
+  public replaceEvents(events: readonly EventEnvelope[]): void {
+    this.#recentEvents.length = 0;
+    this.rememberEvents(events);
   }
 
   /** Emit a compact policy/event readout for an operator or test fixture. */

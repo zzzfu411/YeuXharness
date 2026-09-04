@@ -52,6 +52,27 @@ fn command_requires_the_jsonrpc_version_field() {
 }
 
 #[test]
+fn reconciliation_evidence_accepts_legacy_snake_case_and_emits_camel_case() {
+    let evidence: InvocationReconciliationEvidence = serde_json::from_value(json!({
+        "source": "operator_review",
+        "summary": "operator verified the external result",
+        "artifact_uri": "artifact://blake3/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }))
+    .unwrap();
+    assert_eq!(
+        evidence.artifact_uri.as_deref(),
+        Some("artifact://blake3/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
+
+    let wire = serde_json::to_value(evidence).unwrap();
+    assert!(wire.get("artifact_uri").is_none());
+    assert_eq!(
+        wire["artifactUri"],
+        "artifact://blake3/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+}
+
+#[test]
 fn event_envelope_flattens_kind_and_payload() {
     let thread_id = ThreadId::from_uuid(uuid("01890f9d-0000-7000-8000-000000000010"));
     let event = EventEnvelope::new(

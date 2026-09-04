@@ -34,11 +34,12 @@ use yeux_protocol::{
     WorkspaceTrust, PROTOCOL_VERSION,
 };
 use yeux_runtime::{
-    CoreProjectionError, EventLedger, LedgerError, LedgerEvent, NewInvocationOutcome,
-    NewInvocationUnknown, NewInvocationUnknownOutcome, NewLedgerEvent, NoCredentialBroker,
-    ProcessExecutor, SandboxBackend, SearchOperationBudget, Workspace as RuntimeWorkspace,
-    WorkspaceSearchControl, WorkspaceTools, WORKSPACE_SEARCH_DEFAULT_OPERATION_BUDGET,
-    WORKSPACE_SEARCH_HARD_OPERATION_LIMIT, WORKSPACE_SEARCH_TOOL_ID,
+    CoreProjectionError, CredentialBroker, EventLedger, LedgerError, LedgerEvent,
+    NewInvocationOutcome, NewInvocationUnknown, NewInvocationUnknownOutcome, NewLedgerEvent,
+    NoCredentialBroker, ProcessExecutor, SandboxBackend, SearchOperationBudget,
+    Workspace as RuntimeWorkspace, WorkspaceSearchControl, WorkspaceTools,
+    WORKSPACE_SEARCH_DEFAULT_OPERATION_BUDGET, WORKSPACE_SEARCH_HARD_OPERATION_LIMIT,
+    WORKSPACE_SEARCH_TOOL_ID,
 };
 
 use crate::grants::resolve_grant_layers;
@@ -56,7 +57,11 @@ pub trait ApprovalHandler: Send + Sync {
 }
 
 fn pipeline_error(error: PipelineError) -> ToolRegistryError {
-    ToolRegistryError::Authority(error.to_string())
+    if error.outcome_unknown() {
+        ToolRegistryError::OutcomeUnknown(error.to_string())
+    } else {
+        ToolRegistryError::Authority(error.to_string())
+    }
 }
 
 const DEFAULT_MAX_MODEL_ROUNDS: usize = 8;
@@ -274,6 +279,7 @@ pub struct TurnRunner {
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGenerator>,
     provider: Option<ModelProviderConfig>,
+    credentials: Arc<dyn CredentialBroker>,
     host_ceiling: CapabilityMode,
     mutation_gate: Arc<Mutex<()>>,
     tool_workers: Arc<Semaphore>,
@@ -318,12 +324,39 @@ impl TurnRunner {
         mutation_gate: Arc<Mutex<()>>,
         host_ceiling: CapabilityMode,
     ) -> Self {
+        Self::new_with_host_ceiling_and_credentials(
+            ledger,
+            events,
+            clock,
+            ids,
+            provider,
+            mutation_gate,
+            host_ceiling,
+            Arc::new(NoCredentialBroker),
+        )
+    }
+
+    /// Construct a runner with the daemon-owned credential authority. The
+    /// broker is passed only to runtime invocation/provider adapters; it is
+    /// never part of a model request or a tool execution argument.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_host_ceiling_and_credentials(
+        ledger: Arc<EventLedger>,
+        events: broadcast::Sender<EventEnvelope>,
+        clock: Arc<dyn Clock>,
+        ids: Arc<dyn IdGenerator>,
+        provider: Option<ModelProviderConfig>,
+        mutation_gate: Arc<Mutex<()>>,
+        host_ceiling: CapabilityMode,
+        credentials: Arc<dyn CredentialBroker>,
+    ) -> Self {
         Self {
             ledger,
             events,
             clock,
             ids,
             provider,
+            credentials,
             host_ceiling,
             mutation_gate,
             tool_workers: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENT_TOOL_WORKERS)),
@@ -494,25 +527,46 @@ impl TurnRunner {
                         );
                     }
                     let sandbox = SandboxBackend::detect();
-                    let sandbox_ready = sandbox
+                    // Workspace mutations execute through the structured
+                    // revision-bound WorkspaceTools path and therefore need
+                    // filesystem/network policy evidence, but not the strict
+                    // process-tree capability required by arbitrary
+                    // process.run.  Keep the two advertisements independent:
+                    // macOS Seatbelt may safely support the former while its
+                    // lack of a job/PID supervisor keeps the latter closed.
+                    let write_sandbox_ready = sandbox
+                        .ensure(yeux_runtime::SandboxRequirement {
+                            filesystem_isolation: true,
+                            process_isolation: false,
+                            network_isolation: true,
+                            allow_workspace_write: true,
+                            allow_network: false,
+                        })
+                        .is_ok();
+                    let process_sandbox_ready = sandbox
                         .ensure(yeux_runtime::SandboxRequirement {
                             filesystem_isolation: true,
                             process_isolation: true,
                             network_isolation: true,
-                            allow_workspace_write: true,
+                            allow_workspace_write: false,
                             allow_network: false,
                         })
                         .is_ok();
                     let config = BuiltInToolRegistryConfig::read_only()
                         .with_hidden_workspace_mutations()
                         .with_hidden_process();
-                    let config = if sandbox_ready && self.host_ceiling != CapabilityMode::Observe {
-                        config
-                            .with_advertised_workspace_mutations()
-                            .with_advertised_process()
-                    } else {
-                        config
-                    };
+                    let config =
+                        if write_sandbox_ready && self.host_ceiling != CapabilityMode::Observe {
+                            config.with_advertised_workspace_mutations()
+                        } else {
+                            config
+                        };
+                    let config =
+                        if process_sandbox_ready && self.host_ceiling != CapabilityMode::Observe {
+                            config.with_advertised_process()
+                        } else {
+                            config
+                        };
                     let runtime_tools = Arc::new(WorkspaceTools::new(workspace));
                     let process_executor = Arc::new(ProcessExecutor::new(sandbox.clone()));
                     match ToolRegistry::workspace_built_ins_with_config_and_process(
@@ -531,7 +585,7 @@ impl TurnRunner {
                             let pipeline = Arc::new(InvocationPipeline::new(
                                 Arc::clone(&registry),
                                 sandbox,
-                                Arc::new(NoCredentialBroker),
+                                Arc::clone(&self.credentials),
                             ));
                             (Some(registry), Some((pipeline, grants)))
                         }
@@ -1146,16 +1200,11 @@ impl TurnRunner {
                             InvocationState::Started,
                             None,
                         ),
-                        ToolWorkerWait::Completed(Ok(Err(error))) => (
-                            json!({
-                                "code": error.provider_code(),
-                                "message": bounded_message(&error.to_string()),
-                            }),
-                            true,
-                            Some(InvocationState::Failed),
-                            InvocationState::Started,
-                            Some(bounded_message(&error.to_string())),
-                        ),
+                        ToolWorkerWait::Completed(Ok(Err(error))) => {
+                            let classified = classify_tool_execution_error(&error);
+                            unknown = classified.2.is_none();
+                            classified
+                        }
                         ToolWorkerWait::Completed(Err(error)) => {
                             // A JoinError only proves that Tokio could not
                             // return the closure's value.  The closure may
@@ -1225,18 +1274,26 @@ impl TurnRunner {
                         "code": "agent_loop_tool_result_limit",
                         "message": "the turn exceeded its total tool-result byte budget"
                     });
-                    // The invocation that crossed the aggregate budget is
-                    // failed regardless of whether it was already started:
-                    // Proposed/Prepared failures must not be left dangling
-                    // when the turn is terminated below.
+                    // The aggregate result budget controls what can be fed
+                    // back to the provider; it does not rewrite the outcome
+                    // of an invocation that already returned. In particular,
+                    // a successful side effect must remain Completed so a
+                    // later operator/model cannot mistake it for a safe retry.
+                    let budget_terminal_state = terminal_state
+                        .expect("unknown outcomes are handled before result budgeting");
+                    let budget_reason = if budget_terminal_state == InvocationState::Completed {
+                        "tool completed but its result exceeded the turn byte budget"
+                    } else {
+                        "tool failed and its result exceeded the turn byte budget"
+                    };
                     self.persist_invocation_outcome(
                         &context,
                         invocation,
-                        InvocationState::Failed,
+                        budget_terminal_state,
                         from_state,
                         budget_output.clone(),
-                        true,
-                        Some("turn tool-result byte budget exceeded".into()),
+                        budget_terminal_state != InvocationState::Completed,
+                        Some(budget_reason.into()),
                     )?;
 
                     // Resolve every later invocation before making the parent
@@ -3066,10 +3123,39 @@ fn classify_tool_worker_join_error(
     )
 }
 
+/// Preserve the execution adapter's certainty classification. Errors that can
+/// only occur after a side effect may have happened must remain non-terminal;
+/// pre-execution validation and policy errors are safe terminal failures.
+fn classify_tool_execution_error(
+    error: &ToolRegistryError,
+) -> (
+    Value,
+    bool,
+    Option<InvocationState>,
+    InvocationState,
+    Option<String>,
+) {
+    let message = bounded_message(&error.to_string());
+    (
+        json!({
+            "code": error.provider_code(),
+            "message": message.clone(),
+        }),
+        true,
+        (!error.outcome_unknown()).then_some(InvocationState::Failed),
+        InvocationState::Started,
+        Some(message),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::VecDeque, future::Future, path::Path, pin::Pin, sync::Mutex as TestMutex,
+        collections::VecDeque,
+        future::Future,
+        path::Path,
+        pin::Pin,
+        sync::{atomic::AtomicUsize, Mutex as TestMutex},
     };
 
     use chrono::{DateTime, Utc};
@@ -3358,6 +3444,294 @@ mod tests {
         )
     }
 
+    #[derive(Default)]
+    struct ApproveEverySideEffect {
+        requests: AtomicUsize,
+    }
+
+    impl ApprovalHandler for ApproveEverySideEffect {
+        fn request<'a>(
+            &'a self,
+            params: ApprovalRequestParams,
+        ) -> Pin<Box<dyn Future<Output = ApprovalRequestResult> + Send + 'a>> {
+            assert!(!params.invocation.effects.is_read_only());
+            self.requests.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async {
+                ApprovalRequestResult {
+                    approved: true,
+                    approval: None,
+                }
+            })
+        }
+    }
+
+    /// A capability-gated end-to-end fixture for the first useful coding
+    /// slice. It uses a temporary git repository, a scripted provider, the
+    /// daemon runner and the real approval/pipeline boundary: read the
+    /// fixture, record a plan, introduce a regression with a revision-bound
+    /// patch, run a read-only test, observe the failure, repair and rerun the
+    /// test, inspect the final Git diff, then finish with a durable assistant
+    /// message. Linux is the only supported platform for this arbitrary
+    /// process assertion today; macOS remains an explicit observe-only
+    /// residual until a descendant supervisor is available.
+    #[tokio::test]
+    async fn real_repository_read_patch_test_fix_loop_is_durable() {
+        use crate::tools::{
+            PROCESS_RUN_TOOL_ID, WORKSPACE_APPLY_PATCH_TOOL_ID, WORKSPACE_READ_TOOL_ID,
+        };
+        if !cfg!(target_os = "linux") {
+            eprintln!("skipping real repository fixture: strict process supervision is Linux-only");
+            return;
+        }
+        let backend = SandboxBackend::detect();
+        let capabilities = backend.capabilities();
+        if !capabilities.filesystem_isolation
+            || !capabilities.process_isolation
+            || !capabilities.network_isolation
+        {
+            eprintln!(
+                "skipping real repository fixture: backend={} capabilities={capabilities:?}",
+                backend.name()
+            );
+            return;
+        }
+        let shell = ["/bin/sh", "/usr/bin/sh"]
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .find(|path| std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()));
+        let Some(shell) = shell else {
+            eprintln!("skipping real repository fixture: shell unavailable");
+            return;
+        };
+
+        let repository = tempfile::tempdir().unwrap();
+        let git_status = std::process::Command::new("git")
+            .args([
+                "init",
+                "--quiet",
+                repository.path().to_string_lossy().as_ref(),
+            ])
+            .status();
+        if !git_status.is_ok_and(|status| status.success()) {
+            eprintln!("skipping real repository fixture: git init unavailable");
+            return;
+        }
+        std::fs::write(repository.path().join("answer.txt"), "41\n").unwrap();
+        let git = ["/usr/bin/git", "/bin/git"]
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .find(|path| std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()));
+        let Some(git) = git else {
+            eprintln!("skipping real repository fixture: git executable unavailable");
+            return;
+        };
+        let git_setup = std::process::Command::new(&git)
+            .current_dir(repository.path())
+            .args(["add", "--", "answer.txt"])
+            .status()
+            .and_then(|status| {
+                if !status.success() {
+                    return Err(std::io::Error::other("git add failed"));
+                }
+                std::process::Command::new(&git)
+                    .current_dir(repository.path())
+                    .args([
+                        "-c",
+                        "user.name=YeuX fixture",
+                        "-c",
+                        "user.email=fixture@example.invalid",
+                        "commit",
+                        "--quiet",
+                        "-m",
+                        "baseline",
+                    ])
+                    .status()
+            });
+        if !git_setup.is_ok_and(|status| status.success()) {
+            eprintln!("skipping real repository fixture: git baseline commit unavailable");
+            return;
+        }
+        let original_revision = blake3::hash(b"41\n").to_hex().to_string();
+        let invalid_revision = blake3::hash(b"forty-two\n").to_hex().to_string();
+
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![
+                ModelEvent::ToolCallDelta {
+                    call_id: "read-status".into(),
+                    name: WORKSPACE_READ_TOOL_ID.into(),
+                    json_delta: "{\"path\":\"answer.txt\"}".into(),
+                },
+                ModelEvent::Completed {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                ModelEvent::TextDelta {
+                    text: "Plan: update the answer, run the check, repair any failure, then inspect the final diff.\n".into(),
+                },
+                ModelEvent::ToolCallDelta {
+                    call_id: "introduce-regression".into(),
+                    name: WORKSPACE_APPLY_PATCH_TOOL_ID.into(),
+                    json_delta: format!(
+                        "{{\"path\":\"answer.txt\",\"base_revision\":\"{original_revision}\",\"replacement\":\"forty-two\\n\"}}"
+                    ),
+                },
+                ModelEvent::Completed {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                ModelEvent::ToolCallDelta {
+                    call_id: "test-fails".into(),
+                    name: PROCESS_RUN_TOOL_ID.into(),
+                    json_delta: serde_json::json!({
+                        "executable": shell,
+                        "arguments": ["-c", "test \"$(cat answer.txt)\" = \"42\""],
+                        "cwd": "."
+                    })
+                    .to_string(),
+                },
+                ModelEvent::Completed {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                ModelEvent::ToolCallDelta {
+                    call_id: "repair-regression".into(),
+                    name: WORKSPACE_APPLY_PATCH_TOOL_ID.into(),
+                    json_delta: format!(
+                        "{{\"path\":\"answer.txt\",\"base_revision\":\"{invalid_revision}\",\"replacement\":\"42\\n\"}}"
+                    ),
+                },
+                ModelEvent::Completed {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                ModelEvent::ToolCallDelta {
+                    call_id: "test-pass".into(),
+                    name: PROCESS_RUN_TOOL_ID.into(),
+                    json_delta: serde_json::json!({
+                        "executable": shell,
+                        "arguments": ["-c", "test \"$(cat answer.txt)\" = \"42\""],
+                        "cwd": "."
+                    })
+                    .to_string(),
+                },
+                ModelEvent::Completed {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                ModelEvent::ToolCallDelta {
+                    call_id: "show-final-diff".into(),
+                    name: PROCESS_RUN_TOOL_ID.into(),
+                    json_delta: serde_json::json!({
+                        "executable": git,
+                        "arguments": ["--no-ext-diff", "--no-color", "diff", "--", "answer.txt"],
+                        "cwd": "."
+                    })
+                    .to_string(),
+                },
+                ModelEvent::Completed {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                ModelEvent::TextDelta {
+                    text: "read, repaired, and verified".into(),
+                },
+                ModelEvent::Completed {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        ]));
+        let fixture = fixture_at(Some(provider_config(provider.clone())), repository.path());
+        let approval = Arc::new(ApproveEverySideEffect::default());
+        let result = fixture
+            .runner
+            .run_with_approval(
+                TurnRunSpec {
+                    thread_id: fixture.thread_id,
+                    turn_id: fixture.turn_id,
+                },
+                &NeverCancelled,
+                Some(approval.clone()),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(result, TurnRunResult::Completed { .. }));
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join("answer.txt")).unwrap(),
+            "42\n"
+        );
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 7);
+        drop(requests);
+        assert_eq!(approval.requests.load(Ordering::Relaxed), 5);
+
+        let projection = fixture.ledger.project_core().unwrap();
+        let mut tool_ids = projection
+            .invocations
+            .values()
+            .map(|invocation| invocation.tool_id.as_str())
+            .collect::<Vec<_>>();
+        tool_ids.sort_unstable();
+        assert_eq!(
+            tool_ids,
+            [
+                PROCESS_RUN_TOOL_ID,
+                PROCESS_RUN_TOOL_ID,
+                PROCESS_RUN_TOOL_ID,
+                WORKSPACE_APPLY_PATCH_TOOL_ID,
+                WORKSPACE_APPLY_PATCH_TOOL_ID,
+                WORKSPACE_READ_TOOL_ID,
+            ]
+        );
+        assert!(projection
+            .invocations
+            .values()
+            .all(|invocation| invocation.state == InvocationState::Completed));
+        let mut exit_codes = projection
+            .items
+            .values()
+            .filter(|item| item.kind == ItemKind::ToolResult)
+            .filter_map(|item| item.content["content"][0]["content"]["exit_code"].as_i64())
+            .collect::<Vec<_>>();
+        exit_codes.sort_unstable();
+        assert_eq!(exit_codes, [0, 0, 1]);
+        assert!(projection.items.values().any(|item| {
+            item.kind == ItemKind::ToolResult
+                && item.content["content"][0]["content"]["stdout"]
+                    .as_str()
+                    .is_some_and(|diff| {
+                        diff.contains("--- a/answer.txt")
+                            && diff.contains("-41")
+                            && diff.contains("+42")
+                    })
+        }));
+        assert!(projection.items.values().any(|item| {
+            item.kind == ItemKind::ToolCall
+                && item.content["content"].as_array().is_some_and(|content| {
+                    content.iter().any(|block| {
+                        block["type"] == "text"
+                            && block["text"]
+                                .as_str()
+                                .is_some_and(|text| text.starts_with("Plan: update the answer"))
+                    })
+                })
+        }));
+        assert!(projection.items.values().any(|item| {
+            item.kind == ItemKind::AssistantMessage
+                && item.content["content"][0]["text"] == "read, repaired, and verified"
+        }));
+        assert_eq!(
+            projection.turns[&fixture.turn_id].state,
+            TurnState::Completed
+        );
+    }
+
     #[tokio::test]
     async fn panicking_tool_worker_join_is_classified_as_bounded_unknown() {
         // `spawn_blocking` catches a panic as JoinError.  The worker may have
@@ -3385,6 +3759,26 @@ mod tests {
         assert_eq!(output["code"], "tool_outcome_unknown");
         assert!(output["message"].as_str().unwrap().len() <= 4_096);
         assert!(reason.unwrap().len() <= 4_096);
+    }
+
+    #[test]
+    fn execution_uncertainty_is_not_flattened_into_terminal_failure() {
+        let unknown = pipeline_error(PipelineError::Tool(ToolRegistryError::OutcomeUnknown(
+            "descendants may survive".into(),
+        )));
+        assert!(unknown.outcome_unknown());
+        let (output, is_error, terminal_state, from_state, reason) =
+            classify_tool_execution_error(&unknown);
+        assert!(is_error);
+        assert_eq!(terminal_state, None);
+        assert_eq!(from_state, InvocationState::Started);
+        assert_eq!(output["code"], "tool_outcome_unknown");
+        assert!(reason.unwrap().contains("descendants may survive"));
+
+        let failed = ToolRegistryError::InvalidProcessArguments("bad cwd".into());
+        let (output, _, terminal_state, _, _) = classify_tool_execution_error(&failed);
+        assert_eq!(terminal_state, Some(InvocationState::Failed));
+        assert_eq!(output["code"], "process_invalid_arguments");
     }
 
     #[test]
@@ -4559,14 +4953,32 @@ mod tests {
         ));
         let projection = fixture.ledger.project_core().unwrap();
         assert_eq!(projection.invocations.len(), 2);
-        // The invocation whose result crossed the aggregate budget is a
-        // durable Failed outcome; sibling workers that were already started
-        // but whose result was intentionally not awaited are conservatively
-        // Unknown rather than being misreported as Failed.
+        // The invocation whose successful result crossed the aggregate budget
+        // remains durably Completed. Sibling workers that were already
+        // started but whose result was intentionally not awaited are
+        // conservatively Unknown rather than being misreported as Failed.
         assert!(projection.invocations.values().all(|invocation| matches!(
             invocation.state,
-            InvocationState::Failed | InvocationState::Unknown
+            InvocationState::Completed | InvocationState::Unknown
         )));
+        let completed = projection
+            .invocations
+            .values()
+            .find(|invocation| invocation.state == InvocationState::Completed)
+            .expect("the integrated successful result remains completed");
+        let completed_result = projection
+            .items
+            .values()
+            .find(|item| {
+                item.kind == ItemKind::ToolResult
+                    && item.content["invocation_id"] == completed.invocation_id.to_string()
+            })
+            .expect("the completed invocation keeps an atomic tool result");
+        assert_eq!(completed_result.content["content"][0]["is_error"], false);
+        assert_eq!(
+            completed_result.content["content"][0]["content"]["code"],
+            "agent_loop_tool_result_limit"
+        );
         assert_eq!(projection.turns[&fixture.turn_id].state, TurnState::Failed);
     }
 

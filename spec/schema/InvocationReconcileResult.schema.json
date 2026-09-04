@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InvocationReconcileResult",
+  "type": "object",
+  "required": [
+    "evidence",
+    "invocationId",
+    "state",
+    "threadId"
+  ],
+  "properties": {
+    "evidence": {
+      "$ref": "#/definitions/InvocationReconciliationEvidence"
+    },
+    "invocationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "state": {
+      "$ref": "#/definitions/InvocationState"
+    },
+    "threadId": {
+      "type": "string",
+      "format": "uuid"
+    }
+  },
+  "definitions": {
+    "InvocationReconciliationEvidence": {
+      "description": "Durable evidence explaining how an unknown invocation was reconciled.",
+      "type": "object",
+      "required": [
+        "source",
+        "summary"
+      ],
+      "properties": {
+        "artifactUri": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "Stable identifier for the reconciliation mechanism, such as an executor receipt lookup or an operator review workflow.",
+          "type": "string"
+        },
+        "summary": {
+          "description": "Bounded human-readable conclusion. Large receipts belong in the artifact store and are referenced by `artifactUri`.",
+          "type": "string"
+        }
+      }
+    },
+    "InvocationState": {
+      "type": "string",
+      "enum": [
+        "proposed",
+        "approved",
+        "prepared",
+        "started",
+        "completed",
+        "failed",
+        "cancelled",
+        "unknown"
+      ]
+    }
+  }
+}

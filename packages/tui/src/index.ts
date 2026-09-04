@@ -1,6 +1,7 @@
 export * from "./app.js";
 export * from "./aesthetic.js";
 export * from "./args.js";
+export * from "./commands.js";
 export * from "./prompter.js";
 export * from "./presenter.js";
 export * from "./renderer.js";

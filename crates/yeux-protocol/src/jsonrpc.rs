@@ -202,6 +202,12 @@ pub struct ServerCapabilities {
     pub write_tools: bool,
     #[serde(default)]
     pub process_tools: bool,
+    /// Human-readable fail-closed explanation when a capability is not
+    /// advertised. This is diagnostic context, never an authority grant.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_tools_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_tools_reason: Option<String>,
     #[serde(default)]
     pub sandbox: Option<String>,
 }
@@ -223,6 +229,10 @@ pub mod method {
     pub const TURN_START: &str = "turn/start";
     pub const TURN_STEER: &str = "turn/steer";
     pub const TURN_INTERRUPT: &str = "turn/interrupt";
+    /// Resolve an invocation that crossed the execution boundary and was
+    /// durably marked `unknown`. The command never executes the invocation
+    /// again; it only records explicit external evidence.
+    pub const INVOCATION_RECONCILE: &str = "invocation/reconcile";
     pub const MODEL_LIST: &str = "model/list";
     pub const SKILL_LIST: &str = "skill/list";
     pub const MCP_STATUS: &str = "mcp/status";

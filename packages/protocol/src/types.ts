@@ -117,6 +117,24 @@ export type TurnState =
   | "cancelled"
   | "failed";
 
+export type InvocationState =
+  | "proposed"
+  | "approved"
+  | "prepared"
+  | "started"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "unknown";
+
+export type InvocationReconciliationOutcome = "completed" | "failed";
+
+export interface InvocationReconciliationEvidence {
+  readonly source: string;
+  readonly summary: string;
+  readonly artifactUri?: string;
+}
+
 export interface WorkspaceIdentity {
   readonly canonical_root: string;
   readonly digest: string;
@@ -153,6 +171,25 @@ export interface Turn {
   readonly started_at: string;
   readonly ended_at?: string;
   readonly failure?: string;
+}
+
+export type ItemKind =
+  | "user_message"
+  | "assistant_message"
+  | "reasoning"
+  | "tool_call"
+  | "tool_result"
+  | "checkpoint"
+  | "diagnostic";
+
+export interface Item {
+  readonly id: string;
+  readonly thread_id: string;
+  readonly turn_id: string;
+  readonly agent_id: string;
+  readonly kind: ItemKind;
+  readonly content: JsonValue;
+  readonly created_at: string;
 }
 
 export type ContentBlock =
@@ -213,6 +250,8 @@ export interface InitializeResult {
     readonly plugins: boolean;
     readonly write_tools?: boolean;
     readonly process_tools?: boolean;
+    readonly write_tools_reason?: string;
+    readonly process_tools_reason?: string;
     readonly sandbox?: string;
   };
   readonly hostCeiling: RuntimeMode;
@@ -234,6 +273,14 @@ export interface WorkspaceStatusResult {
   readonly workspace: Workspace;
   readonly activeThreadId?: string;
 }
+
+export interface WorkspaceTrustParams {
+  readonly workspaceId: string;
+  readonly trust: WorkspaceTrust;
+  readonly identityDigest: string;
+}
+
+export type WorkspaceTrustResult = WorkspaceOpenResult;
 
 export interface ThreadStartParams {
   readonly workspaceId: string;
@@ -264,6 +311,43 @@ export interface ThreadReadResult {
 
 export type ThreadResumeResult = ThreadReadResult;
 
+export interface ThreadForkParams {
+  readonly threadId: string;
+  readonly atSeq: number;
+  readonly title?: string;
+}
+
+export type ThreadForkResult = ThreadResult;
+
+export interface ThreadListParams {
+  readonly workspaceId?: string;
+  readonly includeArchived?: boolean;
+  readonly limit?: number;
+  readonly cursor?: string;
+}
+
+export interface ThreadListResult {
+  readonly threads: readonly Thread[];
+  readonly nextCursor?: string;
+}
+
+export interface ThreadArchiveParams {
+  readonly threadId: string;
+}
+
+export type ThreadArchiveResult = ThreadResult;
+
+export interface ThreadCompactParams {
+  readonly threadId: string;
+  readonly throughSeq?: number;
+}
+
+export interface ThreadCompactResult {
+  readonly checkpointItem: Item;
+  readonly sourceStartSeq: number;
+  readonly sourceEndSeq: number;
+}
+
 export interface ThreadSubscribeParams {
   readonly threadId: string;
   readonly afterSeq?: number;
@@ -293,6 +377,28 @@ export interface TurnInterruptParams {
 
 export interface AcceptedResult {
   readonly accepted: boolean;
+}
+
+export interface TurnSteerParams {
+  readonly threadId: string;
+  readonly turnId: string;
+  readonly message: string;
+}
+
+export type TurnSteerResult = AcceptedResult;
+
+export interface InvocationReconcileParams {
+  readonly threadId: string;
+  readonly invocationId: string;
+  readonly outcome: InvocationReconciliationOutcome;
+  readonly evidence: InvocationReconciliationEvidence;
+}
+
+export interface InvocationReconcileResult {
+  readonly threadId: string;
+  readonly invocationId: string;
+  readonly state: InvocationState;
+  readonly evidence: InvocationReconciliationEvidence;
 }
 
 export interface RuntimeDiagnosticNotification {
@@ -341,6 +447,99 @@ export interface ModelDescriptor {
   readonly capabilities: JsonObject;
 }
 
+export interface SkillDescriptor {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly source: string;
+  readonly contentDigest: string;
+  readonly trusted: boolean;
+}
+
+export interface SkillListResult {
+  readonly skills: readonly SkillDescriptor[];
+}
+
+export interface McpServerStatus {
+  readonly id: string;
+  readonly transport: string;
+  readonly state: string;
+  readonly discoveredToolCount: number;
+}
+
+export interface McpStatusResult {
+  readonly servers: readonly McpServerStatus[];
+}
+
+export interface PluginDescriptor {
+  readonly id: string;
+  readonly version: string;
+  readonly contentDigest: string;
+  readonly state: string;
+  readonly capabilities: readonly string[];
+}
+
+export interface PluginListResult {
+  readonly plugins: readonly PluginDescriptor[];
+}
+
+export type JobSchedule =
+  | { readonly type: "at"; readonly at: string }
+  | { readonly type: "interval"; readonly every_seconds: number }
+  | { readonly type: "rrule"; readonly rrule: string; readonly timezone: string }
+  | { readonly type: "manual" };
+
+export interface RunBudget {
+  readonly max_tokens: number;
+  readonly max_cost_micros: number;
+  readonly max_duration_seconds: number;
+}
+
+export interface JobSpec {
+  readonly id: string;
+  readonly name: string;
+  readonly workspace_id: string;
+  readonly prompt: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly tool_ids: readonly string[];
+  readonly grant: CapabilityGrant;
+  readonly budget: RunBudget;
+  readonly schedule: JobSchedule;
+  readonly allow_reentry: boolean;
+  readonly metadata: JsonValue;
+}
+
+export type JobState =
+  | "active"
+  | "paused"
+  | "running"
+  | "waiting_for_approval"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface JobResult {
+  readonly job: JobSpec;
+  readonly state: JobState;
+}
+
+export interface JobCreateParams {
+  readonly job: JobSpec;
+}
+
+export interface JobListParams {
+  readonly workspaceId?: string;
+}
+
+export interface JobListResult {
+  readonly jobs: readonly JobResult[];
+}
+
+export interface JobIdParams {
+  readonly jobId: string;
+}
+
 export interface RuntimeCommandMap {
   readonly initialize: {
     readonly params: InitializeParams;
@@ -354,6 +553,10 @@ export interface RuntimeCommandMap {
     readonly params: WorkspaceStatusParams;
     readonly result: WorkspaceStatusResult;
   };
+  readonly "workspace/trust": {
+    readonly params: WorkspaceTrustParams;
+    readonly result: WorkspaceTrustResult;
+  };
   readonly "thread/start": {
     readonly params: ThreadStartParams;
     readonly result: ThreadResult;
@@ -362,9 +565,25 @@ export interface RuntimeCommandMap {
     readonly params: ThreadResumeParams;
     readonly result: ThreadResumeResult;
   };
+  readonly "thread/fork": {
+    readonly params: ThreadForkParams;
+    readonly result: ThreadForkResult;
+  };
   readonly "thread/read": {
     readonly params: ThreadReadParams;
     readonly result: ThreadReadResult;
+  };
+  readonly "thread/list": {
+    readonly params: ThreadListParams;
+    readonly result: ThreadListResult;
+  };
+  readonly "thread/archive": {
+    readonly params: ThreadArchiveParams;
+    readonly result: ThreadArchiveResult;
+  };
+  readonly "thread/compact": {
+    readonly params: ThreadCompactParams;
+    readonly result: ThreadCompactResult;
   };
   readonly "thread/subscribe": {
     readonly params: ThreadSubscribeParams;
@@ -378,9 +597,49 @@ export interface RuntimeCommandMap {
     readonly params: TurnInterruptParams;
     readonly result: AcceptedResult;
   };
+  readonly "turn/steer": {
+    readonly params: TurnSteerParams;
+    readonly result: TurnSteerResult;
+  };
+  readonly "invocation/reconcile": {
+    readonly params: InvocationReconcileParams;
+    readonly result: InvocationReconcileResult;
+  };
   readonly "model/list": {
     readonly params: { readonly provider?: string };
     readonly result: { readonly models: readonly ModelDescriptor[] };
+  };
+  readonly "skill/list": {
+    readonly params: Record<string, never>;
+    readonly result: SkillListResult;
+  };
+  readonly "mcp/status": {
+    readonly params: Record<string, never>;
+    readonly result: McpStatusResult;
+  };
+  readonly "plugin/list": {
+    readonly params: Record<string, never>;
+    readonly result: PluginListResult;
+  };
+  readonly "job/create": {
+    readonly params: JobCreateParams;
+    readonly result: JobResult;
+  };
+  readonly "job/list": {
+    readonly params: JobListParams;
+    readonly result: JobListResult;
+  };
+  readonly "job/pause": {
+    readonly params: JobIdParams;
+    readonly result: JobResult;
+  };
+  readonly "job/resume": {
+    readonly params: JobIdParams;
+    readonly result: JobResult;
+  };
+  readonly "job/run": {
+    readonly params: JobIdParams;
+    readonly result: JobResult;
   };
 }
 

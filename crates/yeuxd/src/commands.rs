@@ -3,22 +3,24 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use uuid::Version;
 use yeux_protocol::{
-    method, AcceptedResult, AgentId, CapabilityMode, ClientInfo, Event, EventEnvelope,
-    InitializeParams, InitializeResult, Item, ItemId, ItemKind, JobCreateParams, JobIdParams,
-    JobListParams, JobListResult, JobResult, JobState, McpServerStatus, McpStatusParams,
-    McpStatusResult, ModelDescriptor, ModelListParams, ModelListResult, PluginDescriptor,
-    PluginListParams, PluginListResult, RpcError, ServerCapabilities, SkillDescriptor,
-    SkillListParams, SkillListResult, Thread, ThreadArchiveParams, ThreadForkParams, ThreadId,
-    ThreadListParams, ThreadListResult, ThreadReadParams, ThreadReadResult, ThreadResult,
-    ThreadResumeParams, ThreadStartParams, ThreadStatus, ThreadSubscribeParams,
-    ThreadSubscribeResult, Turn, TurnId, TurnInterruptParams, TurnResult, TurnStartParams,
-    TurnState, TurnSteerParams, Workspace, WorkspaceId, WorkspaceIdentity, WorkspaceOpenParams,
-    WorkspaceOpenResult, WorkspaceStatusParams, WorkspaceStatusResult, WorkspaceTrust,
-    WorkspaceTrustParams, WorkspaceTrustResult, PROTOCOL_VERSION,
+    method, AcceptedResult, AgentId, CapabilityMode, ClientInfo, ContentBlock, Event,
+    EventEnvelope, InitializeParams, InitializeResult, InvocationReconcileParams,
+    InvocationReconcileResult, InvocationReconciliationEvidence, InvocationReconciliationOutcome,
+    InvocationState, Item, ItemId, ItemKind, JobCreateParams, JobIdParams, JobListParams,
+    JobListResult, JobResult, JobState, McpServerStatus, McpStatusParams, McpStatusResult,
+    ModelDescriptor, ModelListParams, ModelListResult, PluginDescriptor, PluginListParams,
+    PluginListResult, RpcError, ServerCapabilities, SkillDescriptor, SkillListParams,
+    SkillListResult, Thread, ThreadArchiveParams, ThreadForkParams, ThreadId, ThreadListParams,
+    ThreadListResult, ThreadReadParams, ThreadReadResult, ThreadResult, ThreadResumeParams,
+    ThreadStartParams, ThreadStatus, ThreadSubscribeParams, ThreadSubscribeResult, Turn, TurnId,
+    TurnInterruptParams, TurnResult, TurnStartParams, TurnState, TurnSteerParams, Workspace,
+    WorkspaceId, WorkspaceIdentity, WorkspaceOpenParams, WorkspaceOpenResult,
+    WorkspaceStatusParams, WorkspaceStatusResult, WorkspaceTrust, WorkspaceTrustParams,
+    WorkspaceTrustResult, PROTOCOL_VERSION,
 };
 use yeux_runtime::{
-    descriptors::DescriptorKind, NewCommandReceipt, NewLedgerEvent, RegisteredDescriptor,
-    SandboxBackend, SandboxRequirement, WorkspaceIdentitySnapshot,
+    descriptors::DescriptorKind, NewCommandReceipt, NewInvocationOutcome, NewLedgerEvent,
+    RegisteredDescriptor, SandboxBackend, SandboxRequirement, WorkspaceIdentitySnapshot,
 };
 
 use crate::runner::TurnRunSpec;
@@ -35,6 +37,9 @@ const MAX_TURN_CONTENT_BYTES: usize = 256 * 1024;
 const MAX_TURN_TEXT_BYTES: usize = 64 * 1024;
 const MAX_TURN_STEER_BYTES: usize = 64 * 1024;
 const MAX_THREAD_TITLE_BYTES: usize = 512;
+const MAX_RECONCILIATION_SUMMARY_BYTES: usize = 4 * 1024;
+const MAX_RECONCILIATION_ARTIFACT_URI_BYTES: usize = 2 * 1024;
+const OPERATOR_RECONCILIATION_SOURCE: &str = "operator_review";
 
 impl Daemon {
     pub(crate) fn dispatch(
@@ -83,6 +88,9 @@ impl Daemon {
             method::TURN_INTERRUPT => {
                 self.turn_interrupt(command_id, params_digest, decode(params)?)?
             }
+            method::INVOCATION_RECONCILE => {
+                self.invocation_reconcile(command_id, params_digest, decode(params)?)?
+            }
             method::MODEL_LIST => self.model_list(decode(params)?)?,
             method::SKILL_LIST => self.skill_list(decode(params)?)?,
             method::MCP_STATUS => self.mcp_status(decode(params)?)?,
@@ -128,24 +136,57 @@ impl Daemon {
             ));
         }
         let sandbox = SandboxBackend::detect();
-        let sandbox_ready = sandbox
+        // Keep mutation and arbitrary process capabilities independent. The
+        // structured revision-bound writer does not spawn a child and only
+        // needs filesystem/network policy evidence; a process tool additionally
+        // requires strict descendant containment. On macOS Seatbelt can satisfy
+        // the former while deliberately failing closed for the latter.
+        let write_sandbox_error = sandbox
             .ensure(SandboxRequirement {
                 filesystem_isolation: true,
-                process_isolation: true,
+                process_isolation: false,
                 network_isolation: true,
                 allow_workspace_write: true,
                 allow_network: false,
             })
-            .is_ok();
+            .err();
+        let process_sandbox_error = sandbox
+            .ensure(SandboxRequirement {
+                filesystem_isolation: true,
+                process_isolation: true,
+                network_isolation: true,
+                allow_workspace_write: false,
+                allow_network: false,
+            })
+            .err();
+        let write_sandbox_ready = write_sandbox_error.is_none();
+        let process_sandbox_ready = process_sandbox_error.is_none();
         let provider_tools_ready = self
             .inner
             .config
             .model_provider
             .as_ref()
             .is_some_and(|selection| selection.provider.capabilities().tool_calls);
-        let write_tools_ready = sandbox_ready
+        let write_tools_ready = write_sandbox_ready
             && provider_tools_ready
             && self.inner.config.host_ceiling != CapabilityMode::Observe;
+        let process_tools_ready = process_sandbox_ready
+            && provider_tools_ready
+            && self.inner.config.host_ceiling != CapabilityMode::Observe;
+        let write_tools_reason = capability_reason(
+            write_tools_ready,
+            provider_tools_ready,
+            self.inner.config.host_ceiling,
+            write_sandbox_error.as_ref().map(ToString::to_string),
+            "filesystem mutation",
+        );
+        let process_tools_reason = capability_reason(
+            process_tools_ready,
+            provider_tools_ready,
+            self.inner.config.host_ceiling,
+            process_sandbox_error.as_ref().map(ToString::to_string),
+            "process execution",
+        );
         encode(InitializeResult {
             protocol_version: PROTOCOL_VERSION,
             server_info: ClientInfo {
@@ -165,7 +206,9 @@ impl Daemon {
                 // not connected to the daemon registry/policy/ledger path.
                 plugins: false,
                 write_tools: write_tools_ready,
-                process_tools: write_tools_ready,
+                process_tools: process_tools_ready,
+                write_tools_reason,
+                process_tools_reason,
                 sandbox: Some(sandbox.name().to_owned()),
             },
             host_ceiling: self.inner.config.host_ceiling,
@@ -373,6 +416,25 @@ impl Daemon {
                 "atSeq is beyond the parent thread",
             ));
         }
+        let unresolved: Vec<String> = projection
+            .invocations
+            .values()
+            .filter(|invocation| {
+                invocation.thread_id == parent.id && invocation.state == InvocationState::Unknown
+            })
+            .map(|invocation| invocation.invocation_id.to_string())
+            .collect();
+        if !unresolved.is_empty() {
+            return Err(RpcFault::new(
+                INVALID_STATE,
+                "reconcile unknown invocation outcomes before forking a thread",
+            )
+            .with_data(json!({
+                "invocationIds": unresolved,
+                "recoverable": true,
+                "action": method::INVOCATION_RECONCILE,
+            })));
+        }
         let now = self.inner.clock.now();
         let child_id = ThreadId::from_uuid(self.next_uuid()?);
         let child = Thread {
@@ -555,6 +617,26 @@ impl Daemon {
                 INVALID_STATE,
                 format!("thread already has active turn {}", active.id),
             ));
+        }
+        let unresolved: Vec<String> = projection
+            .invocations
+            .values()
+            .filter(|invocation| {
+                invocation.thread_id == params.thread_id
+                    && invocation.state == InvocationState::Unknown
+            })
+            .map(|invocation| invocation.invocation_id.to_string())
+            .collect();
+        if !unresolved.is_empty() {
+            return Err(RpcFault::new(
+                INVALID_STATE,
+                "thread has invocation outcomes requiring reconciliation",
+            )
+            .with_data(json!({
+                "invocationIds": unresolved,
+                "recoverable": true,
+                "action": method::INVOCATION_RECONCILE,
+            })));
         }
 
         let now = self.inner.clock.now();
@@ -750,6 +832,143 @@ impl Daemon {
         // the provider sink cannot persist a residual delta in between.
         self.request_turn_cancel(params.turn_id);
         Ok(result)
+    }
+
+    /// Resolve a durable `Unknown` invocation using explicit operator
+    /// evidence. This control-plane command never calls the original tool or
+    /// provider again; it only appends a typed `tool/reconciled` event and its
+    /// model-visible ToolResult in one ledger transaction.
+    fn invocation_reconcile(
+        &self,
+        command_id: yeux_protocol::CommandId,
+        params_digest: &str,
+        params: InvocationReconcileParams,
+    ) -> Result<Value, RpcFault> {
+        validate_reconciliation_evidence(&params.evidence)?;
+        // An artifact URI is evidence only when it names a durable, verified
+        // object in this daemon's content-addressed store.  Do this check
+        // before reading the projection or allocating event IDs so a bad
+        // reference cannot partially mutate reconciliation state.
+        if let Some(uri) = params.evidence.artifact_uri.as_deref() {
+            self.inner.artifacts.verify_uri(uri).map_err(|_| {
+                RpcFault::new(
+                    RpcError::INVALID_PARAMS,
+                    "reconciliation artifact is unavailable or corrupt",
+                )
+                .with_data(json!({ "code": "artifact_invalid" }))
+            })?;
+        }
+        let projection = self.projection()?;
+        let invocation = projection
+            .invocations
+            .get(&params.invocation_id)
+            .ok_or_else(|| not_found("invocation", params.invocation_id))?;
+        if invocation.thread_id != params.thread_id {
+            return Err(RpcFault::new(
+                RpcError::INVALID_PARAMS,
+                "invocation does not belong to thread",
+            ));
+        }
+        if invocation.state != InvocationState::Unknown {
+            return Err(RpcFault::new(
+                INVALID_STATE,
+                format!(
+                    "invocation is {:?}; only unknown invocations can be reconciled",
+                    invocation.state
+                ),
+            ));
+        }
+        let turn = projection
+            .turns
+            .get(&invocation.turn_id)
+            .ok_or_else(|| not_found("turn", invocation.turn_id))?;
+        if !turn.state.is_terminal() {
+            return Err(RpcFault::new(
+                INVALID_STATE,
+                "parent turn must settle before reconciling its invocation",
+            ));
+        }
+
+        let now = self.inner.clock.now();
+        let result_content = json!({
+            "reconciled": true,
+            "outcome": params.outcome,
+            "evidence": params.evidence.clone(),
+            "execution_retried": false,
+        });
+        let item = Item {
+            id: ItemId::from_uuid(self.next_uuid()?),
+            thread_id: invocation.thread_id,
+            turn_id: invocation.turn_id,
+            agent_id: invocation.agent_id.clone(),
+            kind: ItemKind::ToolResult,
+            content: json!({
+                "content": [ContentBlock::ToolResult {
+                    call_id: invocation.call_id.clone(),
+                    content: result_content,
+                    is_error: params.outcome == InvocationReconciliationOutcome::Failed,
+                }],
+                "invocation_id": invocation.invocation_id,
+            }),
+            created_at: now,
+        };
+        let tool_result = self.new_event(
+            invocation.thread_id,
+            Some(invocation.turn_id),
+            invocation.agent_id.clone(),
+            command_id,
+            now,
+            Event::ItemAdded { item },
+        )?;
+        let terminal_state = self.new_event(
+            invocation.thread_id,
+            Some(invocation.turn_id),
+            invocation.agent_id.clone(),
+            command_id,
+            now,
+            Event::InvocationReconciled {
+                invocation_id: invocation.invocation_id,
+                outcome: params.outcome,
+                evidence: params.evidence.clone(),
+            },
+        )?;
+        let response = encode(InvocationReconcileResult {
+            thread_id: invocation.thread_id,
+            invocation_id: invocation.invocation_id,
+            state: params.outcome.state(),
+            evidence: params.evidence,
+        })?;
+        let committed = self
+            .inner
+            .ledger
+            .append_invocation_reconciliation_with_receipt(
+                NewInvocationOutcome {
+                    tool_result,
+                    terminal_state,
+                },
+                NewCommandReceipt {
+                    command_id: command_id.to_string(),
+                    method: method::INVOCATION_RECONCILE.to_owned(),
+                    params_digest: params_digest.to_owned(),
+                    response,
+                    created_at: now,
+                },
+            )
+            .map_err(|error| match error {
+                yeux_runtime::ledger::LedgerError::InvocationStateConflict { .. } => RpcFault::new(
+                    INVALID_STATE,
+                    "invocation changed before reconciliation could be committed",
+                ),
+                yeux_runtime::ledger::LedgerError::InvalidInvocationOutcome(message) => {
+                    RpcFault::new(RpcError::INVALID_PARAMS, message)
+                }
+                other => RpcFault::internal(other),
+            })?;
+        for event in committed.events {
+            let envelope = EventEnvelope::try_from(event).map_err(RpcFault::internal)?;
+            let _ = self.inner.events.send(envelope);
+        }
+        Ok(committed.response)
     }
 
     fn model_list(&self, params: ModelListParams) -> Result<Value, RpcFault> {
@@ -1166,6 +1385,28 @@ fn validate_turn_content(content: &[yeux_protocol::ContentBlock]) -> Result<(), 
     Ok(())
 }
 
+fn capability_reason(
+    ready: bool,
+    provider_tools_ready: bool,
+    host_ceiling: CapabilityMode,
+    sandbox_error: Option<String>,
+    capability: &str,
+) -> Option<String> {
+    if ready {
+        return None;
+    }
+    if !provider_tools_ready {
+        return Some("configured provider does not advertise tool calls".into());
+    }
+    if host_ceiling == CapabilityMode::Observe {
+        return Some("daemon host ceiling is observe".into());
+    }
+    if let Some(error) = sandbox_error {
+        return Some(format!("{capability} sandbox unavailable: {error}"));
+    }
+    Some(format!("{capability} is unavailable"))
+}
+
 fn validate_optional_bounded_text(
     value: Option<&str>,
     label: &str,
@@ -1176,6 +1417,62 @@ fn validate_optional_bounded_text(
             RpcError::INVALID_PARAMS,
             format!("{label} exceeds {limit}-byte limit"),
         ));
+    }
+    Ok(())
+}
+
+fn validate_reconciliation_evidence(
+    evidence: &InvocationReconciliationEvidence,
+) -> Result<(), RpcFault> {
+    // The first public reconciliation surface is deliberately operator-only.
+    // Runtime receipt lookups will get a separate authority path once they
+    // can prove the external state; accepting arbitrary client-supplied source
+    // labels would make an assertion look like machine-verified evidence.
+    if evidence.source != OPERATOR_RECONCILIATION_SOURCE {
+        return Err(RpcFault::new(
+            RpcError::INVALID_PARAMS,
+            format!("reconciliation evidence source must be {OPERATOR_RECONCILIATION_SOURCE}"),
+        ));
+    }
+    if evidence.summary.trim().is_empty() {
+        return Err(RpcFault::new(
+            RpcError::INVALID_PARAMS,
+            "reconciliation evidence summary must not be empty",
+        ));
+    }
+    if evidence.summary.len() > MAX_RECONCILIATION_SUMMARY_BYTES {
+        return Err(RpcFault::new(
+            RpcError::INVALID_PARAMS,
+            format!(
+                "reconciliation evidence summary exceeds {MAX_RECONCILIATION_SUMMARY_BYTES}-byte limit"
+            ),
+        ));
+    }
+    if evidence
+        .summary
+        .chars()
+        .any(|character| character == '\u{0000}' || character == '\u{007f}')
+    {
+        return Err(RpcFault::new(
+            RpcError::INVALID_PARAMS,
+            "reconciliation evidence summary contains a forbidden control character",
+        ));
+    }
+    if let Some(uri) = evidence.artifact_uri.as_deref() {
+        if uri.len() > MAX_RECONCILIATION_ARTIFACT_URI_BYTES {
+            return Err(RpcFault::new(
+                RpcError::INVALID_PARAMS,
+                format!(
+                    "reconciliation artifact URI exceeds {MAX_RECONCILIATION_ARTIFACT_URI_BYTES}-byte limit"
+                ),
+            ));
+        }
+        if !uri.starts_with("artifact://") {
+            return Err(RpcFault::new(
+                RpcError::INVALID_PARAMS,
+                "reconciliation artifact URI must use the artifact:// scheme",
+            ));
+        }
     }
     Ok(())
 }
@@ -1235,7 +1532,9 @@ fn string_field(descriptor: &RegisteredDescriptor, field: &str) -> Option<String
 mod tests {
     use super::*;
     use crate::server::{ConnectionState, DaemonConfig, NOT_INITIALIZED};
-    use yeux_protocol::{ClientCapabilities, ContentBlock};
+    use yeux_protocol::{
+        ClientCapabilities, ContentBlock, EffectSet, Idempotency, InvocationId, Reversibility,
+    };
 
     fn command(method_name: &str, params: Value) -> String {
         command_with_id(method_name, params, uuid::Uuid::now_v7())
@@ -1682,5 +1981,271 @@ mod tests {
         .unwrap();
         let (response, _) = daemon.handle_line(&input, &mut connection);
         assert_eq!(result(&response)["skills"], json!([]));
+    }
+
+    #[test]
+    fn invocation_reconcile_is_evidence_only_idempotent_and_unblocks_thread() {
+        let state = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let daemon =
+            Daemon::open(DaemonConfig::in_directory(state.path()).without_turn_execution())
+                .unwrap();
+        let evidence_artifact = daemon
+            .inner
+            .artifacts
+            .put(b"operator receipt: no durable change", "text/plain")
+            .unwrap();
+        let evidence_artifact_uri =
+            yeux_runtime::ArtifactStore::uri_for_digest(&evidence_artifact.digest).unwrap();
+        let mut connection = ConnectionState {
+            initialized: true,
+            ..ConnectionState::default()
+        };
+
+        let (opened, _) = daemon.handle_line(
+            &command(method::WORKSPACE_OPEN, json!({ "path": workspace.path() })),
+            &mut connection,
+        );
+        let workspace_id: WorkspaceId =
+            serde_json::from_value(opened["result"]["workspace"]["id"].clone()).unwrap();
+        let (started, _) = daemon.handle_line(
+            &command(method::THREAD_START, json!({ "workspaceId": workspace_id })),
+            &mut connection,
+        );
+        let thread_id: ThreadId =
+            serde_json::from_value(started["result"]["thread"]["id"].clone()).unwrap();
+        let (turn_started, _) = daemon.handle_line(
+            &command(
+                method::TURN_START,
+                json!({
+                    "threadId": thread_id,
+                    "content": [{"type": "text", "text": "fixture"}]
+                }),
+            ),
+            &mut connection,
+        );
+        let turn_id: TurnId =
+            serde_json::from_value(turn_started["result"]["turn"]["id"].clone()).unwrap();
+
+        let invocation_id = InvocationId::from_uuid(uuid::Uuid::now_v7());
+        let effects = EffectSet {
+            idempotency: Idempotency::NonIdempotent,
+            reversibility: Reversibility::Unknown,
+            ..EffectSet::default()
+        };
+        let effect_digest = yeux_core::digest_value(&serde_json::to_value(&effects).unwrap());
+        let proposal = daemon
+            .new_event(
+                thread_id,
+                Some(turn_id),
+                AgentId::new("root"),
+                uuid::Uuid::now_v7().into(),
+                daemon.inner.clock.now(),
+                Event::InvocationProposed {
+                    invocation_id,
+                    call_id: "fixture-call".into(),
+                    tool_id: "fixture.tool".into(),
+                    tool_version: "1".into(),
+                    normalized_arguments_digest: yeux_core::digest_value(&json!({"fixture": true})),
+                    effects: effects.clone(),
+                    effect_digest,
+                    idempotency: effects.idempotency,
+                },
+            )
+            .unwrap();
+        let approved = daemon
+            .new_event(
+                thread_id,
+                Some(turn_id),
+                AgentId::new("root"),
+                uuid::Uuid::now_v7().into(),
+                daemon.inner.clock.now(),
+                Event::InvocationStateChanged {
+                    invocation_id,
+                    from: InvocationState::Proposed,
+                    to: InvocationState::Approved,
+                    reason: None,
+                },
+            )
+            .unwrap();
+        let prepared = daemon
+            .new_event(
+                thread_id,
+                Some(turn_id),
+                AgentId::new("root"),
+                uuid::Uuid::now_v7().into(),
+                daemon.inner.clock.now(),
+                Event::InvocationStateChanged {
+                    invocation_id,
+                    from: InvocationState::Approved,
+                    to: InvocationState::Prepared,
+                    reason: None,
+                },
+            )
+            .unwrap();
+        let executing = daemon
+            .new_event(
+                thread_id,
+                Some(turn_id),
+                AgentId::new("root"),
+                uuid::Uuid::now_v7().into(),
+                daemon.inner.clock.now(),
+                Event::InvocationStateChanged {
+                    invocation_id,
+                    from: InvocationState::Prepared,
+                    to: InvocationState::Started,
+                    reason: None,
+                },
+            )
+            .unwrap();
+        let unknown = daemon
+            .new_event(
+                thread_id,
+                Some(turn_id),
+                AgentId::new("root"),
+                uuid::Uuid::now_v7().into(),
+                daemon.inner.clock.now(),
+                Event::InvocationStateChanged {
+                    invocation_id,
+                    from: InvocationState::Started,
+                    to: InvocationState::Unknown,
+                    reason: Some("fixture outcome is not observable".into()),
+                },
+            )
+            .unwrap();
+        let turn_failed = daemon
+            .new_event(
+                thread_id,
+                Some(turn_id),
+                AgentId::new("root"),
+                uuid::Uuid::now_v7().into(),
+                daemon.inner.clock.now(),
+                Event::TurnStateChanged {
+                    turn_id,
+                    from: TurnState::Accepted,
+                    to: TurnState::Failed,
+                    reason: Some("fixture requires reconciliation".into()),
+                },
+            )
+            .unwrap();
+        daemon
+            .inner
+            .ledger
+            .append_batch(vec![
+                proposal,
+                approved,
+                prepared,
+                executing,
+                unknown,
+                turn_failed,
+            ])
+            .unwrap();
+
+        let blocked = daemon.handle_line(
+            &command(
+                method::TURN_START,
+                json!({
+                    "threadId": thread_id,
+                    "content": [{"type": "text", "text": "must wait"}]
+                }),
+            ),
+            &mut connection,
+        );
+        assert_eq!(blocked.0["error"]["code"], INVALID_STATE);
+        assert_eq!(
+            blocked.0["error"]["data"]["invocationIds"][0],
+            invocation_id.to_string()
+        );
+
+        let invalid_artifact = command(
+            method::INVOCATION_RECONCILE,
+            json!({
+                "threadId": thread_id,
+                "invocationId": invocation_id,
+                "outcome": "failed",
+                "evidence": {
+                    "source": OPERATOR_RECONCILIATION_SOURCE,
+                    "summary": "receipt is not available",
+                    "artifactUri": "artifact://blake3/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+            }),
+        );
+        let (invalid_response, _) = daemon.handle_line(&invalid_artifact, &mut connection);
+        assert_eq!(invalid_response["error"]["code"], RpcError::INVALID_PARAMS);
+        assert_eq!(
+            invalid_response["error"]["data"]["code"],
+            "artifact_invalid"
+        );
+        assert_eq!(
+            daemon
+                .projection()
+                .unwrap()
+                .invocations
+                .get(&invocation_id)
+                .unwrap()
+                .state,
+            InvocationState::Unknown
+        );
+
+        let reconcile_id = uuid::Uuid::now_v7();
+        let reconcile = command_with_id(
+            method::INVOCATION_RECONCILE,
+            json!({
+                "threadId": thread_id,
+                "invocationId": invocation_id,
+                "outcome": "failed",
+                "evidence": {
+                    "source": OPERATOR_RECONCILIATION_SOURCE,
+                    "summary": "operator verified that the fixture made no durable change",
+                    "artifactUri": evidence_artifact_uri
+                }
+            }),
+            reconcile_id,
+        );
+        let (response, _) = daemon.handle_line(&reconcile, &mut connection);
+        assert_eq!(result(&response)["state"], "failed");
+        let projected = daemon
+            .projection()
+            .unwrap()
+            .invocations
+            .get(&invocation_id)
+            .cloned()
+            .unwrap();
+        assert_eq!(projected.state, InvocationState::Failed);
+        assert_eq!(
+            projected.reconciliation.unwrap().source,
+            OPERATOR_RECONCILIATION_SOURCE
+        );
+        assert_eq!(
+            result(&response)["evidence"]["artifactUri"],
+            evidence_artifact_uri
+        );
+        assert!(daemon
+            .inner
+            .ledger
+            .all_events()
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "tool/reconciled"));
+
+        let event_count = daemon.inner.ledger.all_events().unwrap().len();
+        let (replayed, _) = daemon.handle_line(&reconcile, &mut connection);
+        assert_eq!(replayed, response);
+        assert_eq!(daemon.inner.ledger.all_events().unwrap().len(), event_count);
+
+        let (next_turn, _) = daemon.handle_line(
+            &command(
+                method::TURN_START,
+                json!({
+                    "threadId": thread_id,
+                    "content": [{"type": "text", "text": "now continue"}]
+                }),
+            ),
+            &mut connection,
+        );
+        assert!(
+            next_turn.get("result").is_some(),
+            "reconciliation should unblock turns: {next_turn}"
+        );
     }
 }

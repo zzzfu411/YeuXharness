@@ -1,27 +1,27 @@
 # YeuX Harness v1 路线图
 
-状态日期：2026-09-01<br>
-当前阶段：M0 契约基线已具备主要骨架，M1 核心只读 Agent loop 已贯通；Run 3 P0/P1-A/C 执行记录已更新，副作用门槛仍未开放<br>
-当前版本：`0.1.0` 开发基线，不是 v0.1 发布版
+状态日期：2026-09-04<br>
+当前阶段：M0/M1 核心闭环已具备，M2 首版统一副作用管线与 M2.5 最小纵向 fixture 已接通并通过本地门禁；`v0.1.0-alpha.1` 通过正常 PR CI 发布为源码 Developer Preview，稳定发布治理仍待后续阶段完成。真实 wire approval、显式 workspace trust、Unix dirfd mutation、backend isolation probe/执行前 handshake、严格 process capability、行式 TUI 控制面和 evidence-only reconciliation 已落地，但多仓库任务 gate、专用 Git/checkpoint、artifact 数据面、最终名称条件 CAS、凭据后端、跨平台进程树监督与稳定发布门槛仍未完成<br>
+当前版本：`0.1.0-alpha.1` Developer Preview；源码预发布，不是稳定 v0.1 发布版
 
 路线图采用阶段门槛，而不是以“文件已经存在”判断完成。某项能力只有在 daemon 执行路径中接通、失败路径经过测试、文档与协议同步后才算交付。
 
-本次执行证据与未闭环阻断项见 [`Run 3 执行记录`](audits/2026-09-01-run-3/EXECUTION_LOG.md)。
+历史执行证据见 [`Run 3 执行记录`](audits/2026-09-01-run-3/EXECUTION_LOG.md) 和 [`Run 4 状态与计划`](audits/2026-09-03-run-4/STATUS_AND_PLAN.md)；本轮实现、验收矩阵与 residual 见 [`Run 5 执行记录`](audits/2026-09-04-run-5/EXECUTION_LOG.md)。
 
 ## 1. 当前实现快照
 
 | 区域 | 已落地 | 尚未闭环 |
 |---|---|---|
 | 仓库 | Apache-2.0、NOTICE、四 Rust crate、三个 TypeScript 包、macOS/Linux CI | 发布构建、安装器、SBOM |
-| 协议 | JSON-RPC 类型、UUIDv7 ID、版本协商、54 份稳定 schema 与 drift test | TS 自动生成与跨语言完整漂移门禁 |
-| 状态 | Workspace/Thread/Turn/Item/Job 事件、状态机、纯 projection replay | compaction、FTS、快照校验、reconciliation UI |
+| 协议 | JSON-RPC 类型、UUIDv7 ID、版本协商、56 份稳定 schema 与 drift test | TS 自动生成与跨语言完整漂移门禁 |
+| 状态 | Workspace/Thread/Turn/Item/Job 事件、状态机、纯 projection replay、Unknown evidence-only reconciliation 命令 | compaction、FTS、快照校验、reconciliation UI |
 | 存储 | SQLite WAL、追加式 events、Thread 内 seq、内容寻址 artifact | 迁移、备份、配额与 GC |
-| daemon | stdio、每用户私有 Unix socket、单写者锁、订阅/补发、跨重启命令去重、有界多轮只读 Agent loop、ToolCall/ToolResult 与 Invocation 入账 | 写入/进程统一管线、审批与完整 provider 调度 |
-| runtime | workspace revision、结构化 `list/read/search`、root/file live identity revalidation、带流/输出资源上限的 OpenAI-compatible adapter、policy、process、sandbox、artifact 原语 | 写入/进程统一工具管线、审批、`CredentialBroker` 与网络代理；dirfd/openat2 CAS 仍待 M2 |
-| TypeScript | JSON-RPC 客户端、socket 身份检查、终端安全渲染与原始 JSONL、stdio fallback、plugin host | OpenTUI、完整协议面、交互/JSONL parity、plugin OS 沙箱与 daemon 接入 |
+| daemon | stdio、每用户私有 Unix socket、单写者锁、订阅/补发、跨重启命令去重、有界多轮 Agent loop、ToolCall/ToolResult 与 Invocation 入账；M2 pipeline 已接入 mutation/process/approval/sandbox；`invocation/reconcile` 已幂等收束 Unknown；真实 wire mutation 与一条 capability-gated Git fixture | 完整 provider 凭据调度、引导式 reconciliation UI、10 仓库任务 gate、专用 Git/checkpoint |
+| runtime | workspace revision、结构化 `list/read/search`、root/file live identity revalidation、Unix root-dirfd/openat/renameat mutation、OpenAI-compatible adapter、policy、process、sandbox capability probe/handshake、artifact 原语；`CredentialBroker` seam 已存在 | POSIX 最终名称条件 CAS、跨平台进程树监督、网络代理与 artifact 输出策略 |
+| TypeScript | JSON-RPC 客户端、socket 身份检查、终端安全渲染与原始 JSONL、stdio fallback、稳定命令 map、行式 slash-command 控制面、运行中 steer/interrupt、capability reason、EOF 与 grapheme width、plugin host | OpenTUI、schema 自动生成、交互/JSONL 全状态 parity、plugin OS 沙箱与 daemon 接入 |
 | 自动化/多智能体 | 公共类型、事件和 Job 元数据状态 | scheduler、worktree 子智能体、预算与 handoff |
 
-最重要的现状限制已经从“没有工具循环”转移为“没有受保护的写入与进程闭环”：`turn/start` 在配置 OpenAI-compatible provider 后已能完成 `provider -> workspace.list/read/search -> provider -> answer`，但 `apply_patch`、process、policy/approval/sandbox 仍未接入同一 daemon 执行路径。当前代码可完成有边界的只读仓库任务，仍不能完成真实的“读、改、测、修”。
+最重要的现状限制已经从“没有编码闭环”转移为“只有一条受保护的最小闭环，还没有发布级覆盖”：`turn/start` 在配置 provider 后可完成多轮读工具任务；sandbox、workspace trust 和 host ceiling 允许时，provider 还可调用统一管线保护的 `workspace.apply_patch` 与 `process.run`。Run 5 fixture 已证明公开计划、错误 patch、失败检查、revision-bound 修复、复测和 final diff 能进入同一 ledger，但它仍是 Linux capability-gated 的单仓库 fixture。dirfd/逐组件 no-follow 已关闭路径重定向，POSIX 最终名称仍无 inode/hash 条件发布；凭据仍是 broker seam（CLI 默认 no-op），跨平台进程树监督、专用 Git/checkpoint、artifact 输出/GC、网络代理和多仓库成功率仍是发布阻断项。
 
 ## 2. M0：契约与仓库基线
 
@@ -79,10 +79,10 @@
 - [x] 未注册或未协商工具永不分派到 Shell、写入、网络或插件执行器；错误路径有稳定诊断和无副作用测试。
 - [x] 增加真实 JSON-RPC 纵向测试，覆盖 `client -> daemon -> provider -> workspace.read -> provider -> answer`。
 - [x] TypeScript 连接、JSONL 渲染和交互输入基线；人类终端输出会清理 ANSI/OSC、C0/C1 与双向文本控制字符，JSONL 保留原始协议内容。
+- [x] 行式 slash-command router、运行中 `/steer`/`/interrupt`、`/doctor` capability reason、EOF clean close 和常见 CJK/emoji grapheme width fixture。
 
 ### 完成 M1 仍需
 
-- [ ] 将凭据句柄与 `CredentialBroker` 接入 daemon provider 配置。
 - [ ] 完成 `--jsonl` 无头模式与交互 TUI 的投影一致性测试。
 - [ ] 增加会话 FTS 搜索所需的最小投影，完整记忆仍属于 M3。
 - [ ] 将只读纵向测试扩展为真实仓库任务套件，并补齐 crash/restart、replay 零外部调用和随机并发顺序门禁。
@@ -99,17 +99,23 @@
 
 目标：发布 v0.1，可在真实仓库中安全完成“读、改、测、修”。
 
-只读调用已经具备持久化 Invocation 状态，但它走的是刻意收窄的 M1 内置路径，不等于通用副作用管线已完成。已有但尚未集成的原语包括 base-hash patch、原子替换、串行 process executor、Seatbelt/bubblewrap wrapper、policy evaluator 和 artifact store。ProcessExecutor 已清空继承环境、校验目标变量，并确保目标环境不会在隔离建立前影响 sandbox launcher；它仍未接入 daemon。M2 的核心工作是把这些原语接入一条不能绕过的执行路径，且进程工具不得在该安全门槛接通前开放。
+首版副作用管线已合并：`workspace.apply_patch` 与 `process.run` 作为隐藏 adapter 注册，经过统一 policy/approval/sandbox、一次性 token、执行前重验证和 opaque permit；sandbox 不可用时不向 provider 广告。Run 5 已补一条真实 Git fixture 和 wire approval/trust 证据；M2 后半段仍需把单 fixture 提升为发布级任务套件，重点是专用 Git/checkpoint、POSIX 最终名称 CAS 残余、凭据后端注入、跨平台进程树监督、引导式 reconciliation、artifact 和 crash matrix。
 
 ### 交付物
 
-- [ ] 内置 `workspace.apply_patch`、Git diff/checkpoint 和版本冲突响应。
-- [ ] 完整调用生命周期：`proposed -> approved -> prepared -> started -> terminal`。
-- [ ] `approval/request` TUI 交互和精确 ApprovalBinding。
-- [ ] macOS Seatbelt、Linux bubblewrap/namespaces，能力不足时失败关闭。
-- [ ] 将已加固 launcher 环境边界的串行 `ProcessExecutor` 接入 daemon 统一管线，并补齐独立 stdout/stderr、超时及覆盖 `setsid`/`setpgid` 逃逸的完整进程树监督；当前 PGID 清理原语只覆盖未主动脱组的后代。
+- [x] 内置 `workspace.apply_patch` adapter（含 base revision、diff summary、capability gate 后的 descriptor-bound 发布与 revision 校验）；Git diff/checkpoint 和更完整版本冲突 UX 待补。
+- [x] 完整调用生命周期：`proposed -> approved -> prepared -> started -> terminal/unknown`，terminal ToolResult 原子入账。
+- [x] `approval/request` TUI 交互、deny 默认、inspect unified diff 和 daemon-minted 精确 ApprovalBinding。
+- [x] macOS Seatbelt、Linux bubblewrap/namespaces 能力探测；能力不足时失败关闭。
+- [x] 已加固 launcher 环境边界的串行 `ProcessExecutor` 接入 daemon 统一管线；backend isolation probe、执行前 handshake、Linux PID namespace/`--die-with-parent`、独立 stdout/stderr、超时和输出上限已接入，macOS 因无可证明 process isolation 而关闭任意进程；仍需补齐跨平台 supervisor/cgroup 证据与崩溃覆盖。
+- [ ] 将 `CredentialBroker` 从 daemon 配置注入 provider，并提供 OS keychain seam 与轮换测试。
+- [x] 为 mutation prepare→execute 传递 `FileRevisionSnapshot`，并将 device/inode/digest 纳入 runtime-only authority binding；同字节新 inode 会在 permit 前失败关闭。
+- [x] 使用 retained root dirfd、逐组件 `openat(O_NOFOLLOW)`、dirfd `O_EXCL` 临时文件和 `renameat` 完成目录级对象绑定，并重检父目录 identity；POSIX 最终名称的 inode/hash 条件 CAS 仍无法由 `renameat` 提供，hostile-writer 竞态保留为显式 residual。
+- [x] prepared/consumed token 增加 TTL 回收、容量上限和过期 fail-closed 语义。
 - [ ] artifact 引用、输出裁剪、敏感数据跨 chunk 删改和配额。
-- [ ] 将基础 Unknown marker/diagnostic 扩展为副作用工具的完整 reconciliation 流程与交互界面。
+- [x] 将基础 Unknown marker/diagnostic 扩展为 `invocation/reconcile` evidence-only 幂等命令（终态父 Turn、`operator_review` 有界证据、不重试 provider/tool）；交互界面、机器 receipt authority 和崩溃矩阵仍待完成。
+- [x] 增加最小真实 Git fixture：`read → plan → patch → approval → failed check → repair → passing check → final diff`，断言 Invocation/ToolResult/退出码/ledger 终态；Linux strict sandbox capability-gated，macOS process 明确关闭。
+- [x] 增加真实 JSON-RPC mutation fixture：identity-bound workspace trust、wire `approval/request`、一次允许、patch 发布与 terminal evidence replay。
 - [ ] 工具网络代理与私网、云 metadata、DNS rebinding 和代理绕过防护。
 
 ### v0.1 发布门槛

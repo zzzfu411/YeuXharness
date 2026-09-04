@@ -3,7 +3,7 @@ import { USAGE, parseArgs } from "./args.js";
 import { replayFixture, runTui } from "./app.js";
 import { sanitizeTerminalText } from "./terminal.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.0-alpha.1";
 
 async function main(): Promise<number> {
   let options;

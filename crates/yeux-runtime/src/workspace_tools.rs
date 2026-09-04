@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use walkdir::WalkDir;
 use yeux_protocol::{ConcurrencyClass, EffectSet, Idempotency, PathScope, Reversibility, ToolSpec};
 
-use crate::{ApplyPatchError, Workspace, WorkspaceError};
+use crate::{ApplyPatchError, FileRevisionSnapshot, Workspace, WorkspaceError};
 
 pub const WORKSPACE_LIST_TOOL_ID: &str = "workspace.list";
 pub const WORKSPACE_READ_TOOL_ID: &str = "workspace.read";
@@ -103,9 +103,10 @@ pub struct WorkspaceDiffSummary {
 
 /// An indivisible preparation result for one structured workspace mutation.
 ///
-/// The canonical arguments and concrete effects are kept together so a caller
-/// can bind both into one approval. Construction is private to this module;
-/// execution also verifies the originating workspace identity.
+/// The canonical arguments, concrete effects, and exact base-file identity are
+/// kept together so a caller can bind all of them into one approval.
+/// Construction is private to this module; execution revalidates the snapshot
+/// before publishing any bytes.
 #[derive(Clone, Serialize)]
 pub struct PreparedWorkspaceMutation {
     tool_id: String,
@@ -113,6 +114,7 @@ pub struct PreparedWorkspaceMutation {
     workspace_identity: String,
     normalized_arguments: Value,
     effects: EffectSet,
+    base_revision: FileRevisionSnapshot,
     diff_summary: WorkspaceDiffSummary,
 }
 
@@ -124,6 +126,7 @@ impl std::fmt::Debug for PreparedWorkspaceMutation {
             .field("tool_version", &self.tool_version)
             .field("workspace_identity", &self.workspace_identity)
             .field("effects", &self.effects)
+            .field("base_revision", &self.base_revision)
             .field("diff_summary", &self.diff_summary)
             .finish_non_exhaustive()
     }
@@ -148,6 +151,13 @@ impl PreparedWorkspaceMutation {
 
     pub fn effects(&self) -> &EffectSet {
         &self.effects
+    }
+
+    /// Exact file identity captured while preparing the mutation.  This is
+    /// authority evidence, not a capability; callers must revalidate it
+    /// immediately before publishing bytes.
+    pub fn base_revision(&self) -> &FileRevisionSnapshot {
+        &self.base_revision
     }
 
     pub fn diff_summary(&self) -> &WorkspaceDiffSummary {
@@ -544,6 +554,7 @@ impl WorkspaceToolError {
                 ApplyPatchError::Io(_) => "workspace_io",
                 ApplyPatchError::StaleRevision { .. } => "workspace_stale_revision",
                 ApplyPatchError::Persist(_) => "workspace_publish_failed",
+                ApplyPatchError::DurabilityUncertain { .. } => "workspace_durability_unknown",
             },
             Self::InvalidPathEncoding(_) => "workspace_path_not_utf8",
             Self::FileCountLimit { .. } => "workspace_file_count_limit",
@@ -710,9 +721,10 @@ impl WorkspaceTools {
                 validate_base_revision(tool_id, &arguments.base_revision)?;
                 validate_replacement_size(arguments.replacement.as_bytes(), self.limits)?;
 
-                let before = self
-                    .workspace
-                    .read_resolved_limited(&arguments.path, self.limits.max_file_bytes)?;
+                let (before, base_revision) = self.workspace.read_resolved_limited_with_snapshot(
+                    &arguments.path,
+                    self.limits.max_file_bytes,
+                )?;
                 if before.revision != arguments.base_revision {
                     return Err(ApplyPatchError::StaleRevision {
                         path: before.relative_path,
@@ -741,6 +753,7 @@ impl WorkspaceTools {
                     workspace_identity: self.workspace.identity().to_owned(),
                     normalized_arguments,
                     effects,
+                    base_revision,
                     diff_summary,
                 })
             }
@@ -754,8 +767,7 @@ impl WorkspaceTools {
     ///
     /// Callers must persist and authorize the plan's normalized arguments and
     /// effects before calling this method. Direct mutation execution is not
-    /// exposed, keeping the current read-only runner incapable of bypassing the
-    /// future policy/approval pipeline.
+    /// exposed, keeping callers inside the daemon policy/approval pipeline.
     pub fn execute_prepared_mutation(
         &self,
         prepared: &PreparedWorkspaceMutation,
@@ -780,6 +792,38 @@ impl WorkspaceTools {
         )?;
         validate_base_revision(WORKSPACE_APPLY_PATCH_TOOL_ID, &arguments.base_revision)?;
         validate_replacement_size(arguments.replacement.as_bytes(), self.limits)?;
+
+        let actual_revision = self
+            .workspace
+            .revision_snapshot(&prepared.base_revision.relative_path)?;
+        if actual_revision.device != prepared.base_revision.device
+            || actual_revision.inode != prepared.base_revision.inode
+        {
+            return Err(WorkspaceError::FileIdentityChanged {
+                path: prepared.base_revision.relative_path.clone(),
+                expected_device: prepared.base_revision.device,
+                expected_inode: prepared.base_revision.inode,
+                actual_device: actual_revision.device,
+                actual_inode: actual_revision.inode,
+            }
+            .into());
+        }
+        if actual_revision.revision != prepared.base_revision.revision {
+            return Err(ApplyPatchError::StaleRevision {
+                path: prepared.base_revision.relative_path.clone(),
+                expected: prepared.base_revision.revision.clone(),
+                actual: actual_revision.revision,
+            }
+            .into());
+        }
+        if actual_revision.byte_length != prepared.base_revision.byte_length {
+            return Err(ApplyPatchError::StaleRevision {
+                path: prepared.base_revision.relative_path.clone(),
+                expected: prepared.base_revision.revision.clone(),
+                actual: actual_revision.revision,
+            }
+            .into());
+        }
 
         let before = self
             .workspace
@@ -1992,6 +2036,36 @@ mod tests {
             fs::read_to_string(directory.path().join("src/hello.txt")).unwrap(),
             replacement
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepared_patch_rejects_same_byte_inode_replacement() {
+        let (directory, tools) = executor(generous_test_limits());
+        let path = directory.path().join("hello.txt");
+        fs::write(&path, b"before\n").unwrap();
+        let base = blake3::hash(b"before\n").to_hex().to_string();
+        let prepared = tools
+            .prepare_mutation(
+                WORKSPACE_APPLY_PATCH_TOOL_ID,
+                &json!({
+                    "path": "hello.txt",
+                    "base_revision": base,
+                    "replacement": "after\n"
+                }),
+            )
+            .unwrap();
+
+        let replacement = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        fs::write(replacement.path(), b"before\n").unwrap();
+        fs::rename(replacement.path(), &path).unwrap();
+
+        let error = tools.execute_prepared_mutation(&prepared).unwrap_err();
+        assert!(matches!(
+            error,
+            WorkspaceToolError::Workspace(WorkspaceError::FileIdentityChanged { .. })
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"before\n");
     }
 
     #[test]
