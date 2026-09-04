@@ -1,10 +1,76 @@
 # YeuX Harness
 
 > 安全、可重放、可解释的本地混合智能体平台。
+>
+> 纸本工作台，仪器只取密度。
+
+<p align="center">
+  <img src="assets/brand/yeux-fish-doodle-fallback.svg" alt="YeuX 鱼仔涂鸦" width="220">
+</p>
 
 YeuX Harness 面向个人高级用户，采用 Rust 权威运行时和 TypeScript 终端界面。它将模型输出、仓库内容、工具、MCP 与插件都视为不可信输入，并用事件账本、能力交集、精确审批和操作系统沙箱约束副作用。
 
 项目采用 Apache-2.0 许可证，首发目标平台为 macOS 和 Linux。
+
+**当前版本是 `v0.1.0-alpha.1` Developer Preview。** 产品面是 TypeScript 终端客户端 `yeux`（`0.1.0-alpha.1`）通过 Unix socket / stdio 连接 Rust daemon `yeuxd`（`0.1.0-alpha.1`）。默认主题是 Paper（`#D8D3CC` 纸面、`#8C3A2C` 朱印、`#2A2733` 夜墨）。打开会话后的默认纸面是安静的：只画 Session Bar、按 `seq` 排列的时间轨，以及 `yeux ›`。`/mode` 之后 Session Bar 必须跟着有效权限刷新——`OBSERVE` 不得继续广告 `MODE BUILD`。活的 `model/event` `text_delta` 会以打字机走上纸面（拉丁 18ms、CJK 24ms、单段最多 600ms，石墨插入符 `│`）。朱红 Approval Gate 默认 DENY，`[i]` 才打开 Inspector / unified diff。
+
+下面的截图来自 Linux 上真实运行的 `yeux` + `yeuxd`（main 在 PR #7 / `7ef4bd8d` 之后），以及 in-tree presenter fixtures；不是效果图。打字机与模型行走的是本机 OpenAI-compatible provider，不是伪造 TUI。审批门、inspect diff 和 unknown→failed 时间轨来自 `yeux replay` 的 inert fixture（不启动 provider、不写仓库）。普通 TTY 不嵌入鱼仔位图；本仓库的品牌回退是 [`assets/brand/yeux-fish-doodle-fallback.svg`](assets/brand/yeux-fish-doodle-fallback.svg)。设计说明见 [设计系统 / Paper Signal](docs/design/README.md)。
+
+## 产品界面
+
+### Quiet default
+
+配置了 provider 之后，`yeux` 连上 `yeuxd` 只画 Session Bar（`CWD` / `THREAD` / `MODE` / `MODEL`，以及 trust 与 transport）和 `yeux ›`。默认 mode 是 `OBSERVE`。纸面上没有 Inspector。
+
+![Quiet default：Session Bar 与 yeux ›，MODE OBSERVE](docs/screenshots/yeux-quiet-default.png)
+
+### `/mode` 刷新 Session Bar
+
+`/mode build` 在 sandbox、write tools 和 workspace trust 都就绪时，把有效 mode 收成 `build`，并立刻重画 Session Bar。`/mode observe` 必须把 Bar 收回到 `MODE OBSERVE`，不能留下上一轮的 `MODE BUILD`。
+
+![`/mode build` 后 Session Bar 显示 MODE BUILD](docs/screenshots/yeux-mode-build.png)
+
+![`/mode observe` 后 Session Bar 回到 MODE OBSERVE](docs/screenshots/yeux-mode-observe.png)
+
+### 活墨打字机
+
+现场 `text_delta` 沿时间轨走字，插入符是静止的石墨 `│`。这一张拍在墨迹走到一半时。
+
+![活的 STREAMING 行与石墨插入符](docs/screenshots/yeux-typewriter.png)
+
+走完之后仍是安静纸面：完整模型行、回合 `COMPLETED`，然后回到 `yeux ›`。Inspector 仍然不出现。
+
+![走完的模型行与回到 yeux ›](docs/screenshots/yeux-model-ink.png)
+
+### `/help` 与 `/doctor`
+
+交互命令是确定性路由，不会被当成模型提示。`/help` 列出 `/model` `/doctor` `/context` `/plan` `/resume` `/compact` `/interrupt` `/steer` `/reconcile` `/mode` `/threads` `/fork` `/exit`。`/doctor` 打印 transport、sandbox、host ceiling 和 write/process 工具是否广告。
+
+![交互 /help](docs/screenshots/yeux-slash-help.png)
+
+![`/doctor` 能力诊断](docs/screenshots/yeux-doctor.png)
+
+### 朱红 Approval Gate
+
+朱印门来自 presenter fixture replay：`yeux replay packages/tui/fixtures/paper-approval-gate.jsonl` 把 `tool/proposed` 送进双线审批框，默认 DENY。Replay 立即倒完，没有打字机。真实 daemon 的 `approval/request` 走同一套门框。
+
+![朱红双线 Approval Gate，默认 DENY](docs/screenshots/yeux-approval-gate.png)
+
+`[i]` 打开 `INSPECT · UNIFIED DIFF`（或规范化参数）。关闭的门框保持关闭。这一张来自 `paper-m2-apply-diff.jsonl`。
+
+![关闭的门上按 i 看到 UNIFIED DIFF](docs/screenshots/yeux-inspect-diff.png)
+
+### Replay 时间轨
+
+`packages/tui/fixtures/paper-unknown-failed.jsonl` 是一条 inert 事件流（不启动 daemon、不调用 provider）：`UNKNOWN · RECONCILIATION REQUIRED` 会留在轨上，随后 Turn 以 `FAILED` 收束。
+
+![Unknown 保持可见的失败 Turn](docs/screenshots/yeux-unknown-failed.png)
+
+### 命令行帮助
+
+`yeux --help` 列出交互会话、`run`、`reconcile`、`replay` 与 `--mode` / `--ascii`。客户端版本是 `0.1.0-alpha.1`。
+
+![yeux --help](docs/screenshots/yeux-help.png)
 
 ## 当前状态
 
@@ -126,6 +192,14 @@ pnpm build
 
 ```bash
 cargo run -p yeuxd -- --stdio --state-dir /tmp/yeux-dev
+```
+
+也可以先编译 daemon，再打开纸本 TUI。未配置 `--provider-base-url` 和 `--model` 时仍可进入交互会话，使用 `/help`、`/doctor` 和 `/mode`；普通提示会以 `provider_unconfigured` 失败，而不会假装有模型回复。
+
+```bash
+cargo build -p yeuxd
+pnpm --filter @yeux/protocol build && pnpm --filter @yeux/tui build
+pnpm --filter @yeux/tui start -- --daemon target/debug/yeuxd
 ```
 
 stdio 与 Unix socket 都使用一行一个 JSON-RPC 消息的 UTF-8 JSON。当前终端客户端源码包名为 `@yeux/tui`，可执行命令名为 `yeux`；最终发行包会将它与匹配版本的 daemon 和 plugin host 一起打包，不依赖用户预装 Node/Bun。
