@@ -1,7 +1,7 @@
 # Run 4：项目与 GitHub 状态审计及执行计划
 
-审计日期：2026-09-03（Asia/Shanghai）  
-审计范围：本地工作区、`origin/main`、GitHub Actions、开放 Pull Request、发布保护设置  
+审计日期：2026-09-03（Asia/Shanghai）<br>
+审计范围：本地工作区、`origin/main`、GitHub Actions、开放 Pull Request、发布保护设置<br>
 执行目标：在不改变历史审计记录的前提下，确认 M2 合并后的真实能力，修正文档漂移，并为下一阶段建立可验收计划。
 
 > 历史说明：第 1–6 节记录审计启动时（基于 `51c631c`）的初始快照与计划；
