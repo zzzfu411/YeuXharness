@@ -1,10 +1,60 @@
 # YeuX Harness
 
 > 安全、可重放、可解释的本地混合智能体平台。
+>
+> 纸本工作台，仪器只取密度。
+
+<p align="center">
+  <img src="assets/brand/yeux-fish-doodle-fallback.svg" alt="YeuX 鱼仔涂鸦" width="220">
+</p>
 
 YeuX Harness 面向个人高级用户，采用 Rust 权威运行时和 TypeScript 终端界面。它将模型输出、仓库内容、工具、MCP 与插件都视为不可信输入，并用事件账本、能力交集、精确审批和操作系统沙箱约束副作用。
 
 项目采用 Apache-2.0 许可证，首发目标平台为 macOS 和 Linux。
+
+**这是 v0.1 工程基线：只读 Agent loop 已贯通，但还不是可完成真实“读、改、测、修”的发布版。** 当前产品面是 TypeScript 终端客户端 `yeux` 通过 Unix socket / stdio 连接 Rust daemon `yeuxd`。默认主题是 Paper（`#D8D3CC` 纸面、`#8C3A2C` 朱印、`#2A2733` 夜墨）。
+
+打开会话后的默认纸面是安静的：只画 Session Bar、按 `seq` 排列的时间轨，以及 `yeux ›`。Inspector（`INSPECTOR` / `POLICY` / `RECENT EVENTS`）不再出现在启动或回合结束后；要看仪器，在关闭的朱红 Approval Gate 上按 `[i]`。活的 `model/event` `text_delta` 会以打字机走上纸面（拉丁 18ms、CJK 24ms、单段最多 600ms，石墨插入符 `│`）；`yeux replay`、`--jsonl`、`--plain`、`NO_COLOR` 和减少动态效果会一次倒完，没有走字。下面的截图来自 Linux 上真实运行的客户端和 in-tree presenter fixtures，不是效果图。未配置 `--provider-base-url` 和 `--model` 时，客户端在打印 Session Bar 与 `provider_unconfigured` 后退出，**不会进入 `yeux ›`**。普通 TTY 不嵌入鱼仔位图；本仓库的品牌回退是 [`assets/brand/yeux-fish-doodle-fallback.svg`](assets/brand/yeux-fish-doodle-fallback.svg)。设计说明见 [设计系统 / Paper Signal](docs/design/README.md)。
+
+## 产品界面
+
+### Quiet default
+
+配置了 provider 之后，`yeux` 连上 `yeuxd` 只画 Session Bar（`CWD` / `THREAD` / `MODE` / `MODEL`，以及 trust 与 transport）和 `yeux ›`。纸面上没有 Inspector。
+
+![Quiet default：Session Bar 与 yeux ›，没有 Inspector](docs/screenshots/yeux-quiet-default.png)
+
+### 活墨打字机
+
+现场 `text_delta` 沿时间轨走字，插入符是静止的石墨 `│`。这一张拍在墨迹走到一半时。
+
+![活的 STREAMING 行与石墨插入符](docs/screenshots/yeux-typewriter.png)
+
+走完之后仍是安静纸面：完整模型行、回合 `COMPLETED`，然后回到 `yeux ›`。Inspector 仍然不出现。
+
+![走完的模型行与回到 yeux ›](docs/screenshots/yeux-model-ink.png)
+
+### 朱红 Approval Gate
+
+写入管线仍未打开。朱印门来自 presenter fixture replay，而不是一次真实写操作：`yeux replay packages/tui/fixtures/paper-approval-gate.jsonl` 把 `tool/proposed` 送进双线审批框，默认 DENY。Replay 立即倒完，没有打字机。
+
+![朱红双线 Approval Gate](docs/screenshots/yeux-approval-gate.png)
+
+`[i]` 打开 `INSPECT · UNIFIED DIFF`（或规范化参数）。关闭的门框保持关闭。这一张来自 `paper-m2-apply-diff.jsonl`。
+
+![关闭的门上按 i 看到 UNIFIED DIFF](docs/screenshots/yeux-inspect-diff.png)
+
+### Replay 时间轨
+
+`packages/tui/fixtures/paper-unknown-failed.jsonl` 是一条 inert 事件流（不启动 daemon、不调用 provider）：`UNKNOWN · RECONCILIATION REQUIRED` 会留在轨上，随后 Turn 以 `FAILED` 收束。
+
+![Unknown 保持可见的失败 Turn](docs/screenshots/yeux-unknown-failed.png)
+
+### 命令行帮助
+
+`yeux --help` 列出交互会话、`run`、`replay` 与 `--ascii`。
+
+![yeux --help](docs/screenshots/yeux-help.png)
 
 ## 当前状态
 
