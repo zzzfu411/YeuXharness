@@ -310,6 +310,12 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
               plan,
               effectiveModeFor,
               connection.kind,
+              {
+                cwd: options.cwd,
+                model,
+                writeReady,
+                sandboxNamed,
+              },
             );
             if (handled.threadId !== undefined) threadId = handled.threadId;
             if (handled.requestedMode !== undefined) requestedMode = handled.requestedMode;
@@ -343,6 +349,10 @@ export async function runTui(options: TuiOptions): Promise<TuiRunResult> {
           requestedMode,
           effectiveModeFor,
           transport: connection.kind,
+          cwd: options.cwd,
+          model,
+          writeReady,
+          sandboxNamed,
         });
         requestedMode = active.requestedMode;
         await renderer.flush();
@@ -700,6 +710,31 @@ interface ActiveTurnHandle {
   readonly completion: Promise<EventEnvelope>;
 }
 
+
+function renderEffectiveSessionBar(input: {
+  readonly renderer: EventRenderer;
+  readonly session: RuntimeSession;
+  readonly cwd: string;
+  readonly threadId: string;
+  readonly mode: RuntimeMode;
+  readonly model: string;
+  readonly transport: string;
+  readonly writeReady: boolean;
+  readonly sandboxNamed: boolean;
+}): void {
+  const writeEnabled = input.mode !== "observe" && input.writeReady;
+  input.renderer.renderSessionBar({
+    cwd: input.session.workspaceRoot ?? input.cwd,
+    thread: input.threadId,
+    mode: input.mode,
+    model: input.model,
+    ...(input.session.workspaceTrust === undefined ? {} : { trust: input.session.workspaceTrust }),
+    transport: input.transport,
+    writeGrant: writeEnabled ? [input.session.workspaceRoot ?? input.cwd] : [],
+    sandbox: input.sandboxNamed,
+  });
+}
+
 async function executeInteractiveCommand(
   session: RuntimeSession,
   renderer: EventRenderer,
@@ -708,6 +743,12 @@ async function executeInteractiveCommand(
   plan: string[],
   effectiveModeFor: (mode: RuntimeMode) => RuntimeMode,
   transport: string,
+  sessionBar: {
+    readonly cwd: string;
+    readonly model: string;
+    readonly writeReady: boolean;
+    readonly sandboxNamed: boolean;
+  },
 ): Promise<InteractiveCommandResult> {
   switch (command.kind) {
     case "help":
@@ -783,6 +824,19 @@ async function executeInteractiveCommand(
           recoverable: true,
         });
       }
+      // Session Bar must track effective authority: dropping to observe cannot
+      // keep advertising MODE BUILD/OPERATE from an earlier write-ready state.
+      renderEffectiveSessionBar({
+        renderer,
+        session,
+        cwd: sessionBar.cwd,
+        threadId,
+        mode: effective,
+        model: sessionBar.model,
+        transport,
+        writeReady: sessionBar.writeReady,
+        sandboxNamed: sessionBar.sandboxNamed,
+      });
       return { requestedMode: command.mode };
     }
     case "threads": {
@@ -830,6 +884,10 @@ interface InteractiveTurnOptions {
   readonly requestedMode: RuntimeMode;
   readonly effectiveModeFor: (mode: RuntimeMode) => RuntimeMode;
   readonly transport: string;
+  readonly cwd: string;
+  readonly model: string;
+  readonly writeReady: boolean;
+  readonly sandboxNamed: boolean;
 }
 
 interface InteractiveTurnResult {
@@ -919,6 +977,12 @@ async function runInteractiveTurn(options: InteractiveTurnOptions): Promise<Inte
         options.plan,
         options.effectiveModeFor,
         options.transport,
+        {
+          cwd: options.cwd,
+          model: options.model,
+          writeReady: options.writeReady,
+          sandboxNamed: options.sandboxNamed,
+        },
       );
       if (handled.requestedMode !== undefined) requestedMode = handled.requestedMode;
       if (command.kind === "interrupt") {
